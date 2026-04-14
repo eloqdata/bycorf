@@ -1,0 +1,11 @@
+Bycorf (formerly Celer)
+Copyright (C) 2026 EloqData Inc.
+
+EloqData-authored code and accompanying materials are licensed under the
+Apache License, Version 2.0. See LICENSE for the complete terms.
+
+Third-party components retain their original copyright notices and licenses.
+The Apache-2.0 license for this project does not replace those terms. These
+components include the contents of third_party/, the concurrentqueue.h header
+in the runtime include directory, and the FreeBSD-derived printf.c file and
+FreeBSD patches. Refer to the notices in those files and dependencies.
