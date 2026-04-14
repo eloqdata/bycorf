@@ -1,0 +1,122 @@
+/*
+ * Copyright (C) 2026 EloqData Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef CELER_RUNTIME_TASK_H_
+#define CELER_RUNTIME_TASK_H_
+
+#include <coroutine>
+#include <exception>
+#include <optional>
+#include <utility>
+
+#include "celer/base/status.h"
+
+namespace celer {
+
+template <typename T>
+class Task {
+ public:
+  struct promise_type {
+    std::optional<T> value_;
+    std::coroutine_handle<> continuation_{};
+
+    Task get_return_object() noexcept {
+      return Task(std::coroutine_handle<promise_type>::from_promise(*this));
+    }
+
+    std::suspend_always initial_suspend() noexcept { return {}; }
+    auto final_suspend() noexcept {
+      struct FinalAwaiter {
+        bool await_ready() const noexcept { return false; }
+
+        std::coroutine_handle<> await_suspend(handle_type handle) noexcept {
+          auto continuation = handle.promise().continuation_;
+          if (continuation) {
+            return continuation;
+          }
+          return std::noop_coroutine();
+        }
+
+        void await_resume() noexcept {}
+      };
+      return FinalAwaiter{};
+    }
+
+    void return_value(T value) noexcept { value_ = std::move(value); }
+
+    void unhandled_exception() noexcept { std::terminate(); }
+  };
+
+  using handle_type = std::coroutine_handle<promise_type>;
+
+  Task() = default;
+  explicit Task(handle_type handle) : handle_(handle) {}
+
+  Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+  Task& operator=(Task&& other) noexcept {
+    if (this != &other) {
+      if (handle_) {
+        handle_.destroy();
+      }
+      handle_ = std::exchange(other.handle_, {});
+    }
+    return *this;
+  }
+
+  Task(const Task&) = delete;
+  Task& operator=(const Task&) = delete;
+
+  ~Task() {
+    if (handle_) {
+      handle_.destroy();
+    }
+  }
+
+  bool valid() const noexcept { return static_cast<bool>(handle_); }
+  bool done() const noexcept { return !handle_ || handle_.done(); }
+
+  struct Awaiter {
+    handle_type handle;
+
+    bool await_ready() const noexcept { return !handle || handle.done(); }
+
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting) noexcept {
+      handle.promise().continuation_ = awaiting;
+      return handle;
+    }
+
+    T await_resume() {
+      T value = std::move(*handle.promise().value_);
+      if (handle) {
+        handle.destroy();
+        handle = {};
+      }
+      return value;
+    }
+  };
+
+  auto operator co_await() && noexcept { return Awaiter{std::exchange(handle_, {})}; }
+
+  T TakeResult() && { return std::move(*handle_.promise().value_); }
+  handle_type ReleaseHandle() && noexcept { return std::exchange(handle_, {}); }
+
+ private:
+  handle_type handle_{};
+};
+
+}  // namespace celer
+
+#endif  // CELER_RUNTIME_TASK_H_
