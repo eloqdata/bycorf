@@ -20,7 +20,6 @@
 #include <fcntl.h>
 #include <liburing.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -59,51 +58,128 @@ Status ErrnoToStatus(int err, const char* operation) {
 
 }  // namespace
 
-class PollReadableOperation final : public OperationBase {
+Status ListenerAcceptState::Arm() {
+  if (armed_) {
+    return Status::Ok();
+  }
+  if (listener_ == nullptr || listener_->fd_ < 0) {
+    return Status(StatusCode::kFailedPrecondition, "listener is closed");
+  }
+  if (listener_->worker_ == nullptr) {
+    return Status(StatusCode::kInvalidArgument, "listener is not bound");
+  }
+
+  auto* sqe = listener_->worker_->AcquireSqe();
+  if (sqe == nullptr) {
+    return Status(StatusCode::kUnavailable, "failed to acquire accept sqe");
+  }
+
+  io_uring_prep_multishot_accept(sqe, listener_->fd_, nullptr, nullptr,
+                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
+  io_uring_sqe_set_data(sqe, this);
+  armed_ = true;
+  return Status::Ok();
+}
+
+StatusOr<int> ListenerAcceptState::ConsumeAcceptedFd() {
+  if (!accepted_fds_.empty()) {
+    const int fd = accepted_fds_.front();
+    accepted_fds_.pop_front();
+    return fd;
+  }
+
+  if (!last_error_.ok()) {
+    Status status = last_error_;
+    last_error_ = Status::Ok();
+    return status;
+  }
+
+  return Status(StatusCode::kUnavailable, "no accepted connection available");
+}
+
+void ListenerAcceptState::Complete(Worker& worker, int result, unsigned flags) {
+  if (result >= 0) {
+    accepted_fds_.push_back(result);
+  } else if (result != -ECANCELED && result != -EBADF) {
+    last_error_ = ErrnoToStatus(-result, "accept failed");
+  } else if (listener_ != nullptr && listener_->closed_) {
+    last_error_ = Status(StatusCode::kFailedPrecondition, "listener is closed");
+  }
+
+  if ((flags & IORING_CQE_F_MORE) == 0) {
+    armed_ = false;
+    if (listener_ != nullptr && !listener_->closed_) {
+      auto status = Arm();
+      if (!status.ok()) {
+        last_error_ = status;
+      }
+    }
+  }
+
+  if (waiter_) {
+    auto waiter = waiter_;
+    waiter_ = {};
+    worker.Enqueue(waiter);
+  }
+}
+
+void ListenerAcceptState::CloseAllAcceptedFds() noexcept {
+  while (!accepted_fds_.empty()) {
+    ::close(accepted_fds_.front());
+    accepted_fds_.pop_front();
+  }
+}
+
+class AcceptAwaitable final {
  public:
-  explicit PollReadableOperation(TcpListener* listener) : listener_(listener) {}
+  explicit AcceptAwaitable(TcpListener* listener) : listener_(listener) {}
 
   bool await_ready() const noexcept { return false; }
 
   bool await_suspend(std::coroutine_handle<> awaiting) {
-    awaiting_ = awaiting;
-
-    if (listener_ == nullptr || listener_->fd_ < 0) {
-      result_ = -EBADF;
+    if (listener_ == nullptr) {
+      immediate_status_ = Status(StatusCode::kInvalidArgument, "listener is not bound");
+      return false;
+    }
+    if (listener_->fd_ < 0 || listener_->closed_) {
+      immediate_status_ = Status(StatusCode::kFailedPrecondition, "listener is closed");
       return false;
     }
     if (listener_->worker_ == nullptr) {
-      result_ = -EINVAL;
+      immediate_status_ = Status(StatusCode::kInvalidArgument, "listener is not bound");
       return false;
     }
 
-    auto* sqe = listener_->worker_->AcquireSqe();
-    if (sqe == nullptr) {
-      result_ = -EAGAIN;
+    auto& state = listener_->accept_state_;
+    if (state.HasAcceptedFd() || state.HasError()) {
+      return false;
+    }
+    if (state.HasWaiter()) {
+      immediate_status_ =
+          Status(StatusCode::kFailedPrecondition, "concurrent accept is not allowed");
       return false;
     }
 
-    io_uring_prep_poll_add(sqe, listener_->fd_, POLLIN);
-    io_uring_sqe_set_data(sqe, this);
+    const auto arm_status = state.Arm();
+    if (!arm_status.ok()) {
+      immediate_status_ = arm_status;
+      return false;
+    }
+
+    state.SetWaiter(awaiting);
     return true;
   }
 
-  Status await_resume() {
-    if (result_ < 0) {
-      return ErrnoToStatus(-result_, "listener poll failed");
+  StatusOr<int> await_resume() {
+    if (immediate_status_.has_value()) {
+      return *immediate_status_;
     }
-    return Status::Ok();
-  }
-
-  void Complete(Worker& worker, int result, unsigned flags) override {
-    (void)flags;
-    result_ = result;
-    worker.Enqueue(awaiting_);
+    return listener_->accept_state_.ConsumeAcceptedFd();
   }
 
  private:
   TcpListener* listener_ = nullptr;
-  int result_ = -EINVAL;
+  std::optional<Status> immediate_status_;
 };
 
 bool TcpListener::IsOpen() const noexcept {
@@ -175,37 +251,23 @@ Status TcpListener::Bind(Worker* worker, std::string_view ip, std::uint16_t port
 }
 
 Task<StatusOr<Connection*>> TcpListener::Accept() {
-  while (true) {
-    sockaddr_storage addr{};
-    socklen_t addr_len = sizeof(addr);
-    const int accepted_fd =
-        ::accept4(fd_, reinterpret_cast<sockaddr*>(&addr), &addr_len,
-                  SOCK_NONBLOCK | SOCK_CLOEXEC);
-    if (accepted_fd >= 0) {
-      Connection connection;
-      connection.worker = worker_;
-      connection.file.fd = accepted_fd;
-      connection.recv_mode = worker_->recv_mode();
-      connection.closed = false;
-      connection.generation = next_generation_++;
-      Connection* registered = worker_->AddConnection(std::move(connection));
-      if (registered == nullptr) {
-        ::close(accepted_fd);
-        co_return Status(StatusCode::kInternal,
-                         "failed to register accepted connection");
-      }
-      co_return registered;
-    }
-
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      co_return ErrnoToStatus(errno, "accept failed");
-    }
-
-    auto ready = co_await PollReadableOperation(this);
-    if (!ready.ok()) {
-      co_return ready;
-    }
+  auto accepted = co_await AcceptAwaitable(this);
+  if (!accepted.ok()) {
+    co_return accepted.status();
   }
+
+  Connection connection;
+  connection.worker = worker_;
+  connection.file.fd = *accepted;
+  connection.recv_mode = worker_->recv_mode();
+  connection.closed = false;
+  connection.generation = next_generation_++;
+  Connection* registered = worker_->AddConnection(std::move(connection));
+  if (registered == nullptr) {
+    ::close(*accepted);
+    co_return Status(StatusCode::kInternal, "failed to register accepted connection");
+  }
+  co_return registered;
 }
 
 Status TcpListener::Close() noexcept {
@@ -216,6 +278,7 @@ Status TcpListener::Close() noexcept {
   closed_ = true;
   const int fd = fd_;
   fd_ = -1;
+  accept_state_.CloseAllAcceptedFds();
   if (fd >= 0 && ::close(fd) != 0) {
     return ErrnoToStatus(errno, "close listener failed");
   }

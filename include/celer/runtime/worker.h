@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <deque>
 #include <memory>
+#include <atomic>
 #include <span>
 #include <utility>
 #include <unordered_map>
@@ -62,7 +63,8 @@ class Worker {
   bool RunOnce(bool wait_for_completion);
   void Spawn(Task<Status> task);
   void Run();
-  void Stop() noexcept { stopping_ = true; }
+  void RequestStop() noexcept;
+  void Stop() noexcept { RequestStop(); }
   RecvMode recv_mode() const noexcept { return options_.recv_mode; }
   Status EnsureRecvArmed(Connection* connection);
   Connection* AddConnection(Connection connection);
@@ -91,19 +93,23 @@ class Worker {
   void ReclaimConnections();
   void DiscardReceivedBuffers(Connection* connection);
   bool InitMultishotRecv();
+  bool ArmWakePoll();
+  void HandleWakePoll();
   void HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe);
   void RecycleMultishotBuffer(std::uint16_t buffer_id);
   void WakeReader(Connection* connection);
 
   io_uring ring_{};
   bool initialized_ = false;
-  bool stopping_ = false;
+  std::atomic<bool> stopping_{false};
   WorkerOptions options_{};
   std::deque<ReadyTask> ready_;
   std::unordered_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
   std::vector<std::uint64_t> retired_connection_ids_;
   std::uint64_t next_connection_id_ = 1;
   MultishotBufferRing multishot_ring_{};
+  int wake_event_fd_ = -1;
+  bool wake_poll_armed_ = false;
 };
 
 }  // namespace celer

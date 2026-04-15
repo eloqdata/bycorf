@@ -16,13 +16,18 @@
 
 #include "celer/runtime/worker.h"
 
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include <liburing.h>
 #include <linux/io_uring.h>
+#include <poll.h>
 
 #include <chrono>
 #include <cstring>
 #include <cstdint>
 #include <algorithm>
+#include <cerrno>
 
 #include "celer/base/log.h"
 #include "celer/runtime/operation.h"
@@ -32,6 +37,7 @@ namespace celer {
 namespace {
 
 constexpr std::uintptr_t kMultishotTag = 1;
+int kWakePollTag = 0;
 
 std::int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -67,15 +73,31 @@ Status Worker::Init(const WorkerOptions& options) {
     return Status(StatusCode::kInternal, "io_uring_queue_init failed");
   }
 
+  wake_event_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (wake_event_fd_ < 0) {
+    io_uring_queue_exit(&ring_);
+    return Status(StatusCode::kInternal, "eventfd failed");
+  }
+
   options_ = options;
+  initialized_ = true;
+  if (!ArmWakePoll()) {
+    initialized_ = false;
+    ::close(wake_event_fd_);
+    wake_event_fd_ = -1;
+    io_uring_queue_exit(&ring_);
+    return Status(StatusCode::kInternal, "worker wake poll setup failed");
+  }
   if (options_.recv_mode == RecvMode::kMultishot) {
     const auto status = InitMultishotRecv();
     if (!status) {
+      initialized_ = false;
+      ::close(wake_event_fd_);
+      wake_event_fd_ = -1;
       io_uring_queue_exit(&ring_);
       return Status(StatusCode::kInternal, "multishot recv setup failed");
     }
   }
-  initialized_ = true;
   return Status::Ok();
 }
 
@@ -87,6 +109,11 @@ void Worker::Shutdown() {
     io_uring_free_buf_ring(&ring_, multishot_ring_.ring, multishot_ring_.entries,
                            MultishotBufferRing::kGroupId);
     multishot_ring_ = {};
+  }
+  wake_poll_armed_ = false;
+  if (wake_event_fd_ >= 0) {
+    ::close(wake_event_fd_);
+    wake_event_fd_ = -1;
   }
   io_uring_queue_exit(&ring_);
   initialized_ = false;
@@ -125,6 +152,17 @@ void Worker::Spawn(Task<Status> task) {
   if (handle) {
     Enqueue(handle, true);
   }
+}
+
+void Worker::RequestStop() noexcept {
+  stopping_.store(true, std::memory_order_release);
+  if (wake_event_fd_ < 0) {
+    return;
+  }
+
+  std::uint64_t value = 1;
+  const ssize_t rc = ::write(wake_event_fd_, &value, sizeof(value));
+  (void)rc;
 }
 
 Connection* Worker::AddConnection(Connection connection) {
@@ -238,6 +276,39 @@ bool Worker::InitMultishotRecv() {
   }
   io_uring_buf_ring_advance(multishot_ring_.ring, static_cast<int>(multishot_ring_.entries));
   return true;
+}
+
+bool Worker::ArmWakePoll() {
+  if (wake_event_fd_ < 0 || wake_poll_armed_) {
+    return wake_event_fd_ >= 0;
+  }
+
+  auto* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return false;
+  }
+
+  io_uring_prep_poll_add(sqe, wake_event_fd_, POLLIN);
+  io_uring_sqe_set_data(sqe, &kWakePollTag);
+  wake_poll_armed_ = true;
+  return true;
+}
+
+void Worker::HandleWakePoll() {
+  wake_poll_armed_ = false;
+
+  if (wake_event_fd_ >= 0) {
+    std::uint64_t value = 0;
+    while (::read(wake_event_fd_, &value, sizeof(value)) == sizeof(value)) {
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      CELER_LOG_WARN << "worker wake read failed errno=" << errno;
+    }
+  }
+
+  if (!stopping_.load(std::memory_order_acquire) && !ArmWakePoll()) {
+    CELER_LOG_WARN << "failed to re-arm worker wake poll";
+  }
 }
 
 Status Worker::EnsureRecvArmed(Connection* connection) {
@@ -440,7 +511,9 @@ bool Worker::DrainCompletions() {
 
   io_uring_for_each_cqe(&ring_, head, cqe) {
     void* data = io_uring_cqe_get_data(cqe);
-    if (IsMultishotData(data)) {
+    if (data == &kWakePollTag) {
+      HandleWakePoll();
+    } else if (IsMultishotData(data)) {
       HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
     } else {
       auto* op = static_cast<OperationBase*>(data);
@@ -503,7 +576,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
   }
 
   void* data = io_uring_cqe_get_data(cqe);
-  if (IsMultishotData(data)) {
+  if (data == &kWakePollTag) {
+    HandleWakePoll();
+  } else if (IsMultishotData(data)) {
     HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
   } else {
     auto* op = static_cast<OperationBase*>(data);
@@ -521,8 +596,8 @@ bool Worker::RunOnce(bool wait_for_completion) {
 }
 
 void Worker::Run() {
-  stopping_ = false;
-  while (!stopping_) {
+  stopping_.store(false, std::memory_order_release);
+  while (!stopping_.load(std::memory_order_acquire)) {
     if (!RunOnce(true)) {
       CELER_LOG_ERROR << "worker loop exiting because RunOnce returned false";
       break;

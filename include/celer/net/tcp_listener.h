@@ -17,25 +17,52 @@
 #ifndef CELER_NET_TCP_LISTENER_H_
 #define CELER_NET_TCP_LISTENER_H_
 
+#include <coroutine>
 #include <cstdint>
+#include <deque>
 #include <string_view>
 
 #include "celer/base/status.h"
 #include "celer/net/connection.h"
+#include "celer/runtime/operation.h"
 #include "celer/runtime/task.h"
 
 namespace celer {
 
 class Worker;
-class PollReadableOperation;
+class TcpListener;
+class AcceptAwaitable;
+
+class ListenerAcceptState final : public OperationBase {
+ public:
+  ListenerAcceptState() = default;
+  explicit ListenerAcceptState(TcpListener* listener) : listener_(listener) {}
+
+  void Bind(TcpListener* listener) noexcept { listener_ = listener; }
+  Status Arm();
+  StatusOr<int> ConsumeAcceptedFd();
+  void Complete(Worker& worker, int result, unsigned flags) override;
+  void SetWaiter(std::coroutine_handle<> awaiting) { waiter_ = awaiting; }
+  bool HasWaiter() const noexcept { return static_cast<bool>(waiter_); }
+  bool HasAcceptedFd() const noexcept { return !accepted_fds_.empty(); }
+  bool HasError() const noexcept { return !last_error_.ok(); }
+  void CloseAllAcceptedFds() noexcept;
+
+ private:
+  TcpListener* listener_ = nullptr;
+  std::deque<int> accepted_fds_;
+  std::coroutine_handle<> waiter_{};
+  Status last_error_ = Status::Ok();
+  bool armed_ = false;
+};
 
 class TcpListener {
  public:
   TcpListener() = default;
   explicit TcpListener(Worker* worker) : worker_(worker) {}
 
-  TcpListener(TcpListener&&) noexcept = default;
-  TcpListener& operator=(TcpListener&&) noexcept = default;
+  TcpListener(TcpListener&&) noexcept = delete;
+  TcpListener& operator=(TcpListener&&) noexcept = delete;
 
   TcpListener(const TcpListener&) = delete;
   TcpListener& operator=(const TcpListener&) = delete;
@@ -49,12 +76,14 @@ class TcpListener {
   Status Close() noexcept;
 
  private:
-  friend class PollReadableOperation;
+  friend class ListenerAcceptState;
+  friend class AcceptAwaitable;
 
   Worker* worker_ = nullptr;
   int fd_ = -1;
   bool closed_ = true;
   std::uint64_t next_generation_ = 1;
+  ListenerAcceptState accept_state_{this};
 };
 
 }  // namespace celer
