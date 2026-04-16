@@ -28,7 +28,9 @@ option(CELER_USE_REGISTERED_BUF "Use registered buffer recv mode instead of mult
 add_library(celer
   src/base/log.cpp
   src/io/io.cpp
+  src/net/tcp_server.cpp
   src/runtime/worker.cpp
+  src/runtime/runtime.cpp
   src/net/tcp_listener.cpp
   src/net/tcp_stream.cpp
 )
@@ -60,7 +62,7 @@ endif()
 
 if (CELER_BUILD_EXAMPLES)
   add_executable(celer_echo
-    src/app/echo_server.cpp
+    example/echo_server.cpp
   )
   target_link_libraries(celer_echo PRIVATE celer::core)
 endif()

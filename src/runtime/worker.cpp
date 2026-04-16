@@ -150,12 +150,17 @@ Status Worker::Submit() {
 void Worker::Spawn(Task<Status> task) {
   auto handle = std::move(task).ReleaseHandle();
   if (handle) {
+    if (stop_requested_.load(std::memory_order_acquire) ||
+        stopping_.load(std::memory_order_acquire)) {
+      handle.destroy();
+      return;
+    }
     Enqueue(handle, true);
   }
 }
 
 void Worker::RequestStop() noexcept {
-  stopping_.store(true, std::memory_order_release);
+  stop_requested_.store(true, std::memory_order_release);
   if (wake_event_fd_ < 0) {
     return;
   }
@@ -304,6 +309,10 @@ void Worker::HandleWakePoll() {
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
       CELER_LOG_WARN << "worker wake read failed errno=" << errno;
     }
+  }
+
+  if (stop_requested_.load(std::memory_order_acquire)) {
+    stopping_.store(true, std::memory_order_release);
   }
 
   if (!stopping_.load(std::memory_order_acquire) && !ArmWakePoll()) {
@@ -596,6 +605,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
 }
 
 void Worker::Run() {
+  stop_requested_.store(false, std::memory_order_release);
   stopping_.store(false, std::memory_order_release);
   while (!stopping_.load(std::memory_order_acquire)) {
     if (!RunOnce(true)) {

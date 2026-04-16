@@ -35,6 +35,8 @@
 
 namespace celer {
 
+class TcpServerImpl;
+
 struct WorkerOptions {
   unsigned ring_entries = 256;
   RecvMode recv_mode = kDefaultRecvMode;
@@ -61,10 +63,10 @@ class Worker {
   Status Submit();
   void Enqueue(std::coroutine_handle<> handle, bool destroy_when_done = false);
   bool RunOnce(bool wait_for_completion);
-  void Spawn(Task<Status> task);
   void Run();
   void RequestStop() noexcept;
   void Stop() noexcept { RequestStop(); }
+  bool stop_requested() const noexcept { return stop_requested_.load(std::memory_order_acquire); }
   RecvMode recv_mode() const noexcept { return options_.recv_mode; }
   Status EnsureRecvArmed(Connection* connection);
   Connection* AddConnection(Connection connection);
@@ -98,9 +100,12 @@ class Worker {
   void HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe);
   void RecycleMultishotBuffer(std::uint16_t buffer_id);
   void WakeReader(Connection* connection);
+  void Spawn(Task<Status> task);
 
+  friend class TcpServerImpl;
   io_uring ring_{};
   bool initialized_ = false;
+  std::atomic<bool> stop_requested_{false};
   std::atomic<bool> stopping_{false};
   WorkerOptions options_{};
   std::deque<ReadyTask> ready_;

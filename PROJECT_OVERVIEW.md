@@ -37,6 +37,8 @@ Current priority:
 The repository now contains:
 
 - a multi-worker TCP echo server
+- a high-level `TcpServer` API that owns accept/rearm/session scheduling
+- a high-level `Runtime` API that owns worker lifecycle and stop/wait semantics
 - worker-owned connection lifecycle with delayed reclaim
 - a compile-time receive mode split
 - a thin internal logging layer
@@ -50,11 +52,13 @@ Key files:
 - `include/celer/io/io.h`: transport-agnostic I/O layer marker
 - `include/celer/runtime/task.h`: coroutine `Task<T>`
 - `include/celer/runtime/operation.h`: `io_uring` completion base type
+- `include/celer/runtime/runtime.h`: runtime start/stop/wait API
 - `include/celer/runtime/worker.h`: worker event loop, connection ownership, close/reclaim
 - `include/celer/net/connection.h`: connection state and lifecycle fields
 - `include/celer/net/tcp_listener.h`: listener abstraction
+- `include/celer/net/tcp_server.h`: high-level TCP server/handler API
 - `include/celer/net/tcp_stream.h`: public TCP stream handle
-- `src/app/echo_server.cpp`: multi-worker TCP echo server
+- `example/echo_server.cpp`: multi-worker TCP echo server example
 
 Current CMake targets:
 
@@ -67,6 +71,21 @@ Current CMake targets:
 Current example binaries:
 
 - `celer_echo`
+
+Current preferred application-facing TCP shape:
+
+- implement `TcpConnectionHandler::HandleRequests(TcpStream)`
+- let `TcpServer` own accept loops and session spawning internally
+- use `RequestStop()` / `WaitUntilStopped()` at the server boundary
+- treat `Worker::Spawn` as an internal runtime scheduling detail rather than an application API
+
+Recent completed work:
+
+- hid the worker pool behind `Runtime`
+- moved worker stop state transitions into the worker thread wake path
+- replaced example-level signal wait threads with main-thread `eventfd` wakeups
+- introduced `TcpServer` so applications no longer own accept loops
+- changed handler naming from connection callback style to session-entry style via `HandleRequests`
 
 ## Layering
 
@@ -157,7 +176,13 @@ For raw TCP echo, use:
 Recommended next implementation order:
 
 1. continue developing the core framework: runtime/io/net
-2. add the first storage/file-oriented building blocks under `io`
+2. replace `OperationBase` hot-path virtual dispatch with a non-virtual/tagged completion scheme
 3. tighten multishot lifecycle/reclaim edge cases
-4. keep `registered_buf` as the later storage-oriented path
-5. keep protocol implementations, including HTTP, in separate repositories
+4. add the first storage/file-oriented building blocks under `io`
+5. keep `registered_buf` as the later storage-oriented path
+6. keep protocol implementations, including HTTP, in separate repositories
+
+## TODO
+
+- replace `OperationBase` virtual completion dispatch with a tag/thunk-based scheme that removes inheritance and the vtable from the hot completion path
+- remove `OperationBase` inheritance entirely and move completion dispatch to a template-based scheme so the hot path avoids virtual-function-induced indirect jumps
