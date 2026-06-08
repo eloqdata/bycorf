@@ -19,8 +19,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <cstddef>
-#include <exception>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -29,8 +27,6 @@
 
 #include <sys/eventfd.h>
 #include <unistd.h>
-
-#include "celer/base/log.h"
 
 namespace celer {
 
@@ -69,14 +65,7 @@ class Runtime::Impl {
       auto state = std::make_unique<State>();
       State* raw = state.get();
       raw->thread = std::thread([this, i, raw, main_fn] {
-        int local_exit_code = 1;
-        try {
-          local_exit_code = main_fn(i, raw->worker);
-        } catch (const std::exception& e) {
-          CELER_LOG_ERROR << "worker[" << i << "] terminated with exception: " << e.what();
-        } catch (...) {
-          CELER_LOG_ERROR << "worker[" << i << "] terminated with unknown exception";
-        }
+        int local_exit_code = main_fn(i, raw->worker);
 
         if (local_exit_code != 0) {
           int expected = 0;
