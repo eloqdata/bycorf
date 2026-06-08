@@ -29,7 +29,7 @@
 
 #include "celer/base/log.h"
 #include "celer/base/status.h"
-#include "celer/net/tcp_server.h"
+#include "celer/net/tcp_server-inl.h"
 
 namespace celer {
 
@@ -80,9 +80,9 @@ void CleanupShutdownSignalHandler() noexcept {
   }
 }
 
-class EchoHandler final : public TcpConnectionHandler {
+class EchoHandler {
  public:
-  Task<Status> HandleRequests(TcpStream stream) override {
+  Task<Status> HandleRequests(TcpStream stream) {
     std::array<std::byte, 4096> buffer{};
     while (true) {
       auto read_result = co_await stream.ReadSome(buffer);
@@ -107,7 +107,8 @@ enum class WaitResult {
   kStopped,
 };
 
-WaitResult WaitForSignalOrServerStop(const TcpServer& server) {
+template <typename Server>
+WaitResult WaitForSignalOrServerStop(const Server& server) {
   pollfd fds[2] = {
       {.fd = g_signal_event_fd, .events = POLLIN, .revents = 0},
       {.fd = server.completion_fd(), .events = POLLIN, .revents = 0},
@@ -185,8 +186,8 @@ int main(int argc, char** argv) {
   options.recv_mode = recv_mode;
 
   celer::EchoHandler handler;
-  celer::TcpServer server;
-  auto start_status = server.Start(options, &handler);
+  celer::TcpServer<celer::EchoHandler> server;
+  auto start_status = server.Start(options, std::move(handler));
   if (!start_status.ok()) [[unlikely]] {
     CELER_LOG_ERROR << "server start failed: " << start_status.message();
     celer::CleanupShutdownSignalHandler();
@@ -205,3 +206,5 @@ int main(int argc, char** argv) {
   celer::CleanupShutdownSignalHandler();
   return server.exit_code();
 }
+
+template class celer::TcpServer<celer::EchoHandler>;

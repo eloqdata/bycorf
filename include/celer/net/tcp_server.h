@@ -17,16 +17,21 @@
 #ifndef CELER_NET_TCP_SERVER_H_
 #define CELER_NET_TCP_SERVER_H_
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "celer/base/status.h"
+#include "celer/net/tcp_listener.h"
 #include "celer/net/tcp_stream.h"
 #include "celer/runtime/runtime.h"
+#include "celer/runtime/task.h"
+#include "celer/runtime/worker.h"
 
 namespace celer {
-
-class TcpServerImpl;
 
 struct TcpServerOptions {
   std::string bind_ip = "127.0.0.1";
@@ -38,22 +43,20 @@ struct TcpServerOptions {
   RecvMode recv_mode = kDefaultRecvMode;
 };
 
-class TcpConnectionHandler {
- public:
-  virtual ~TcpConnectionHandler() = default;
-  virtual Task<Status> HandleRequests(TcpStream stream) = 0;
-};
+// Handler concept: must have Task<Status> HandleRequests(TcpStream).
 
+template <typename Handler>
 class TcpServer {
  public:
-  TcpServer();
+  TcpServer() = default;
   TcpServer(const TcpServer&) = delete;
   TcpServer& operator=(const TcpServer&) = delete;
-  TcpServer(TcpServer&&) noexcept;
-  TcpServer& operator=(TcpServer&&) noexcept;
+  TcpServer(TcpServer&&) noexcept = default;
+  TcpServer& operator=(TcpServer&&) noexcept = default;
+
   ~TcpServer();
 
-  Status Start(const TcpServerOptions& options, TcpConnectionHandler* handler);
+  Status Start(const TcpServerOptions& options, Handler handler);
   void RequestStop() noexcept;
   void WaitUntilStopped();
 
@@ -63,7 +66,25 @@ class TcpServer {
   int exit_code() const noexcept;
 
  private:
-  std::unique_ptr<TcpServerImpl> impl_;
+  struct WorkerRuntime {
+    TcpListener listener;
+    std::atomic<bool> stop_requested = false;
+    std::atomic<bool> accept_loop_done = false;
+  };
+
+  Task<Status> RunSession(Worker& worker, Connection* connection);
+  Task<Status> AcceptLoop(WorkerRuntime& rt, Worker& worker);
+  int RunWorker(WorkerRuntime& rt, unsigned index, Worker& worker);
+
+  Runtime runtime_;
+  TcpServerOptions options_{};
+  Handler handler_{};
+  std::vector<std::unique_ptr<WorkerRuntime>> runtimes_;
+  std::atomic<bool> stop_requested_{false};
+  std::thread stop_thread_;
+  int exit_code_ = 0;
+  bool started_ = false;
+  bool stopped_ = false;
 };
 
 }  // namespace celer

@@ -102,7 +102,8 @@ class Worker {
   void WakeReader(Connection* connection);
   void Spawn(Task<Status> task);
 
-  friend class TcpServerImpl;
+  template <typename H>
+  friend class TcpServer;
   io_uring ring_{};
   bool initialized_ = false;
   std::atomic<bool> stop_requested_{false};
