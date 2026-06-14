@@ -39,7 +39,8 @@ namespace celer {
 class TcpServerImpl;
 
 struct WorkerOptions {
-  unsigned ring_entries = 256;
+  unsigned ring_entries = 256;          // io_uring SQ ring size
+  unsigned recv_buffer_count = 1024;    // multishot recv buffer-ring entries
   RecvMode recv_mode = kDefaultRecvMode;
   int idle_timeout_ms = -1;
 };

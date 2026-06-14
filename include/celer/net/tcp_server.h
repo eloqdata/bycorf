@@ -39,6 +39,7 @@ struct TcpServerOptions {
   unsigned thread_count = 1;
   int backlog = 128;
   int idle_timeout_ms = -1;
+  unsigned recv_buffer_count = 1024;  // multishot recv buffer-ring entries
   bool reuse_port = true;
   RecvMode recv_mode = kDefaultRecvMode;
 };

@@ -154,6 +154,7 @@ int TcpServer<Handler>::RunWorker(WorkerRuntime& rt, unsigned index, Worker& wor
   WorkerOptions worker_options;
   worker_options.recv_mode = options_.recv_mode;
   worker_options.idle_timeout_ms = options_.idle_timeout_ms;
+  worker_options.recv_buffer_count = options_.recv_buffer_count;
 
   auto init_status = worker.Init(worker_options);
   if (!init_status.ok()) [[unlikely]] {

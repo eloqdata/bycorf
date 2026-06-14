@@ -276,7 +276,7 @@ void Worker::DrainReady() {
 }
 
 bool Worker::InitMultishotRecv() {
-  multishot_ring_.entries = 256;
+  multishot_ring_.entries = options_.recv_buffer_count;
   multishot_ring_.buffer_size = 4096;
 
   int err = 0;
@@ -447,9 +447,12 @@ void Worker::HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe) {
         ReceivedBuffer{.buffer_id = buffer_id, .size = static_cast<std::uint32_t>(cqe->res)});
   } else if (cqe->res == 0) {
     connection->recv_eof = true;
-  } else if (cqe->res < 0 && cqe->res != -ECANCELED) {
+  } else if (cqe->res < 0 && cqe->res != -ECANCELED && cqe->res != -ENOBUFS) {
     connection->last_error = Status(StatusCode::kUnknown, "recv multishot failed");
   }
+  // -ENOBUFS is not fatal: the buffer ring was momentarily empty and the kernel
+  // ended the multishot. The F_MORE-cleared path below re-arms; the reader
+  // recycles buffers as it consumes, so reception resumes.
 
   if (has_buffer && cqe->res <= 0) {
     RecycleMultishotBuffer(buffer_id);
