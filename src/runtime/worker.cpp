@@ -38,6 +38,7 @@ namespace {
 
 constexpr std::uintptr_t kMultishotTag = 1;
 int kWakePollTag = 0;
+int kCrossCoreWakeTag = 0;  // CQE user_data marker for a cross-core wakeup
 
 std::int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -73,17 +74,28 @@ Status Worker::Init(const WorkerOptions& options) {
     return Status(StatusCode::kInternal, "io_uring_queue_init failed");
   }
 
-  wake_event_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  if (wake_event_fd_ < 0) {
-    io_uring_queue_exit(&ring_);
-    return Status(StatusCode::kInternal, "eventfd failed");
+  if (cross_core_ != nullptr) {
+    // Runtime pre-created the eventfd; reuse it and advertise our ring so other
+    // workers can wake us via MSG_RING.
+    wake_event_fd_ = cross_core_->mailbox(id_).wake_fd;
+    owns_wake_fd_ = false;
+    cross_core_->mailbox(id_).ring_fd = ring_.ring_fd;
+  } else {
+    wake_event_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    owns_wake_fd_ = true;
+    if (wake_event_fd_ < 0) {
+      io_uring_queue_exit(&ring_);
+      return Status(StatusCode::kInternal, "eventfd failed");
+    }
   }
 
   options_ = options;
   initialized_ = true;
   if (!ArmWakePoll()) {
     initialized_ = false;
-    ::close(wake_event_fd_);
+    if (owns_wake_fd_) {
+      ::close(wake_event_fd_);
+    }
     wake_event_fd_ = -1;
     io_uring_queue_exit(&ring_);
     return Status(StatusCode::kInternal, "worker wake poll setup failed");
@@ -92,7 +104,9 @@ Status Worker::Init(const WorkerOptions& options) {
     const auto status = InitMultishotRecv();
     if (!status) {
       initialized_ = false;
-      ::close(wake_event_fd_);
+      if (owns_wake_fd_) {
+        ::close(wake_event_fd_);
+      }
       wake_event_fd_ = -1;
       io_uring_queue_exit(&ring_);
       return Status(StatusCode::kInternal, "multishot recv setup failed");
@@ -112,7 +126,9 @@ void Worker::Shutdown() {
   }
   wake_poll_armed_ = false;
   if (wake_event_fd_ >= 0) {
-    ::close(wake_event_fd_);
+    if (owns_wake_fd_) {
+      ::close(wake_event_fd_);
+    }
     wake_event_fd_ = -1;
   }
   io_uring_queue_exit(&ring_);
@@ -522,6 +538,9 @@ bool Worker::DrainCompletions() {
     void* data = io_uring_cqe_get_data(cqe);
     if (data == &kWakePollTag) {
       HandleWakePoll();
+    } else if (data == &kCrossCoreWakeTag) {
+      // Cross-core wake marker (MSG_RING). The actual work is drained from the
+      // mailbox by DrainCrossCore(); nothing to do per-CQE.
     } else if (IsMultishotData(data)) {
       HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
     } else {
@@ -540,12 +559,59 @@ bool Worker::DrainCompletions() {
   return false;
 }
 
+bool Worker::DrainCrossCore() {
+  if (cross_core_ == nullptr) {
+    return false;
+  }
+  WorkerMailbox& mb = cross_core_->mailbox(id_);
+  RemoteWork* batch[64];
+
+  // One bounded batch each, NOT drain-to-empty: leftover work is picked up on the
+  // next loop iteration so io_uring completions are not starved under load.
+  const std::size_t nreq = mb.requests.try_dequeue_bulk(batch, 64);
+  for (std::size_t i = 0; i < nreq; ++i) {
+    RemoteWork* work = batch[i];
+    work->run_fn(work);                          // run fn, store result in awaiter
+    PostReply(cross_core_, work->origin, work);  // handed off; don't touch after
+  }
+
+  const std::size_t nrep = mb.replies.try_dequeue_bulk(batch, 64);
+  for (std::size_t i = 0; i < nrep; ++i) {
+    batch[i]->waiter.resume();  // don't touch after resume
+  }
+
+  return nreq > 0 || nrep > 0;
+}
+
+void Worker::WakeRemote(unsigned target) noexcept {
+  WorkerMailbox& mb = cross_core_->mailbox(target);
+  if (!mb.sleeping.load(std::memory_order_seq_cst)) {
+    return;  // target is busy-polling; it will drain on its next loop
+  }
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe != nullptr) [[likely]] {
+    io_uring_prep_msg_ring(sqe, mb.ring_fd, 0,
+                           reinterpret_cast<std::uintptr_t>(&kCrossCoreWakeTag), 0);
+    io_uring_sqe_set_data(sqe, &kCrossCoreWakeTag);
+  } else {
+    const std::uint64_t one = 1;
+    (void)::write(mb.wake_fd, &one, sizeof(one));  // rare: io_uring_submit failed
+  }
+}
+
+void WakeWorker(unsigned target) noexcept {
+  ThisWorker().self->WakeRemote(target);
+}
+
 bool Worker::RunOnce(bool wait_for_completion) {
   if (!initialized_) {
     return false;
   }
 
   DrainReady();
+  if (DrainCrossCore()) {
+    DrainReady();
+  }
   if (DrainCompletions()) {
     DrainReady();
     return true;
@@ -563,6 +629,18 @@ bool Worker::RunOnce(bool wait_for_completion) {
     return DrainCompletions();
   }
 
+  // About to park. Publish "sleeping" so producers know to wake us, then recheck
+  // the mailbox once — this closes the lost-wakeup race.
+  WorkerMailbox* mb = (cross_core_ != nullptr) ? &cross_core_->mailbox(id_) : nullptr;
+  if (mb != nullptr) {
+    mb->sleeping.store(true, std::memory_order_seq_cst);
+    if (DrainCrossCore()) {
+      mb->sleeping.store(false, std::memory_order_release);
+      DrainReady();
+      return true;
+    }
+  }
+
   io_uring_cqe* cqe = nullptr;
   int rc = 0;
   if (options_.idle_timeout_ms > 0) {
@@ -572,12 +650,18 @@ bool Worker::RunOnce(bool wait_for_completion) {
     };
     rc = io_uring_wait_cqe_timeout(&ring_, &cqe, &timeout);
     if (rc == -ETIME) {
+      if (mb != nullptr) {
+        mb->sleeping.store(false, std::memory_order_release);
+      }
       CheckIdleConnections();
       ReclaimConnections();
       return true;
     }
   } else {
     rc = io_uring_wait_cqe(&ring_, &cqe);
+  }
+  if (mb != nullptr) {
+    mb->sleeping.store(false, std::memory_order_release);
   }
   if (rc < 0) {
     CELER_LOG_ERROR << "worker wait_cqe failed rc=" << rc;
@@ -587,6 +671,8 @@ bool Worker::RunOnce(bool wait_for_completion) {
   void* data = io_uring_cqe_get_data(cqe);
   if (data == &kWakePollTag) {
     HandleWakePoll();
+  } else if (data == &kCrossCoreWakeTag) {
+    // Cross-core wake marker; mailbox drained below.
   } else if (IsMultishotData(data)) {
     HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
   } else {
@@ -598,6 +684,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
   io_uring_cqe_seen(&ring_, cqe);
 
   DrainCompletions();
+  DrainCrossCore();
   DrainReady();
   CheckIdleConnections();
   ReclaimConnections();
@@ -605,6 +692,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
 }
 
 void Worker::Run() {
+  SetThisWorker(id_, cross_core_, this);
   stop_requested_.store(false, std::memory_order_release);
   stopping_.store(false, std::memory_order_release);
   while (!stopping_.load(std::memory_order_acquire)) {

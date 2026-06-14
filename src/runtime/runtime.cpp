@@ -28,6 +28,8 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include "celer/runtime/cross_core.h"
+
 namespace celer {
 
 class Runtime::Impl {
@@ -42,6 +44,13 @@ class Runtime::Impl {
   ~Impl() {
     if (completion_fd_ >= 0) {
       close(completion_fd_);
+    }
+    // size() is 0 if Start() was never called — loop simply does nothing.
+    for (unsigned i = 0; i < cross_core_.size(); ++i) {
+      const int fd = cross_core_.mailbox(i).wake_fd;
+      if (fd >= 0) {
+        close(fd);
+      }
     }
   }
 
@@ -59,11 +68,24 @@ class Runtime::Impl {
     }
 
     started_ = true;
+
+    // Build the cross-core mailboxes and their wake eventfds BEFORE any worker
+    // thread starts, so a worker can be woken the moment it exists.
+    cross_core_ = CrossCore(thread_count);
+    for (unsigned i = 0; i < thread_count; ++i) {
+      const int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+      if (fd < 0) {
+        throw std::runtime_error("failed to create worker wake eventfd");
+      }
+      cross_core_.mailbox(i).wake_fd = fd;
+    }
+
     states_.reserve(thread_count);
     active_workers_.store(thread_count, std::memory_order_release);
     for (unsigned i = 0; i < thread_count; ++i) {
       auto state = std::make_unique<State>();
       State* raw = state.get();
+      raw->worker.BindCrossCore(i, &cross_core_);
       raw->thread = std::thread([this, i, raw, main_fn] {
         int local_exit_code = main_fn(i, raw->worker);
 
@@ -141,6 +163,8 @@ class Runtime::Impl {
   }
 
  private:
+  // Declared first so it outlives the workers that hold pointers into it.
+  CrossCore cross_core_;
   std::vector<std::unique_ptr<State>> states_;
   std::atomic<unsigned> active_workers_{0};
   std::atomic<int> exit_code_{0};

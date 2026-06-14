@@ -31,6 +31,7 @@
 
 #include "celer/net/connection.h"
 #include "celer/base/status.h"
+#include "celer/runtime/cross_core.h"
 #include "celer/runtime/task.h"
 
 namespace celer {
@@ -58,6 +59,18 @@ class Worker {
 
   Status Init(const WorkerOptions& options = {});
   void Shutdown();
+
+  // Wire this worker into the cross-core mailbox set before Run(). Called by the
+  // Runtime, which creates the CrossCore (and eventfds) before any thread starts.
+  void BindCrossCore(unsigned id, CrossCore* cross_core) noexcept {
+    id_ = id;
+    cross_core_ = cross_core;
+  }
+  unsigned id() const noexcept { return id_; }
+
+  // Wake worker `target` if it is parked (MSG_RING via this worker's ring, or
+  // eventfd fallback). Called from the current worker's thread.
+  void WakeRemote(unsigned target) noexcept;
 
   io_uring_sqe* AcquireSqe();
   Status Submit();
@@ -101,6 +114,7 @@ class Worker {
   void RecycleMultishotBuffer(std::uint16_t buffer_id);
   void WakeReader(Connection* connection);
   void Spawn(Task<Status> task);
+  bool DrainCrossCore();
 
   template <typename H>
   friend class TcpServer;
@@ -116,6 +130,9 @@ class Worker {
   MultishotBufferRing multishot_ring_{};
   int wake_event_fd_ = -1;
   bool wake_poll_armed_ = false;
+  bool owns_wake_fd_ = true;
+  unsigned id_ = 0;
+  CrossCore* cross_core_ = nullptr;
 };
 
 }  // namespace celer
