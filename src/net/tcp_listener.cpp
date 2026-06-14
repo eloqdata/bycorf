@@ -27,7 +27,7 @@
 #include <cstring>
 #include <string>
 
-#include "celer/runtime/operation.h"
+#include "celer/io/completion.h"
 #include "celer/runtime/worker.h"
 
 namespace celer {
@@ -259,7 +259,6 @@ Task<StatusOr<Connection*>> TcpListener::Accept() {
   Connection connection;
   connection.worker = worker_;
   connection.file.fd = *accepted;
-  connection.recv_mode = worker_->recv_mode();
   connection.closed = false;
   connection.generation = next_generation_++;
   Connection* registered = worker_->AddConnection(std::move(connection));

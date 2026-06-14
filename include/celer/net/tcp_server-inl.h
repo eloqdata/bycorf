@@ -152,7 +152,6 @@ Task<Status> TcpServer<Handler>::AcceptLoop(WorkerRuntime& rt, Worker& worker) {
 template <typename Handler>
 int TcpServer<Handler>::RunWorker(WorkerRuntime& rt, unsigned index, Worker& worker) {
   WorkerOptions worker_options;
-  worker_options.recv_mode = options_.recv_mode;
   worker_options.idle_timeout_ms = options_.idle_timeout_ms;
   worker_options.recv_buffer_count = options_.recv_buffer_count;
 

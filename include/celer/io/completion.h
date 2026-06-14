@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef CELER_RUNTIME_OPERATION_H_
-#define CELER_RUNTIME_OPERATION_H_
+#ifndef CELER_IO_COMPLETION_H_
+#define CELER_IO_COMPLETION_H_
 
 #include <coroutine>
 
@@ -23,9 +23,12 @@ namespace celer {
 
 class Worker;
 
-class OperationBase {
+// Backend-neutral completion callback. The io backend invokes Complete() when an
+// operation submitted with this object as its tag finishes. `result` is the
+// op result (>=0 byte count / fd, <0 -errno).
+class IoCompletion {
  public:
-  virtual ~OperationBase() = default;
+  virtual ~IoCompletion() = default;
 
   virtual void Complete(Worker& worker, int result, unsigned flags) = 0;
 
@@ -35,4 +38,4 @@ class OperationBase {
 
 }  // namespace celer
 
-#endif  // CELER_RUNTIME_OPERATION_H_
+#endif  // CELER_IO_COMPLETION_H_

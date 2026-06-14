@@ -24,7 +24,7 @@
 
 #include <liburing.h>
 
-#include "celer/runtime/operation.h"
+#include "celer/io/completion.h"
 #include "celer/runtime/worker.h"
 
 namespace celer {
@@ -50,7 +50,7 @@ Status ErrnoToStatus(int err, const char* operation) {
   }
 }
 
-class ReadOperation final : public OperationBase {
+class ReadOperation final : public IoCompletion {
  public:
   ReadOperation(Connection* connection, std::span<std::byte> buffer)
       : connection_(connection), buffer_(buffer) {}
@@ -72,11 +72,6 @@ class ReadOperation final : public OperationBase {
         connection_->closed || connection_->closing) {
       immediate_status_ =
           Status(StatusCode::kFailedPrecondition, "read on closed stream");
-      return false;
-    }
-    if (connection_->recv_mode == RecvMode::kRegisteredBuffer) {
-      immediate_status_ =
-          Status(StatusCode::kUnimplemented, "registered_buf read mode is not implemented");
       return false;
     }
 
@@ -161,7 +156,7 @@ class ReadOperation final : public OperationBase {
   std::optional<std::size_t> immediate_result_;
 };
 
-class WriteOperation final : public OperationBase {
+class WriteOperation final : public IoCompletion {
  public:
   WriteOperation(Connection* connection, std::span<const std::byte> buffer)
       : connection_(connection), buffer_(buffer) {}

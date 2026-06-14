@@ -24,7 +24,7 @@
 
 #include "celer/base/status.h"
 #include "celer/net/connection.h"
-#include "celer/runtime/operation.h"
+#include "celer/io/completion.h"
 #include "celer/runtime/task.h"
 
 namespace celer {
@@ -33,7 +33,7 @@ class Worker;
 class TcpListener;
 class AcceptAwaitable;
 
-class ListenerAcceptState final : public OperationBase {
+class ListenerAcceptState final : public IoCompletion {
  public:
   ListenerAcceptState() = default;
   explicit ListenerAcceptState(TcpListener* listener) : listener_(listener) {}

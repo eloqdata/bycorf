@@ -30,7 +30,7 @@
 #include <cerrno>
 
 #include "celer/base/log.h"
-#include "celer/runtime/operation.h"
+#include "celer/io/completion.h"
 
 namespace celer {
 
@@ -109,17 +109,14 @@ Status Worker::Init(const WorkerOptions& options) {
     io_uring_queue_exit(&ring_);
     return Status(StatusCode::kInternal, "worker wake poll setup failed");
   }
-  if (options_.recv_mode == RecvMode::kMultishot) {
-    const auto status = InitMultishotRecv();
-    if (!status) {
-      initialized_ = false;
-      if (owns_wake_fd_) {
-        ::close(wake_event_fd_);
-      }
-      wake_event_fd_ = -1;
-      io_uring_queue_exit(&ring_);
-      return Status(StatusCode::kInternal, "multishot recv setup failed");
+  if (!InitMultishotRecv()) {
+    initialized_ = false;
+    if (owns_wake_fd_) {
+      ::close(wake_event_fd_);
     }
+    wake_event_fd_ = -1;
+    io_uring_queue_exit(&ring_);
+    return Status(StatusCode::kInternal, "multishot recv setup failed");
   }
   return Status::Ok();
 }
@@ -377,9 +374,6 @@ Status Worker::EnsureRecvArmed(Connection* connection) {
   if (connection == nullptr) {
     return Status(StatusCode::kInvalidArgument, "connection must not be null");
   }
-  if (connection->recv_mode != RecvMode::kMultishot) {
-    return Status(StatusCode::kUnimplemented, "recv mode is not multishot");
-  }
   if (connection->recv_armed || connection->closed || connection->closing) {
     return Status::Ok();
   }
@@ -587,7 +581,7 @@ bool Worker::DrainCompletions() {
     } else if (IsMultishotData(data)) {
       HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
     } else {
-      auto* op = static_cast<OperationBase*>(data);
+      auto* op = static_cast<IoCompletion*>(data);
       if (op != nullptr) {
         op->Complete(*this, cqe->res, cqe->flags);
       }
@@ -720,7 +714,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
   } else if (IsMultishotData(data)) {
     HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
   } else {
-    auto* op = static_cast<OperationBase*>(data);
+    auto* op = static_cast<IoCompletion*>(data);
     if (op != nullptr) {
       op->Complete(*this, cqe->res, cqe->flags);
     }

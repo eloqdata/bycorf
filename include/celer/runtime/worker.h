@@ -41,7 +41,6 @@ class TcpServerImpl;
 struct WorkerOptions {
   unsigned ring_entries = 256;          // io_uring SQ ring size
   unsigned recv_buffer_count = 1024;    // multishot recv buffer-ring entries
-  RecvMode recv_mode = kDefaultRecvMode;
   int idle_timeout_ms = -1;
 };
 
@@ -81,7 +80,6 @@ class Worker {
   void RequestStop() noexcept;
   void Stop() noexcept { RequestStop(); }
   bool stop_requested() const noexcept { return stop_requested_.load(std::memory_order_acquire); }
-  RecvMode recv_mode() const noexcept { return options_.recv_mode; }
   Status EnsureRecvArmed(Connection* connection);
   Connection* AddConnection(Connection connection);
   void BeginClose(Connection* connection, Status reason, CloseMode mode) noexcept;
