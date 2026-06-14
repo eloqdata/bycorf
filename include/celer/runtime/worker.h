@@ -116,6 +116,7 @@ class Worker {
   void WakeReader(Connection* connection);
   void Spawn(Task<Status> task);
   bool DrainCrossCore();
+  void DrainRecvRearm();
 
   template <typename H>
   friend class TcpServer;
@@ -127,6 +128,7 @@ class Worker {
   std::deque<ReadyTask> ready_;
   std::unordered_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
   std::vector<std::uint64_t> retired_connection_ids_;
+  std::vector<Connection*> recv_rearm_queue_;
   std::uint64_t next_connection_id_ = 1;
   MultishotBufferRing multishot_ring_{};
   int wake_event_fd_ = -1;

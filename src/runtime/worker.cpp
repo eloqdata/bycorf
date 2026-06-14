@@ -69,9 +69,18 @@ Status Worker::Init(const WorkerOptions& options) {
     return Status::Ok();
   }
 
-  const int rc = io_uring_queue_init(options.ring_entries, &ring_, 0);
+  io_uring_params params{};
+  const int rc = io_uring_queue_init_params(options.ring_entries, &ring_, &params);
   if (rc < 0) {
     return Status(StatusCode::kInternal, "io_uring_queue_init failed");
+  }
+  // We rely on IORING_FEAT_NODROP: the kernel queues overflowed completions
+  // instead of dropping them (and makes submit return -EBUSY as backpressure).
+  // Without it, AcquireSqe's submit+reap loop could silently lose CQEs.
+  if ((params.features & IORING_FEAT_NODROP) == 0) {
+    io_uring_queue_exit(&ring_);
+    return Status(StatusCode::kFailedPrecondition,
+                  "io_uring lacks IORING_FEAT_NODROP (kernel >= 5.5 required)");
   }
 
   if (cross_core_ != nullptr) {
@@ -141,14 +150,42 @@ io_uring_sqe* Worker::AcquireSqe() {
   }
 
   io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-  if (sqe != nullptr) {
+  if (sqe != nullptr) [[likely]] {
     return sqe;
   }
 
-  if (io_uring_submit(&ring_) < 0) {
-    return nullptr;
+  // SQ ring full (rare). Seastar's get_sqe: loop submit (frees SQ slots) + reap
+  // (frees CQ space) until an SQE is available — never returns null. Safe to reap
+  // here because completion handlers never submit io (multishot re-arm is deferred
+  // to RunOnce), so this is never re-entered from inside DrainCompletions.
+  for (;;) {
+    io_uring_submit(&ring_);
+    sqe = io_uring_get_sqe(&ring_);
+    if (sqe != nullptr) {
+      return sqe;
+    }
+    DrainCompletions();  // CQ was full; reap to let the next submit make progress
   }
-  return io_uring_get_sqe(&ring_);
+}
+
+void Worker::DrainRecvRearm() {
+  if (recv_rearm_queue_.empty()) {
+    return;
+  }
+  // Swap out so a re-entrant push (rare: AcquireSqe reaping here flags more
+  // re-arms) lands in the fresh queue, not the batch we're iterating.
+  std::vector<Connection*> batch;
+  batch.swap(recv_rearm_queue_);
+  for (Connection* connection : batch) {
+    connection->needs_recv_rearm = false;
+    if (connection->state == ConnectionState::kActive && !connection->closed &&
+        !connection->closing && !connection->recv_eof) {
+      auto status = EnsureRecvArmed(connection);
+      if (!status.ok()) {
+        connection->last_error = status;
+      }
+    }
+  }
 }
 
 Status Worker::Submit() {
@@ -465,9 +502,12 @@ void Worker::HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe) {
     }
     if (connection->state == ConnectionState::kActive &&
         !connection->closed && !connection->closing && !connection->recv_eof) {
-      auto status = EnsureRecvArmed(connection);
-      if (!status.ok()) {
-        connection->last_error = status;
+      // Defer re-arm out of the completion handler: submitting here (via
+      // AcquireSqe) could re-enter DrainCompletions. RunOnce re-arms after
+      // completion processing instead (Seastar's "completions never submit").
+      if (!connection->needs_recv_rearm) {
+        connection->needs_recv_rearm = true;
+        recv_rearm_queue_.push_back(connection);
       }
     } else if (connection->state != ConnectionState::kActive) {
       connection->state = ConnectionState::kDraining;
@@ -616,6 +656,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
     DrainReady();
   }
   if (DrainCompletions()) {
+    DrainRecvRearm();
     DrainReady();
     return true;
   }
@@ -687,6 +728,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
   io_uring_cqe_seen(&ring_, cqe);
 
   DrainCompletions();
+  DrainRecvRearm();
   DrainCrossCore();
   DrainReady();
   CheckIdleConnections();
