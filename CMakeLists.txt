@@ -65,9 +65,27 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   endif()
 endif()
 
+# Optional RPC framework (built on celer's public net primitives). Separate target
+# so apps that don't need RPC don't link it.
+add_library(celer_rpc
+  src/rpc/rpc.cpp
+)
+add_library(celer::rpc ALIAS celer_rpc)
+target_link_libraries(celer_rpc PUBLIC celer::core)
+
 if (CELER_BUILD_EXAMPLES)
   add_executable(celer_echo
     example/echo_server.cpp
   )
   target_link_libraries(celer_echo PRIVATE celer::core)
+
+  add_executable(rpc_echo_server
+    example/rpc_echo_server.cpp
+  )
+  target_link_libraries(rpc_echo_server PRIVATE celer::rpc)
+
+  add_executable(rpc_bench
+    example/rpc_bench.cpp
+  )
+  target_link_libraries(rpc_bench PRIVATE celer::rpc)
 endif()

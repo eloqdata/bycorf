@@ -32,3 +32,26 @@ Durable backlog for the celer runtime (coroutines + io_uring, thread-per-core).
 - **(Optional) recv registered buffers.** A registered-buffer recv mode was
   removed during the IoBackend extraction; revisit if it beats the provided
   buffer ring.
+
+## RPC (`celer::rpc`)
+
+The first cut is a bare transport — framing + req-id multiplexing + verb dispatch
+with synchronous handlers — for benchmarking against brpc. Production features,
+deferred (seastar::rpc has all of these):
+
+- **Async verb handlers (`Task<Bytes>`).** Let a handler `co_await SubmitTo(...)`
+  to reach the data-owning core (keylane cross-node GET/SET forwards to the shard
+  core). The bench version uses sync handlers (echo) processed inline.
+- **Async client connect.** Replace the startup blocking `connect()` with io_uring
+  `IORING_OP_CONNECT`.
+- **Per-call timeout (deadline).** Must-have for production: a hung peer must not
+  hang the caller. Give each pending a deadline; resume as `DeadlineExceeded`.
+- **Reconnect.** Re-establish dropped peer connections (may live app-side, as in
+  seastar where the app rebuilds the client).
+- **Cancellation.** Cancel in-flight calls on timeout / shutdown.
+- **Handshake / feature negotiation.** Protocol version + feature flags.
+- **TCP keepalive.** setsockopt on rpc connections.
+- **Compression (lz4)** for large / WAN payloads.
+- **Streaming verbs.**
+- **Shard-aware routing.** Client picks the source port so the connection lands
+  on the data-owning core, eliminating the intra-node x→b→x hop.
