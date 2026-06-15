@@ -110,6 +110,10 @@ class Worker {
   void BeginClose(Connection* connection, Status reason, CloseMode mode) noexcept;
   void RetireConnection(Connection* connection);
 
+  // Schedule a fire-and-forget session coroutine on this worker (e.g. a service's
+  // accept loop or a per-connection session). The frame is destroyed on completion.
+  void Spawn(Task<Status> task);
+
  private:
   void DrainReady();
   void Flush();        // FlushWakes() + backend_.Submit()
@@ -118,11 +122,7 @@ class Worker {
   bool CanReclaim(const Connection& connection) const noexcept;
   void ReclaimConnections();
   void DiscardReceivedBuffers(Connection* connection);
-  void Spawn(Task<Status> task);
   bool DrainCrossCore();
-
-  template <typename H>
-  friend class TcpServer;
 
   NetBackend backend_{};
   bool initialized_ = false;

@@ -30,7 +30,8 @@ option(CELER_WITH_DPDK "Build with the DPDK net backend instead of io_uring" OFF
 add_library(celer
   src/io/io.cpp
   src/io/io_uring_backend.cpp
-  src/net/tcp_server.cpp
+  src/net/server.cpp
+  src/net/tcp_service.cpp
   src/runtime/worker.cpp
   src/runtime/runtime.cpp
   src/net/tcp_listener.cpp

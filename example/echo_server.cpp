@@ -29,7 +29,8 @@
 
 #include "spdlog/spdlog.h"
 #include "celer/base/status.h"
-#include "celer/net/tcp_server-inl.h"
+#include "celer/net/server.h"
+#include "celer/net/tcp_service.h"
 
 namespace celer {
 
@@ -49,8 +50,6 @@ void ShutdownSignalHandler(int signal) {
 }
 
 Status InstallShutdownSignalHandler() {
-  g_shutdown_requested.store(false, std::memory_order_release);
-  g_last_shutdown_signal = 0;
   g_signal_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (g_signal_event_fd < 0) {
     return Status(StatusCode::kInternal, "eventfd setup failed");
@@ -80,9 +79,12 @@ void CleanupShutdownSignalHandler() noexcept {
   }
 }
 
-class EchoHandler {
+class EchoService final : public TcpService {
  public:
-  Task<Status> HandleRequests(TcpStream stream) {
+  explicit EchoService(std::uint16_t port) : TcpService(port) {}
+
+ protected:
+  Task<Status> Serve(TcpStream stream) override {
     std::array<std::byte, 4096> buffer{};
     while (true) {
       auto read_result = co_await stream.ReadSome(buffer);
@@ -92,7 +94,6 @@ class EchoHandler {
       if (*read_result == 0) [[unlikely]] {
         co_return Status::Ok();
       }
-
       auto write_status =
           co_await stream.WriteAll(std::span<const std::byte>(buffer.data(), *read_result));
       if (!write_status.ok()) [[unlikely]] {
@@ -107,7 +108,6 @@ enum class WaitResult {
   kStopped,
 };
 
-template <typename Server>
 WaitResult WaitForSignalOrServerStop(const Server& server) {
   pollfd fds[2] = {
       {.fd = g_signal_event_fd, .events = POLLIN, .revents = 0},
@@ -173,15 +173,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  celer::TcpServerOptions options;
+  celer::ServerOptions options;
   options.bind_ip = std::string(bind_ip);
-  options.port = port;
   options.thread_count = thread_count;
   options.idle_timeout_ms = idle_timeout_ms;
 
-  celer::EchoHandler handler;
-  celer::TcpServer<celer::EchoHandler> server;
-  auto start_status = server.Start(options, std::move(handler));
+  celer::EchoService echo(port);
+  celer::Server server;
+  server.AddService(&echo);
+  auto start_status = server.Start(options);
   if (!start_status.ok()) [[unlikely]] {
     spdlog::error("server start failed: {}", start_status.message());
     celer::CleanupShutdownSignalHandler();
@@ -200,5 +200,3 @@ int main(int argc, char** argv) {
   celer::CleanupShutdownSignalHandler();
   return server.exit_code();
 }
-
-template class celer::TcpServer<celer::EchoHandler>;
