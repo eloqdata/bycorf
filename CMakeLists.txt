@@ -23,11 +23,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(CELER_BUILD_EXAMPLES "Build example applications" ON)
 option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
-option(CELER_USE_REGISTERED_BUF "Use registered buffer recv mode instead of multishot" OFF)
+# Selects the network backend at compile time (see io/net_backend.h). Default OFF
+# = io_uring. DPDK is not implemented yet; turning this on is reserved for it.
+option(CELER_WITH_DPDK "Build with the DPDK net backend instead of io_uring" OFF)
 
 add_library(celer
-  src/base/log.cpp
   src/io/io.cpp
+  src/io/io_uring_backend.cpp
   src/net/tcp_server.cpp
   src/runtime/worker.cpp
   src/runtime/runtime.cpp
@@ -42,15 +44,17 @@ add_library(celer::io ALIAS celer)
 target_include_directories(celer
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party  # vendored header-only spdlog
 )
 
 target_compile_features(celer PUBLIC cxx_std_23)
 target_link_libraries(celer PUBLIC uring)
 
-if (CELER_USE_REGISTERED_BUF)
-  target_compile_definitions(celer PUBLIC CELER_RECV_MODE_REGISTERED_BUF=1)
-else()
-  target_compile_definitions(celer PUBLIC CELER_RECV_MODE_MULTISHOT=1)
+if (CELER_WITH_DPDK)
+  target_compile_definitions(celer PUBLIC CELER_WITH_DPDK)
+  # Future DPDK backend wiring goes here:
+  #   target_sources(celer PRIVATE src/io/dpdk_backend.cpp)
+  #   target_link_libraries(celer PUBLIC dpdk)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

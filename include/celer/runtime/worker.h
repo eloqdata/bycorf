@@ -27,8 +27,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include <liburing.h>
-
+#include "celer/io/completion.h"
+#include "celer/io/net_backend.h"
 #include "celer/net/connection.h"
 #include "celer/base/status.h"
 #include "celer/runtime/cross_core.h"
@@ -44,6 +44,9 @@ struct WorkerOptions {
   int idle_timeout_ms = -1;
 };
 
+// The per-core scheduler: ready queue, connection table, cross-core mailbox and
+// the run loop. All io_uring mechanism lives in the backend it owns; the Worker
+// only forwards typed submissions to it and reacts to completions.
 class Worker {
  public:
   struct ReadyTask {
@@ -68,57 +71,60 @@ class Worker {
   }
   unsigned id() const noexcept { return id_; }
 
-  // Wake worker `target` if it is parked (MSG_RING via this worker's ring, or
-  // eventfd fallback). Called from the current worker's thread.
-  void WakeRemote(unsigned target) noexcept;
-
-  io_uring_sqe* AcquireSqe();
-  Status Submit();
+  // Resume a coroutine on this worker's ready queue.
   void Enqueue(std::coroutine_handle<> handle, bool destroy_when_done = false);
+
   bool RunOnce(bool wait_for_completion);
   void Run();
   void RequestStop() noexcept;
   void Stop() noexcept { RequestStop(); }
   bool stop_requested() const noexcept { return stop_requested_.load(std::memory_order_acquire); }
-  Status EnsureRecvArmed(Connection* connection);
+
+  // Stop-signal handler, invoked by the backend when the wake eventfd fires.
+  // Returns true once the worker should leave its loop.
+  bool NotifyWake() noexcept;
+
+  // Typed io submissions, forwarded to the backend (keeps io_uring out of the
+  // net layer). recv multishot is driven by EnsureRecvArmed; its completions are
+  // handled inside the backend, which calls back into Enqueue to resume readers.
+  Status SubmitSend(const RegisteredFile& file, std::span<const std::byte> buffer,
+                    IoCompletion* tag) {
+    return backend_.SubmitSend(file, buffer, tag);
+  }
+  Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
+    return backend_.SubmitAcceptMultishot(listen_fd, tag);
+  }
+  Status EnsureRecvArmed(Connection* connection) {
+    return backend_.StartRecvMultishot(connection);
+  }
+  std::span<const std::byte> ViewMultishotBuffer(std::uint16_t buffer_id, std::size_t offset,
+                                                 std::size_t length) const {
+    return backend_.ViewRecvBuffer(buffer_id, offset, length);
+  }
+  void ReleaseReceivedBuffer(Connection* connection, std::uint16_t buffer_id) {
+    (void)connection;
+    backend_.ReleaseRecvBuffer(buffer_id);
+  }
+
   Connection* AddConnection(Connection connection);
   void BeginClose(Connection* connection, Status reason, CloseMode mode) noexcept;
   void RetireConnection(Connection* connection);
-  std::span<const std::byte> ViewMultishotBuffer(std::uint16_t buffer_id,
-                                                 std::size_t offset,
-                                                 std::size_t length) const;
-  void ReleaseReceivedBuffer(Connection* connection, std::uint16_t buffer_id);
 
  private:
-  struct MultishotBufferRing {
-    static constexpr std::uint16_t kGroupId = 1;
-
-    io_uring_buf_ring* ring = nullptr;
-    std::vector<std::byte> storage;
-    unsigned entries = 0;
-    unsigned buffer_size = 0;
-    int mask = 0;
-  };
-
   void DrainReady();
-  bool DrainCompletions();
+  void Flush();        // FlushWakes() + backend_.Submit()
+  void FlushWakes();   // wake every marked, parked target once
   void CheckIdleConnections();
   bool CanReclaim(const Connection& connection) const noexcept;
   void ReclaimConnections();
   void DiscardReceivedBuffers(Connection* connection);
-  bool InitMultishotRecv();
-  bool ArmWakePoll();
-  void HandleWakePoll();
-  void HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe);
-  void RecycleMultishotBuffer(std::uint16_t buffer_id);
-  void WakeReader(Connection* connection);
   void Spawn(Task<Status> task);
   bool DrainCrossCore();
-  void DrainRecvRearm();
 
   template <typename H>
   friend class TcpServer;
-  io_uring ring_{};
+
+  NetBackend backend_{};
   bool initialized_ = false;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> stopping_{false};
@@ -126,12 +132,7 @@ class Worker {
   std::deque<ReadyTask> ready_;
   std::unordered_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
   std::vector<std::uint64_t> retired_connection_ids_;
-  std::vector<Connection*> recv_rearm_queue_;
   std::uint64_t next_connection_id_ = 1;
-  MultishotBufferRing multishot_ring_{};
-  int wake_event_fd_ = -1;
-  bool wake_poll_armed_ = false;
-  bool owns_wake_fd_ = true;
   unsigned id_ = 0;
   CrossCore* cross_core_ = nullptr;
 };

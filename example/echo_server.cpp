@@ -27,7 +27,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
-#include "celer/base/log.h"
+#include "spdlog/spdlog.h"
 #include "celer/base/status.h"
 #include "celer/net/tcp_server-inl.h"
 
@@ -120,7 +120,7 @@ WaitResult WaitForSignalOrServerStop(const Server& server) {
       if (errno == EINTR) {
         continue;
       }
-      CELER_LOG_WARN << "poll failed errno=" << errno;
+      spdlog::warn("poll failed errno={}", errno);
       return WaitResult::kStopped;
     }
     if ((fds[0].revents & POLLIN) != 0) {
@@ -146,7 +146,6 @@ int main(int argc, char** argv) {
   std::uint16_t port = 8080;
   unsigned thread_count = 1;
   int idle_timeout_ms = -1;
-  constexpr celer::RecvMode recv_mode = celer::kDefaultRecvMode;
 
   if (argc >= 2) {
     bind_ip = argv[1];
@@ -157,7 +156,7 @@ int main(int argc, char** argv) {
   if (argc >= 4) {
     thread_count = static_cast<unsigned>(std::stoul(argv[3]));
     if (thread_count == 0) [[unlikely]] {
-      CELER_LOG_ERROR << "thread_count must be >= 1";
+      spdlog::error("thread_count must be >= 1");
       return 1;
     }
   }
@@ -165,16 +164,12 @@ int main(int argc, char** argv) {
     idle_timeout_ms = std::stoi(argv[4]);
   }
 
-  CELER_LOG_INFO << "celer echo server listening on " << bind_ip << ':' << port
-                 << " threads=" << thread_count
-                 << " idle_timeout_ms=" << idle_timeout_ms
-                 << " recv_mode="
-                 << (recv_mode == celer::RecvMode::kMultishot ? "multishot"
-                                                              : "registered_buf");
+  spdlog::info("celer echo server listening on {}:{} threads={} idle_timeout_ms={}",
+               bind_ip, port, thread_count, idle_timeout_ms);
 
   const auto signal_status = celer::InstallShutdownSignalHandler();
   if (!signal_status.ok()) [[unlikely]] {
-    CELER_LOG_ERROR << "signal setup failed: " << signal_status.message();
+    spdlog::error("signal setup failed: {}", signal_status.message());
     return 1;
   }
 
@@ -183,13 +178,12 @@ int main(int argc, char** argv) {
   options.port = port;
   options.thread_count = thread_count;
   options.idle_timeout_ms = idle_timeout_ms;
-  options.recv_mode = recv_mode;
 
   celer::EchoHandler handler;
   celer::TcpServer<celer::EchoHandler> server;
   auto start_status = server.Start(options, std::move(handler));
   if (!start_status.ok()) [[unlikely]] {
-    CELER_LOG_ERROR << "server start failed: " << start_status.message();
+    spdlog::error("server start failed: {}", start_status.message());
     celer::CleanupShutdownSignalHandler();
     return 1;
   }
@@ -197,8 +191,8 @@ int main(int argc, char** argv) {
   const celer::WaitResult wait_result = celer::WaitForSignalOrServerStop(server);
   if (wait_result == celer::WaitResult::kSignal) {
     const int signal = static_cast<int>(celer::g_last_shutdown_signal);
-    CELER_LOG_INFO << "shutdown requested by signal "
-                   << (signal == 0 ? "unknown" : std::to_string(signal));
+    spdlog::info("shutdown requested by signal {}",
+                 (signal == 0 ? std::string("unknown") : std::to_string(signal)));
     server.RequestStop();
   }
 

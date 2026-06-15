@@ -22,8 +22,6 @@
 #include <cstring>
 #include <optional>
 
-#include <liburing.h>
-
 #include "celer/io/completion.h"
 #include "celer/runtime/worker.h"
 
@@ -180,8 +178,8 @@ class WriteOperation final : public IoCompletion {
       return false;
     }
 
-    auto* sqe = connection_->worker->AcquireSqe();
-    if (sqe == nullptr) {
+    auto status = connection_->worker->SubmitSend(connection_->file, buffer_, this);
+    if (!status.ok()) {
       result_ = -EAGAIN;
       return false;
     }
@@ -189,18 +187,6 @@ class WriteOperation final : public IoCompletion {
     connection_->write_inflight = true;
     connection_->inflight_ops += 1;
     submitted_ = true;
-
-    io_uring_prep_send(
-        sqe,
-        connection_->file.is_fixed ? static_cast<int>(connection_->file.fixed_index)
-                                   : connection_->file.fd,
-        buffer_.data(),
-        static_cast<unsigned>(buffer_.size()),
-        0);
-    if (connection_->file.is_fixed) {
-      sqe->flags |= IOSQE_FIXED_FILE;
-    }
-    io_uring_sqe_set_data(sqe, this);
     return true;
   }
 

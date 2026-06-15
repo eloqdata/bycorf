@@ -23,6 +23,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 // <linux/fs.h> (pulled in transitively by liburing) defines BLOCK_SIZE as a
 // macro, which collides with moodycamel's BLOCK_SIZE identifier. We don't use
@@ -50,17 +51,21 @@ struct RemoteWork {
   void (*run_fn)(RemoteWork*) = nullptr;  // runs the user fn, stores result
 };
 
+// wake_seq value meaning "the owner is parked": the owner CASes wake_seq to this
+// before blocking; a producer bumps wake_seq after enqueuing and wakes the owner
+// only if it reads this back (so a parked owner is woken exactly once per round).
+inline constexpr std::uint32_t kWakeSeqParked = 1u << 31;
+
 // One mailbox per worker, cache-line aligned so neighbours in the contiguous
 // array never false-share their hot fields. Both queues are MPSC: every other
-// worker may push, only the owning worker drains. `sleeping` lets producers skip
-// the wake when the owner is busy-polling. ring_fd / wake_fd are how to wake it:
-// MSG_RING to the io_uring ring when supported, eventfd write as the fallback.
+// worker may push, only the owning worker drains. ring_fd / wake_fd are how to
+// wake it: MSG_RING to the io_uring ring, eventfd write as the legacy fallback.
 struct alignas(64) WorkerMailbox {
   moodycamel::ConcurrentQueue<RemoteWork*> requests;  // others -> me: run here
   moodycamel::ConcurrentQueue<RemoteWork*> replies;   // results coming back to me
   int ring_fd = -1;
   int wake_fd = -1;
-  std::atomic<bool> sleeping{false};
+  std::atomic<std::uint32_t> wake_seq{0};
 };
 
 // All workers' mailboxes — a contiguous, fixed-size array (one indirection per
@@ -80,11 +85,16 @@ class CrossCore {
   std::unique_ptr<WorkerMailbox[]> mailboxes_;
 };
 
-// "Which worker is this thread." Set once at the top of Worker::Run.
+// "Which worker is this thread", plus its per-round wake batch. Set at the top of
+// Worker::Run. wake_pending/wake_list live here (not on Worker) so the hot
+// cross-core post path marks wakes fully inline without needing Worker's
+// definition; the owning worker drains wake_list once per loop in FlushWakes.
 struct CurrentWorker {
   unsigned id = 0;
   CrossCore* cross_core = nullptr;
   Worker* self = nullptr;
+  std::vector<std::uint8_t> wake_pending;  // per-target dedup flag
+  std::vector<unsigned> wake_list;         // targets marked this round
 };
 
 inline CurrentWorker& MutableThisWorker() noexcept {
@@ -97,20 +107,32 @@ inline void SetThisWorker(unsigned id, CrossCore* cross_core, Worker* self) noex
   w.id = id;
   w.cross_core = cross_core;
   w.self = self;
+  w.wake_pending.assign(cross_core->size(), 0);
+  w.wake_list.clear();
 }
 
-// Wake worker `target` if it is parked. Defined in worker.cpp because it submits
-// an IORING_OP_MSG_RING via the current worker's ring (eventfd fallback).
-void WakeWorker(unsigned target) noexcept;
+// Mark worker `target` to be woken at the end of the current loop iteration.
+// Batched: the actual MSG_RING wake (one per parked target per round) is issued
+// by FlushWakes. Inline on the hot post path — touches only thread-local state.
+inline void MarkWakeWorker(unsigned target) noexcept {
+  CurrentWorker& w = MutableThisWorker();
+  if (target == w.id) {
+    return;  // never wake self
+  }
+  if (w.wake_pending[target] == 0) {
+    w.wake_pending[target] = 1;
+    w.wake_list.push_back(target);
+  }
+}
 
 inline void PostRequest(CrossCore* cc, unsigned target, RemoteWork* work) noexcept {
   cc->mailbox(target).requests.enqueue(work);
-  WakeWorker(target);
+  MarkWakeWorker(target);
 }
 
 inline void PostReply(CrossCore* cc, unsigned origin, RemoteWork* work) noexcept {
   cc->mailbox(origin).replies.enqueue(work);
-  WakeWorker(origin);
+  MarkWakeWorker(origin);
 }
 
 // Awaiter returned by SubmitTo. Runs fn on the target worker's thread and

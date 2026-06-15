@@ -23,9 +23,17 @@ namespace celer {
 
 class Worker;
 
+// Backend-neutral completion flags. The io backend translates its native flags
+// (e.g. io_uring's IORING_CQE_F_MORE) into these before invoking Complete(), so
+// upper layers never see backend-specific symbols.
+enum CompletionFlags : unsigned {
+  kCompletionNone = 0,
+  kCompletionMore = 1u << 0,  // a multishot op will deliver further completions
+};
+
 // Backend-neutral completion callback. The io backend invokes Complete() when an
-// operation submitted with this object as its tag finishes. `result` is the
-// op result (>=0 byte count / fd, <0 -errno).
+// operation submitted with this object as its tag finishes. `result` is the op
+// result (>=0 byte count / fd, <0 -errno); `flags` is a CompletionFlags bitset.
 class IoCompletion {
  public:
   virtual ~IoCompletion() = default;

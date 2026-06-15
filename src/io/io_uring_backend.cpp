@@ -1,0 +1,460 @@
+/*
+ * Copyright (C) 2026 EloqData Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "celer/io/io_uring_backend.h"
+
+#include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <linux/io_uring.h>
+#include <poll.h>
+
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+
+#include "spdlog/spdlog.h"
+#include "celer/runtime/worker.h"
+
+namespace celer {
+
+namespace {
+
+constexpr std::uintptr_t kMultishotTag = 1;  // low-bit marker on a recv Connection*
+int kWakePollTag = 0;        // CQE user_data sentinel: wake eventfd poll
+int kCrossCoreWakeTag = 0;   // CQE user_data sentinel: cross-core MSG_RING wake
+
+std::int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void* EncodeMultishotData(Connection* connection) {
+  return reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(connection) | kMultishotTag);
+}
+
+bool IsMultishotData(void* data) {
+  return (reinterpret_cast<std::uintptr_t>(data) & kMultishotTag) != 0;
+}
+
+Connection* DecodeMultishotConnection(void* data) {
+  return reinterpret_cast<Connection*>(reinterpret_cast<std::uintptr_t>(data) & ~kMultishotTag);
+}
+
+}  // namespace
+
+IoUringBackend::~IoUringBackend() {
+  Shutdown();
+}
+
+Status IoUringBackend::Init(const IoBackendOptions& options, Worker* worker, int wake_fd) {
+  if (initialized_) {
+    return Status::Ok();
+  }
+  worker_ = worker;
+  options_ = options;
+
+  io_uring_params params{};
+  const int rc = io_uring_queue_init_params(options.ring_entries, &ring_, &params);
+  if (rc < 0) {
+    return Status(StatusCode::kInternal, "io_uring_queue_init failed");
+  }
+  // We rely on IORING_FEAT_NODROP: the kernel queues overflowed completions
+  // instead of dropping them (and makes submit return -EBUSY as backpressure).
+  if ((params.features & IORING_FEAT_NODROP) == 0) {
+    io_uring_queue_exit(&ring_);
+    return Status(StatusCode::kFailedPrecondition,
+                  "io_uring lacks IORING_FEAT_NODROP (kernel >= 5.5 required)");
+  }
+
+  if (wake_fd >= 0) {
+    wake_event_fd_ = wake_fd;
+    owns_wake_fd_ = false;
+  } else {
+    wake_event_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    owns_wake_fd_ = true;
+    if (wake_event_fd_ < 0) {
+      io_uring_queue_exit(&ring_);
+      return Status(StatusCode::kInternal, "eventfd failed");
+    }
+  }
+
+  initialized_ = true;
+  if (!ArmWakePoll()) {
+    initialized_ = false;
+    if (owns_wake_fd_) {
+      ::close(wake_event_fd_);
+    }
+    wake_event_fd_ = -1;
+    io_uring_queue_exit(&ring_);
+    return Status(StatusCode::kInternal, "worker wake poll setup failed");
+  }
+  if (!InitMultishotRecv()) {
+    initialized_ = false;
+    if (owns_wake_fd_) {
+      ::close(wake_event_fd_);
+    }
+    wake_event_fd_ = -1;
+    io_uring_queue_exit(&ring_);
+    return Status(StatusCode::kInternal, "multishot recv setup failed");
+  }
+  return Status::Ok();
+}
+
+void IoUringBackend::Shutdown() {
+  if (!initialized_) {
+    return;
+  }
+  if (multishot_ring_.ring != nullptr) {
+    io_uring_free_buf_ring(&ring_, multishot_ring_.ring, multishot_ring_.entries,
+                           MultishotBufferRing::kGroupId);
+    multishot_ring_ = {};
+  }
+  wake_poll_armed_ = false;
+  if (wake_event_fd_ >= 0) {
+    if (owns_wake_fd_) {
+      ::close(wake_event_fd_);
+    }
+    wake_event_fd_ = -1;
+  }
+  io_uring_queue_exit(&ring_);
+  initialized_ = false;
+}
+
+io_uring_sqe* IoUringBackend::AcquireSqe() {
+  if (!initialized_) {
+    return nullptr;
+  }
+  io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+  if (sqe != nullptr) [[likely]] {
+    return sqe;
+  }
+  // SQ ring full (rare). Loop submit (frees SQ slots) + reap (frees CQ space)
+  // until an SQE is available — never returns null. We reap with ReapCompletions
+  // (NOT Poll): Poll would run DrainRecvRearm, whose StartRecvMultishot calls
+  // back into AcquireSqe and could recurse. Re-arm is deferred to Poll proper.
+  for (;;) {
+    io_uring_submit(&ring_);
+    sqe = io_uring_get_sqe(&ring_);
+    if (sqe != nullptr) {
+      return sqe;
+    }
+    ReapCompletions();
+  }
+}
+
+Status IoUringBackend::Submit() {
+  if (!initialized_) {
+    return Status(StatusCode::kFailedPrecondition, "backend is not initialized");
+  }
+  if (io_uring_submit(&ring_) < 0) {
+    return Status(StatusCode::kInternal, "io_uring_submit failed");
+  }
+  return Status::Ok();
+}
+
+bool IoUringBackend::InitMultishotRecv() {
+  multishot_ring_.entries = options_.recv_buffer_count;
+  multishot_ring_.buffer_size = options_.recv_buffer_size;
+
+  int err = 0;
+  multishot_ring_.ring = io_uring_setup_buf_ring(
+      &ring_, multishot_ring_.entries, MultishotBufferRing::kGroupId, 0, &err);
+  if (multishot_ring_.ring == nullptr) {
+    return false;
+  }
+
+  multishot_ring_.mask = io_uring_buf_ring_mask(multishot_ring_.entries);
+  multishot_ring_.storage.resize(multishot_ring_.entries * multishot_ring_.buffer_size);
+
+  io_uring_buf_ring_init(multishot_ring_.ring);
+  for (unsigned i = 0; i < multishot_ring_.entries; ++i) {
+    void* addr = multishot_ring_.storage.data() + i * multishot_ring_.buffer_size;
+    io_uring_buf_ring_add(multishot_ring_.ring, addr, multishot_ring_.buffer_size,
+                          static_cast<unsigned short>(i), multishot_ring_.mask, i);
+  }
+  io_uring_buf_ring_advance(multishot_ring_.ring, static_cast<int>(multishot_ring_.entries));
+  return true;
+}
+
+bool IoUringBackend::ArmWakePoll() {
+  if (wake_event_fd_ < 0 || wake_poll_armed_) {
+    return wake_event_fd_ >= 0;
+  }
+  auto* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return false;
+  }
+  io_uring_prep_poll_add(sqe, wake_event_fd_, POLLIN);
+  io_uring_sqe_set_data(sqe, &kWakePollTag);
+  wake_poll_armed_ = true;
+  return true;
+}
+
+void IoUringBackend::HandleWakePoll() {
+  wake_poll_armed_ = false;
+  if (wake_event_fd_ >= 0) {
+    std::uint64_t value = 0;
+    while (::read(wake_event_fd_, &value, sizeof(value)) == sizeof(value)) {
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      spdlog::warn("worker wake read failed errno={}", errno);
+    }
+  }
+  const bool stopping = worker_->NotifyWake();
+  if (!stopping && !ArmWakePoll()) {
+    spdlog::warn("failed to re-arm worker wake poll");
+  }
+}
+
+Status IoUringBackend::SubmitSend(const RegisteredFile& file,
+                                  std::span<const std::byte> buffer, IoCompletion* tag) {
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return Status(StatusCode::kUnavailable, "failed to acquire send sqe");
+  }
+  io_uring_prep_send(sqe, file.is_fixed ? static_cast<int>(file.fixed_index) : file.fd,
+                     buffer.data(), static_cast<unsigned>(buffer.size()), 0);
+  if (file.is_fixed) {
+    sqe->flags |= IOSQE_FIXED_FILE;
+  }
+  io_uring_sqe_set_data(sqe, tag);
+  return Status::Ok();
+}
+
+Status IoUringBackend::SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return Status(StatusCode::kUnavailable, "failed to acquire accept sqe");
+  }
+  io_uring_prep_multishot_accept(sqe, listen_fd, nullptr, nullptr,
+                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
+  io_uring_sqe_set_data(sqe, tag);  // plain IoCompletion* — same path as send
+  return Status::Ok();
+}
+
+Status IoUringBackend::StartRecvMultishot(Connection* connection) {
+  if (connection == nullptr) {
+    return Status(StatusCode::kInvalidArgument, "connection must not be null");
+  }
+  if (connection->recv_armed || connection->closed || connection->closing) {
+    return Status::Ok();  // already armed / not arm-able (idempotent)
+  }
+  auto* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return Status(StatusCode::kUnavailable, "failed to acquire recv multishot sqe");
+  }
+  io_uring_prep_recv_multishot(
+      sqe,
+      connection->file.is_fixed ? static_cast<int>(connection->file.fixed_index)
+                                : connection->file.fd,
+      nullptr, 0, 0);
+  sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
+  if (connection->file.is_fixed) {
+    sqe->flags |= IOSQE_FIXED_FILE;
+  }
+  sqe->flags |= IOSQE_BUFFER_SELECT;
+  sqe->buf_group = MultishotBufferRing::kGroupId;
+  io_uring_sqe_set_data(sqe, EncodeMultishotData(connection));
+
+  connection->recv_armed = true;
+  connection->inflight_ops += 1;
+  return Status::Ok();
+}
+
+void IoUringBackend::RecycleMultishotBuffer(std::uint16_t buffer_id) {
+  if (multishot_ring_.ring == nullptr || buffer_id >= multishot_ring_.entries) {
+    return;
+  }
+  void* addr = multishot_ring_.storage.data() + buffer_id * multishot_ring_.buffer_size;
+  io_uring_buf_ring_add(multishot_ring_.ring, addr, multishot_ring_.buffer_size, buffer_id,
+                        multishot_ring_.mask, 0);
+  io_uring_buf_ring_advance(multishot_ring_.ring, 1);
+}
+
+std::span<const std::byte> IoUringBackend::ViewRecvBuffer(std::uint16_t buffer_id,
+                                                         std::size_t offset,
+                                                         std::size_t length) const {
+  if (multishot_ring_.ring == nullptr || buffer_id >= multishot_ring_.entries ||
+      offset > multishot_ring_.buffer_size ||
+      length > multishot_ring_.buffer_size - offset) {
+    return {};
+  }
+  const auto* base =
+      multishot_ring_.storage.data() + buffer_id * multishot_ring_.buffer_size + offset;
+  return std::span<const std::byte>(base, length);
+}
+
+void IoUringBackend::ReleaseRecvBuffer(std::uint16_t buffer_id) {
+  RecycleMultishotBuffer(buffer_id);
+}
+
+void IoUringBackend::HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe) {
+  if (connection == nullptr) {
+    return;
+  }
+  const bool has_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
+  std::uint16_t buffer_id = 0;
+  if (has_buffer) {
+    buffer_id = static_cast<std::uint16_t>(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
+  }
+
+  if (cqe->res > 0 && has_buffer) {
+    connection->last_active_ms = NowMs();
+    connection->received_buffers.push_back(
+        ReceivedBuffer{.buffer_id = buffer_id, .size = static_cast<std::uint32_t>(cqe->res)});
+  } else if (cqe->res == 0) {
+    connection->recv_eof = true;
+  } else if (cqe->res < 0 && cqe->res != -ECANCELED && cqe->res != -ENOBUFS) {
+    connection->last_error = Status(StatusCode::kUnknown, "recv multishot failed");
+  }
+  // -ENOBUFS is not fatal: ring momentarily empty; the F_MORE-cleared path re-arms.
+
+  if (has_buffer && cqe->res <= 0) {
+    RecycleMultishotBuffer(buffer_id);
+  }
+
+  if ((cqe->flags & IORING_CQE_F_MORE) == 0) {
+    connection->recv_armed = false;
+    if (connection->inflight_ops > 0) {
+      connection->inflight_ops -= 1;
+    }
+    if (connection->state == ConnectionState::kActive && !connection->closed &&
+        !connection->closing && !connection->recv_eof) {
+      // Defer re-arm out of completion dispatch (DrainRecvRearm runs after the
+      // reap loop) so AcquireSqe is never reached from inside it.
+      if (!connection->needs_recv_rearm) {
+        connection->needs_recv_rearm = true;
+        recv_rearm_queue_.push_back(connection);
+      }
+    } else if (connection->state != ConnectionState::kActive) {
+      connection->state = ConnectionState::kDraining;
+    }
+  }
+
+  // Resume the waiting reader (deferred via the worker's ready queue — completion
+  // dispatch must not run coroutines inline).
+  if (connection->read_waiter) {
+    auto waiter = connection->read_waiter;
+    connection->read_waiter = {};
+    connection->read_inflight = false;
+    worker_->Enqueue(waiter);
+  }
+}
+
+void IoUringBackend::DispatchCqe(io_uring_cqe* cqe) {
+  void* data = io_uring_cqe_get_data(cqe);
+  if (data == &kWakePollTag) {
+    HandleWakePoll();
+  } else if (data == &kCrossCoreWakeTag) {
+    // Cross-core wake marker; the worker drains its mailbox separately.
+  } else if (IsMultishotData(data)) {
+    HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
+  } else {
+    auto* op = static_cast<IoCompletion*>(data);
+    if (op != nullptr) {
+      // Translate native flags to neutral CompletionFlags (multishot accept needs
+      // "more" to decide re-arm; one-shot send never carries it).
+      const unsigned flags = (cqe->flags & IORING_CQE_F_MORE) ? kCompletionMore : kCompletionNone;
+      op->Complete(*worker_, cqe->res, flags);
+    }
+  }
+}
+
+bool IoUringBackend::ReapCompletions() {
+  unsigned head = 0;
+  io_uring_cqe* cqe = nullptr;
+  unsigned processed = 0;
+  io_uring_for_each_cqe(&ring_, head, cqe) {
+    DispatchCqe(cqe);
+    ++processed;
+  }
+  if (processed != 0) {
+    io_uring_cq_advance(&ring_, processed);
+    return true;
+  }
+  return false;
+}
+
+void IoUringBackend::DrainRecvRearm() {
+  if (recv_rearm_queue_.empty()) {
+    return;
+  }
+  std::vector<Connection*> batch;
+  batch.swap(recv_rearm_queue_);
+  for (Connection* connection : batch) {
+    connection->needs_recv_rearm = false;
+    if (connection->state == ConnectionState::kActive && !connection->closed &&
+        !connection->closing && !connection->recv_eof) {
+      auto status = StartRecvMultishot(connection);
+      if (!status.ok()) {
+        connection->last_error = status;
+      }
+    }
+  }
+}
+
+bool IoUringBackend::Poll() {
+  const bool processed = ReapCompletions();
+  if (processed) {
+    DrainRecvRearm();
+  }
+  return processed;
+}
+
+bool IoUringBackend::Wait(int timeout_ms) {
+  io_uring_cqe* cqe = nullptr;
+  int rc = 0;
+  if (timeout_ms >= 0) {
+    __kernel_timespec ts{
+        .tv_sec = timeout_ms / 1000,
+        .tv_nsec = static_cast<long long>(timeout_ms % 1000) * 1000 * 1000,
+    };
+    rc = io_uring_wait_cqe_timeout(&ring_, &cqe, &ts);
+    if (rc == -ETIME) {
+      return true;  // tick: no completion, caller handles idle/reclaim
+    }
+  } else {
+    rc = io_uring_wait_cqe(&ring_, &cqe);
+  }
+  if (rc < 0) {
+    spdlog::error("backend wait_cqe failed rc={}", rc);
+    return false;
+  }
+  DispatchCqe(cqe);
+  io_uring_cqe_seen(&ring_, cqe);
+  Poll();  // drain any other ready completions + re-arm recvs
+  return true;
+}
+
+void IoUringBackend::WakeRemote(int peer_ring_fd) noexcept {
+  io_uring_sqe* sqe = AcquireSqe();  // never null while initialized
+  io_uring_prep_msg_ring(sqe, peer_ring_fd, 0,
+                         reinterpret_cast<std::uintptr_t>(&kCrossCoreWakeTag), 0);
+  io_uring_sqe_set_data(sqe, &kCrossCoreWakeTag);
+}
+
+void IoUringBackend::WakeSelf() noexcept {
+  if (wake_event_fd_ < 0) {
+    return;
+  }
+  const std::uint64_t one = 1;
+  (void)::write(wake_event_fd_, &one, sizeof(one));
+}
+
+}  // namespace celer

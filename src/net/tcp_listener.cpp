@@ -18,7 +18,6 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <liburing.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -69,14 +68,10 @@ Status ListenerAcceptState::Arm() {
     return Status(StatusCode::kInvalidArgument, "listener is not bound");
   }
 
-  auto* sqe = listener_->worker_->AcquireSqe();
-  if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire accept sqe");
+  auto status = listener_->worker_->SubmitAcceptMultishot(listener_->fd_, this);
+  if (!status.ok()) {
+    return status;
   }
-
-  io_uring_prep_multishot_accept(sqe, listener_->fd_, nullptr, nullptr,
-                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
-  io_uring_sqe_set_data(sqe, this);
   armed_ = true;
   return Status::Ok();
 }
@@ -106,7 +101,7 @@ void ListenerAcceptState::Complete(Worker& worker, int result, unsigned flags) {
     last_error_ = Status(StatusCode::kFailedPrecondition, "listener is closed");
   }
 
-  if ((flags & IORING_CQE_F_MORE) == 0) {
+  if ((flags & kCompletionMore) == 0) {
     armed_ = false;
     if (listener_ != nullptr && !listener_->closed_) {
       auto status = Arm();

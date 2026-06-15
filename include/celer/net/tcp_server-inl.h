@@ -17,7 +17,7 @@
 #ifndef CELER_NET_TCP_SERVER_INL_H_
 #define CELER_NET_TCP_SERVER_INL_H_
 
-#include "celer/base/log.h"
+#include "spdlog/spdlog.h"
 #include "celer/net/connection.h"
 #include "celer/net/tcp_server.h"
 
@@ -137,7 +137,7 @@ Task<Status> TcpServer<Handler>::AcceptLoop(WorkerRuntime& rt, Worker& worker) {
         co_return Status::Ok();
       }
       if (code != StatusCode::kUnavailable) {
-        CELER_LOG_WARN << "accept failed: " << accepted.status().message();
+        spdlog::warn("accept failed: {}", accepted.status().message());
       }
       continue;
     }
@@ -157,7 +157,7 @@ int TcpServer<Handler>::RunWorker(WorkerRuntime& rt, unsigned index, Worker& wor
 
   auto init_status = worker.Init(worker_options);
   if (!init_status.ok()) [[unlikely]] {
-    CELER_LOG_ERROR << "worker[" << index << "] init failed: " << init_status.message();
+    spdlog::error("worker[{}] init failed: {}", index, init_status.message());
     return 1;
   }
 
@@ -165,7 +165,7 @@ int TcpServer<Handler>::RunWorker(WorkerRuntime& rt, unsigned index, Worker& wor
   auto bind_status = rt.listener.Bind(&worker, options_.bind_ip, options_.port,
                                       options_.backlog, reuse_port);
   if (!bind_status.ok()) [[unlikely]] {
-    CELER_LOG_ERROR << "worker[" << index << "] bind failed: " << bind_status.message();
+    spdlog::error("worker[{}] bind failed: {}", index, bind_status.message());
     worker.RequestStop();
     return 1;
   }

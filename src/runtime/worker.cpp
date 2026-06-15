@@ -16,29 +16,18 @@
 
 #include "celer/runtime/worker.h"
 
-#include <sys/eventfd.h>
 #include <unistd.h>
 
-#include <liburing.h>
-#include <linux/io_uring.h>
-#include <poll.h>
-
 #include <chrono>
-#include <cstring>
 #include <cstdint>
-#include <algorithm>
-#include <cerrno>
+#include <utility>
+#include <vector>
 
-#include "celer/base/log.h"
-#include "celer/io/completion.h"
+#include "spdlog/spdlog.h"
 
 namespace celer {
 
 namespace {
-
-constexpr std::uintptr_t kMultishotTag = 1;
-int kWakePollTag = 0;
-int kCrossCoreWakeTag = 0;  // CQE user_data marker for a cross-core wakeup
 
 std::int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -46,78 +35,36 @@ std::int64_t NowMs() {
       .count();
 }
 
-void* EncodeMultishotData(Connection* connection) {
-  return reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(connection) | kMultishotTag);
-}
+} // namespace
 
-bool IsMultishotData(void* data) {
-  return (reinterpret_cast<std::uintptr_t>(data) & kMultishotTag) != 0;
-}
+Worker::~Worker() { Shutdown(); }
 
-Connection* DecodeMultishotConnection(void* data) {
-  return reinterpret_cast<Connection*>(reinterpret_cast<std::uintptr_t>(data) & ~kMultishotTag);
-}
-
-}  // namespace
-
-Worker::~Worker() {
-  Shutdown();
-}
-
-Status Worker::Init(const WorkerOptions& options) {
+Status Worker::Init(const WorkerOptions &options) {
   if (initialized_) {
     return Status::Ok();
   }
-
-  io_uring_params params{};
-  const int rc = io_uring_queue_init_params(options.ring_entries, &ring_, &params);
-  if (rc < 0) {
-    return Status(StatusCode::kInternal, "io_uring_queue_init failed");
-  }
-  // We rely on IORING_FEAT_NODROP: the kernel queues overflowed completions
-  // instead of dropping them (and makes submit return -EBUSY as backpressure).
-  // Without it, AcquireSqe's submit+reap loop could silently lose CQEs.
-  if ((params.features & IORING_FEAT_NODROP) == 0) {
-    io_uring_queue_exit(&ring_);
+  // The Runtime binds a CrossCore (and its wake eventfds) for every worker
+  // before Run(); a worker only ever runs through it, so cross_core_ is an
+  // invariant.
+  if (cross_core_ == nullptr) {
     return Status(StatusCode::kFailedPrecondition,
-                  "io_uring lacks IORING_FEAT_NODROP (kernel >= 5.5 required)");
+                  "worker requires BindCrossCore before Init");
   }
-
-  if (cross_core_ != nullptr) {
-    // Runtime pre-created the eventfd; reuse it and advertise our ring so other
-    // workers can wake us via MSG_RING.
-    wake_event_fd_ = cross_core_->mailbox(id_).wake_fd;
-    owns_wake_fd_ = false;
-    cross_core_->mailbox(id_).ring_fd = ring_.ring_fd;
-  } else {
-    wake_event_fd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    owns_wake_fd_ = true;
-    if (wake_event_fd_ < 0) {
-      io_uring_queue_exit(&ring_);
-      return Status(StatusCode::kInternal, "eventfd failed");
-    }
-  }
-
   options_ = options;
+
+  IoBackendOptions backend_options;
+  backend_options.ring_entries = options.ring_entries;
+  backend_options.recv_buffer_count = options.recv_buffer_count;
+  // Runtime pre-created the eventfd; the backend reuses it (does not own it).
+  auto status =
+      backend_.Init(backend_options, this, cross_core_->mailbox(id_).wake_fd);
+  if (!status.ok()) {
+    return status;
+  }
+
+  // Advertise our ring so other workers can wake us via MSG_RING.
+  cross_core_->mailbox(id_).ring_fd = backend_.WakeHandle();
   initialized_ = true;
-  if (!ArmWakePoll()) {
-    initialized_ = false;
-    if (owns_wake_fd_) {
-      ::close(wake_event_fd_);
-    }
-    wake_event_fd_ = -1;
-    io_uring_queue_exit(&ring_);
-    return Status(StatusCode::kInternal, "worker wake poll setup failed");
-  }
-  if (!InitMultishotRecv()) {
-    initialized_ = false;
-    if (owns_wake_fd_) {
-      ::close(wake_event_fd_);
-    }
-    wake_event_fd_ = -1;
-    io_uring_queue_exit(&ring_);
-    return Status(StatusCode::kInternal, "multishot recv setup failed");
-  }
   return Status::Ok();
 }
 
@@ -125,76 +72,8 @@ void Worker::Shutdown() {
   if (!initialized_) {
     return;
   }
-  if (multishot_ring_.ring != nullptr) {
-    io_uring_free_buf_ring(&ring_, multishot_ring_.ring, multishot_ring_.entries,
-                           MultishotBufferRing::kGroupId);
-    multishot_ring_ = {};
-  }
-  wake_poll_armed_ = false;
-  if (wake_event_fd_ >= 0) {
-    if (owns_wake_fd_) {
-      ::close(wake_event_fd_);
-    }
-    wake_event_fd_ = -1;
-  }
-  io_uring_queue_exit(&ring_);
+  backend_.Shutdown();
   initialized_ = false;
-}
-
-io_uring_sqe* Worker::AcquireSqe() {
-  if (!initialized_) {
-    return nullptr;
-  }
-
-  io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-  if (sqe != nullptr) [[likely]] {
-    return sqe;
-  }
-
-  // SQ ring full (rare). Seastar's get_sqe: loop submit (frees SQ slots) + reap
-  // (frees CQ space) until an SQE is available — never returns null. Safe to reap
-  // here because completion handlers never submit io (multishot re-arm is deferred
-  // to RunOnce), so this is never re-entered from inside DrainCompletions.
-  for (;;) {
-    io_uring_submit(&ring_);
-    sqe = io_uring_get_sqe(&ring_);
-    if (sqe != nullptr) {
-      return sqe;
-    }
-    DrainCompletions();  // CQ was full; reap to let the next submit make progress
-  }
-}
-
-void Worker::DrainRecvRearm() {
-  if (recv_rearm_queue_.empty()) {
-    return;
-  }
-  // Swap out so a re-entrant push (rare: AcquireSqe reaping here flags more
-  // re-arms) lands in the fresh queue, not the batch we're iterating.
-  std::vector<Connection*> batch;
-  batch.swap(recv_rearm_queue_);
-  for (Connection* connection : batch) {
-    connection->needs_recv_rearm = false;
-    if (connection->state == ConnectionState::kActive && !connection->closed &&
-        !connection->closing && !connection->recv_eof) {
-      auto status = EnsureRecvArmed(connection);
-      if (!status.ok()) {
-        connection->last_error = status;
-      }
-    }
-  }
-}
-
-Status Worker::Submit() {
-  if (!initialized_) {
-    return Status(StatusCode::kFailedPrecondition, "worker is not initialized");
-  }
-
-  const int rc = io_uring_submit(&ring_);
-  if (rc < 0) {
-    return Status(StatusCode::kInternal, "io_uring_submit failed");
-  }
-  return Status::Ok();
 }
 
 void Worker::Spawn(Task<Status> task) {
@@ -211,29 +90,31 @@ void Worker::Spawn(Task<Status> task) {
 
 void Worker::RequestStop() noexcept {
   stop_requested_.store(true, std::memory_order_release);
-  if (wake_event_fd_ < 0) {
-    return;
-  }
-
-  std::uint64_t value = 1;
-  const ssize_t rc = ::write(wake_event_fd_, &value, sizeof(value));
-  (void)rc;
+  backend_.WakeSelf();
 }
 
-Connection* Worker::AddConnection(Connection connection) {
+bool Worker::NotifyWake() noexcept {
+  if (stop_requested_.load(std::memory_order_acquire)) {
+    stopping_.store(true, std::memory_order_release);
+  }
+  return stopping_.load(std::memory_order_acquire);
+}
+
+Connection *Worker::AddConnection(Connection connection) {
   const int fd = connection.file.fd;
   if (fd < 0) {
     return nullptr;
   }
   auto owned = std::make_unique<Connection>(std::move(connection));
-  Connection* raw = owned.get();
+  Connection *raw = owned.get();
   raw->id = next_connection_id_++;
   raw->last_active_ms = NowMs();
   connections_[raw->id] = std::move(owned);
   return raw;
 }
 
-void Worker::BeginClose(Connection* connection, Status reason, CloseMode mode) noexcept {
+void Worker::BeginClose(Connection *connection, Status reason,
+                        CloseMode mode) noexcept {
   if (connection == nullptr) {
     return;
   }
@@ -261,11 +142,18 @@ void Worker::BeginClose(Connection* connection, Status reason, CloseMode mode) n
     connection->recv_eof = false;
   }
 
-  WakeReader(connection);
+  // Resume any reader waiting on this connection (deferred via the ready
+  // queue).
+  if (connection->read_waiter) {
+    auto waiter = connection->read_waiter;
+    connection->read_waiter = {};
+    connection->read_inflight = false;
+    Enqueue(waiter);
+  }
   RetireConnection(connection);
 }
 
-void Worker::RetireConnection(Connection* connection) {
+void Worker::RetireConnection(Connection *connection) {
   if (connection == nullptr) {
     return;
   }
@@ -275,8 +163,10 @@ void Worker::RetireConnection(Connection* connection) {
   connection->retired = true;
   connection->closing = true;
   connection->state = connection->recv_armed || connection->inflight_ops != 0 ||
-                              connection->read_waiter || connection->read_inflight ||
-                              connection->write_inflight || !connection->received_buffers.empty()
+                              connection->read_waiter ||
+                              connection->read_inflight ||
+                              connection->write_inflight ||
+                              !connection->received_buffers.empty()
                           ? ConnectionState::kDraining
                           : ConnectionState::kRetired;
   DiscardReceivedBuffers(connection);
@@ -285,7 +175,8 @@ void Worker::RetireConnection(Connection* connection) {
 
 void Worker::Enqueue(std::coroutine_handle<> handle, bool destroy_when_done) {
   if (handle) {
-    ready_.push_back(ReadyTask{.handle = handle, .destroy_when_done = destroy_when_done});
+    ready_.push_back(
+        ReadyTask{.handle = handle, .destroy_when_done = destroy_when_done});
   }
 }
 
@@ -309,128 +200,11 @@ void Worker::DrainReady() {
   }
 }
 
-bool Worker::InitMultishotRecv() {
-  multishot_ring_.entries = options_.recv_buffer_count;
-  multishot_ring_.buffer_size = 4096;
-
-  int err = 0;
-  multishot_ring_.ring = io_uring_setup_buf_ring(
-      &ring_, multishot_ring_.entries, MultishotBufferRing::kGroupId, 0, &err);
-  if (multishot_ring_.ring == nullptr) {
-    return false;
-  }
-
-  multishot_ring_.mask = io_uring_buf_ring_mask(multishot_ring_.entries);
-  multishot_ring_.storage.resize(multishot_ring_.entries * multishot_ring_.buffer_size);
-
-  io_uring_buf_ring_init(multishot_ring_.ring);
-  for (unsigned i = 0; i < multishot_ring_.entries; ++i) {
-    void* addr = multishot_ring_.storage.data() + i * multishot_ring_.buffer_size;
-    io_uring_buf_ring_add(multishot_ring_.ring, addr, multishot_ring_.buffer_size,
-                          static_cast<unsigned short>(i), multishot_ring_.mask, i);
-  }
-  io_uring_buf_ring_advance(multishot_ring_.ring, static_cast<int>(multishot_ring_.entries));
-  return true;
-}
-
-bool Worker::ArmWakePoll() {
-  if (wake_event_fd_ < 0 || wake_poll_armed_) {
-    return wake_event_fd_ >= 0;
-  }
-
-  auto* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return false;
-  }
-
-  io_uring_prep_poll_add(sqe, wake_event_fd_, POLLIN);
-  io_uring_sqe_set_data(sqe, &kWakePollTag);
-  wake_poll_armed_ = true;
-  return true;
-}
-
-void Worker::HandleWakePoll() {
-  wake_poll_armed_ = false;
-
-  if (wake_event_fd_ >= 0) {
-    std::uint64_t value = 0;
-    while (::read(wake_event_fd_, &value, sizeof(value)) == sizeof(value)) {
-    }
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      CELER_LOG_WARN << "worker wake read failed errno=" << errno;
-    }
-  }
-
-  if (stop_requested_.load(std::memory_order_acquire)) {
-    stopping_.store(true, std::memory_order_release);
-  }
-
-  if (!stopping_.load(std::memory_order_acquire) && !ArmWakePoll()) {
-    CELER_LOG_WARN << "failed to re-arm worker wake poll";
-  }
-}
-
-Status Worker::EnsureRecvArmed(Connection* connection) {
-  if (connection == nullptr) {
-    return Status(StatusCode::kInvalidArgument, "connection must not be null");
-  }
-  if (connection->recv_armed || connection->closed || connection->closing) {
-    return Status::Ok();
-  }
-
-  auto* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire recv multishot sqe");
-  }
-
-  io_uring_prep_recv_multishot(
-      sqe,
-      connection->file.is_fixed ? static_cast<int>(connection->file.fixed_index)
-                                : connection->file.fd,
-      nullptr,
-      0,
-      0);
-  sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
-  if (connection->file.is_fixed) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  sqe->flags |= IOSQE_BUFFER_SELECT;
-  sqe->buf_group = MultishotBufferRing::kGroupId;
-  io_uring_sqe_set_data(sqe, EncodeMultishotData(connection));
-
-  connection->recv_armed = true;
-  connection->inflight_ops += 1;
-  return Status::Ok();
-}
-
-void Worker::RecycleMultishotBuffer(std::uint16_t buffer_id) {
-  if (multishot_ring_.ring == nullptr || buffer_id >= multishot_ring_.entries) {
-    return;
-  }
-
-  void* addr = multishot_ring_.storage.data() + buffer_id * multishot_ring_.buffer_size;
-  io_uring_buf_ring_add(multishot_ring_.ring, addr, multishot_ring_.buffer_size, buffer_id,
-                        multishot_ring_.mask, 0);
-  io_uring_buf_ring_advance(multishot_ring_.ring, 1);
-}
-
-void Worker::WakeReader(Connection* connection) {
-  if (connection != nullptr && connection->read_waiter) {
-    auto waiter = connection->read_waiter;
-    connection->read_waiter = {};
-    connection->read_inflight = false;
-    Enqueue(waiter);
-  }
-}
-
-bool Worker::CanReclaim(const Connection& connection) const noexcept {
+bool Worker::CanReclaim(const Connection &connection) const noexcept {
   return connection.state != ConnectionState::kActive &&
-         connection.inflight_ops == 0 &&
-         !connection.read_waiter &&
-         !connection.read_inflight &&
-         !connection.write_inflight &&
-         !connection.recv_armed &&
-         connection.received_buffers.empty();
+         connection.inflight_ops == 0 && !connection.read_waiter &&
+         !connection.read_inflight && !connection.write_inflight &&
+         !connection.recv_armed && connection.received_buffers.empty();
 }
 
 void Worker::ReclaimConnections() {
@@ -447,7 +221,7 @@ void Worker::ReclaimConnections() {
       continue;
     }
 
-    Connection* connection = it->second.get();
+    Connection *connection = it->second.get();
     if (!CanReclaim(*connection)) {
       connection->state = ConnectionState::kDraining;
       still_retired.push_back(connection_id);
@@ -461,86 +235,14 @@ void Worker::ReclaimConnections() {
   retired_connection_ids_ = std::move(still_retired);
 }
 
-void Worker::HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe) {
+void Worker::DiscardReceivedBuffers(Connection *connection) {
   if (connection == nullptr) {
     return;
   }
-
-  const bool has_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
-  std::uint16_t buffer_id = 0;
-  if (has_buffer) {
-    buffer_id = static_cast<std::uint16_t>(cqe->flags >> IORING_CQE_BUFFER_SHIFT);
-  }
-
-  if (cqe->res > 0 && has_buffer) {
-    connection->last_active_ms = NowMs();
-    connection->received_buffers.push_back(
-        ReceivedBuffer{.buffer_id = buffer_id, .size = static_cast<std::uint32_t>(cqe->res)});
-  } else if (cqe->res == 0) {
-    connection->recv_eof = true;
-  } else if (cqe->res < 0 && cqe->res != -ECANCELED && cqe->res != -ENOBUFS) {
-    connection->last_error = Status(StatusCode::kUnknown, "recv multishot failed");
-  }
-  // -ENOBUFS is not fatal: the buffer ring was momentarily empty and the kernel
-  // ended the multishot. The F_MORE-cleared path below re-arms; the reader
-  // recycles buffers as it consumes, so reception resumes.
-
-  if (has_buffer && cqe->res <= 0) {
-    RecycleMultishotBuffer(buffer_id);
-  }
-
-  if ((cqe->flags & IORING_CQE_F_MORE) == 0) {
-    connection->recv_armed = false;
-    if (connection->inflight_ops > 0) {
-      connection->inflight_ops -= 1;
-    }
-    if (connection->state == ConnectionState::kActive &&
-        !connection->closed && !connection->closing && !connection->recv_eof) {
-      // Defer re-arm out of the completion handler: submitting here (via
-      // AcquireSqe) could re-enter DrainCompletions. RunOnce re-arms after
-      // completion processing instead (Seastar's "completions never submit").
-      if (!connection->needs_recv_rearm) {
-        connection->needs_recv_rearm = true;
-        recv_rearm_queue_.push_back(connection);
-      }
-    } else if (connection->state != ConnectionState::kActive) {
-      connection->state = ConnectionState::kDraining;
-    }
-  }
-
-  WakeReader(connection);
-}
-
-std::span<const std::byte> Worker::ViewMultishotBuffer(std::uint16_t buffer_id,
-                                                       std::size_t offset,
-                                                       std::size_t length) const {
-  if (multishot_ring_.ring == nullptr || buffer_id >= multishot_ring_.entries ||
-      offset > multishot_ring_.buffer_size ||
-      length > multishot_ring_.buffer_size - offset) {
-    return {};
-  }
-
-  const auto* base =
-      multishot_ring_.storage.data() + buffer_id * multishot_ring_.buffer_size + offset;
-  return std::span<const std::byte>(base, length);
-}
-
-void Worker::ReleaseReceivedBuffer(Connection* connection, std::uint16_t buffer_id) {
-  if (connection == nullptr) {
-    return;
-  }
-  RecycleMultishotBuffer(buffer_id);
-}
-
-void Worker::DiscardReceivedBuffers(Connection* connection) {
-  if (connection == nullptr) {
-    return;
-  }
-
   while (!connection->received_buffers.empty()) {
     auto received = connection->received_buffers.front();
     connection->received_buffers.pop_front();
-    RecycleMultishotBuffer(received.buffer_id);
+    backend_.ReleaseRecvBuffer(received.buffer_id);
   }
 }
 
@@ -550,10 +252,11 @@ void Worker::CheckIdleConnections() {
   }
 
   const std::int64_t now_ms = NowMs();
-  for (auto& [connection_id, owned] : connections_) {
+  for (auto &[connection_id, owned] : connections_) {
     (void)connection_id;
-    Connection* connection = owned.get();
-    if (connection->retired || connection->closed || connection->last_active_ms <= 0) {
+    Connection *connection = owned.get();
+    if (connection->retired || connection->closed ||
+        connection->last_active_ms <= 0) {
       continue;
     }
     if (now_ms - connection->last_active_ms < options_.idle_timeout_ms) {
@@ -566,168 +269,102 @@ void Worker::CheckIdleConnections() {
   }
 }
 
-bool Worker::DrainCompletions() {
-  unsigned head = 0;
-  io_uring_cqe* cqe = nullptr;
-  unsigned processed = 0;
-
-  io_uring_for_each_cqe(&ring_, head, cqe) {
-    void* data = io_uring_cqe_get_data(cqe);
-    if (data == &kWakePollTag) {
-      HandleWakePoll();
-    } else if (data == &kCrossCoreWakeTag) {
-      // Cross-core wake marker (MSG_RING). The actual work is drained from the
-      // mailbox by DrainCrossCore(); nothing to do per-CQE.
-    } else if (IsMultishotData(data)) {
-      HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
-    } else {
-      auto* op = static_cast<IoCompletion*>(data);
-      if (op != nullptr) {
-        op->Complete(*this, cqe->res, cqe->flags);
-      }
-    }
-    ++processed;
-  }
-
-  if (processed != 0) {
-    io_uring_cq_advance(&ring_, processed);
-    return true;
-  }
-  return false;
-}
-
 bool Worker::DrainCrossCore() {
-  if (cross_core_ == nullptr) {
-    return false;
-  }
-  WorkerMailbox& mb = cross_core_->mailbox(id_);
-  RemoteWork* batch[64];
+  WorkerMailbox &mb = cross_core_->mailbox(id_);
+  RemoteWork *batch[64];
 
-  // One bounded batch each, NOT drain-to-empty: leftover work is picked up on the
-  // next loop iteration so io_uring completions are not starved under load.
+  // One bounded batch each, NOT drain-to-empty: leftover work is picked up on
+  // the next loop iteration so io completions are not starved under load.
   const std::size_t nreq = mb.requests.try_dequeue_bulk(batch, 64);
   for (std::size_t i = 0; i < nreq; ++i) {
-    RemoteWork* work = batch[i];
-    work->run_fn(work);                          // run fn, store result in awaiter
-    PostReply(cross_core_, work->origin, work);  // handed off; don't touch after
+    RemoteWork *work = batch[i];
+    work->run_fn(work); // run fn, store result in awaiter
+    PostReply(cross_core_, work->origin, work); // handed off; don't touch after
   }
 
   const std::size_t nrep = mb.replies.try_dequeue_bulk(batch, 64);
   for (std::size_t i = 0; i < nrep; ++i) {
-    batch[i]->waiter.resume();  // don't touch after resume
+    batch[i]->waiter.resume(); // don't touch after resume
   }
 
   return nreq > 0 || nrep > 0;
 }
 
-void Worker::WakeRemote(unsigned target) noexcept {
-  WorkerMailbox& mb = cross_core_->mailbox(target);
-  if (!mb.sleeping.load(std::memory_order_seq_cst)) {
-    return;  // target is busy-polling; it will drain on its next loop
+void Worker::FlushWakes() {
+  CurrentWorker &w = MutableThisWorker();
+  if (w.wake_list.empty()) {
+    return;
   }
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe != nullptr) [[likely]] {
-    io_uring_prep_msg_ring(sqe, mb.ring_fd, 0,
-                           reinterpret_cast<std::uintptr_t>(&kCrossCoreWakeTag), 0);
-    io_uring_sqe_set_data(sqe, &kCrossCoreWakeTag);
-  } else {
-    const std::uint64_t one = 1;
-    (void)::write(mb.wake_fd, &one, sizeof(one));  // rare: io_uring_submit failed
+  for (unsigned target : w.wake_list) {
+    w.wake_pending[target] = 0;
+    WorkerMailbox &mb = cross_core_->mailbox(target);
+    if (mb.wake_seq.fetch_add(1, std::memory_order_acq_rel) == kWakeSeqParked) {
+      backend_.WakeRemote(mb.ring_fd);
+    }
   }
+  w.wake_list.clear();
 }
 
-void WakeWorker(unsigned target) noexcept {
-  ThisWorker().self->WakeRemote(target);
+void Worker::Flush() {
+  FlushWakes();
+  const auto status = backend_.Submit();
+  if (!status.ok()) [[unlikely]] {
+    spdlog::error("worker submit failed: {}", status.message());
+  }
 }
 
 bool Worker::RunOnce(bool wait_for_completion) {
-  if (!initialized_) {
+  if (!initialized_) [[unlikely]] {
     return false;
   }
 
+  // 1. Drain every source of work: pending coroutines, the cross-core mailbox,
+  //    and reaped io completions (Poll also re-arms recv). DrainReady then
+  //    resumes everything they enqueued — it loops until the ready queue is
+  //    empty, so chained resumes are handled here too.
+  bool did_work = !ready_.empty();
+  did_work |= DrainCrossCore();
+  did_work |= backend_.Poll();
   DrainReady();
-  if (DrainCrossCore()) {
-    DrainReady();
-  }
-  if (DrainCompletions()) {
-    DrainRecvRearm();
-    DrainReady();
-    return true;
-  }
 
-  const auto submit_status = Submit();
-  if (!submit_status.ok()) {
-    CELER_LOG_ERROR << "worker submit failed: " << submit_status.message();
-    return false;
-  }
+  // 2. The single submit point: flush queued SQEs (sends, recv re-arms) and
+  //    batched cross-core wakes. Completions dispatched while parked are
+  //    resumed by the next iteration, which always reaches here before it can
+  //    block.
+  Flush();
+  ReclaimConnections();
 
   if (!wait_for_completion) {
-    CheckIdleConnections();
-    ReclaimConnections();
-    return DrainCompletions();
+    return did_work; // shutdown drain: stop once no progress is left
+  }
+  if (did_work) {
+    return true; // had work; loop again without parking
   }
 
-  // About to park. Publish "sleeping" so producers know to wake us, then recheck
-  // the mailbox once — this closes the lost-wakeup race.
-  WorkerMailbox* mb = (cross_core_ != nullptr) ? &cross_core_->mailbox(id_) : nullptr;
-  if (mb != nullptr) {
-    mb->sleeping.store(true, std::memory_order_seq_cst);
-    if (DrainCrossCore()) {
-      mb->sleeping.store(false, std::memory_order_release);
-      DrainReady();
-      return true;
-    }
-  }
-
-  io_uring_cqe* cqe = nullptr;
-  int rc = 0;
-  if (options_.idle_timeout_ms > 0) {
-    __kernel_timespec timeout{
-        .tv_sec = 0,
-        .tv_nsec = 100 * 1000 * 1000,
-    };
-    rc = io_uring_wait_cqe_timeout(&ring_, &cqe, &timeout);
-    if (rc == -ETIME) {
-      if (mb != nullptr) {
-        mb->sleeping.store(false, std::memory_order_release);
-      }
-      CheckIdleConnections();
-      ReclaimConnections();
-      return true;
-    }
-  } else {
-    rc = io_uring_wait_cqe(&ring_, &cqe);
-  }
-  if (mb != nullptr) {
-    mb->sleeping.store(false, std::memory_order_release);
-  }
-  if (rc < 0) {
-    CELER_LOG_ERROR << "worker wait_cqe failed rc=" << rc;
-    return false;
-  }
-
-  void* data = io_uring_cqe_get_data(cqe);
-  if (data == &kWakePollTag) {
-    HandleWakePoll();
-  } else if (data == &kCrossCoreWakeTag) {
-    // Cross-core wake marker; mailbox drained below.
-  } else if (IsMultishotData(data)) {
-    HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
-  } else {
-    auto* op = static_cast<IoCompletion*>(data);
-    if (op != nullptr) {
-      op->Complete(*this, cqe->res, cqe->flags);
-    }
-  }
-  io_uring_cqe_seen(&ring_, cqe);
-
-  DrainCompletions();
-  DrainRecvRearm();
-  DrainCrossCore();
-  DrainReady();
+  // 3. Idle — park. Check idle timeouts only here, off the hot path. The
+  // wake_seq
+  //    handshake closes the lost-wakeup race: snapshot it, recheck the mailbox
+  //    once, then CAS to the parked sentinel. The recheck catches work already
+  //    enqueued; the CAS catches work published after the snapshot (a
+  //    producer's fetch_add changes wake_seq, so the CAS fails and we loop
+  //    instead of park).
   CheckIdleConnections();
-  ReclaimConnections();
-  return true;
+  WorkerMailbox &mb = cross_core_->mailbox(id_);
+  const std::uint32_t seq = mb.wake_seq.load(std::memory_order_acquire);
+  if (DrainCrossCore()) {
+    return true; // raced: work arrived; next iteration drains + submits it
+  }
+  std::uint32_t expected = seq;
+  if (!mb.wake_seq.compare_exchange_strong(expected, kWakeSeqParked,
+                                           std::memory_order_acq_rel,
+                                           std::memory_order_relaxed)) {
+    return true; // a producer published work; loop again instead of parking
+  }
+
+  const int timeout_ms = options_.idle_timeout_ms > 0 ? 100 : -1;
+  const bool ok = backend_.Wait(timeout_ms);       // blocks; dispatches on wake
+  mb.wake_seq.store(0, std::memory_order_release); // leave the parked state
+  return ok; // next iteration drains what Wait dispatched
 }
 
 void Worker::Run() {
@@ -735,21 +372,20 @@ void Worker::Run() {
   stop_requested_.store(false, std::memory_order_release);
   stopping_.store(false, std::memory_order_release);
   while (!stopping_.load(std::memory_order_acquire)) {
-    if (!RunOnce(true)) {
-      CELER_LOG_ERROR << "worker loop exiting because RunOnce returned false";
+    if (!RunOnce(true)) [[unlikely]] {
+      spdlog::error("worker loop exiting because RunOnce returned false");
       break;
     }
     ReclaimConnections();
   }
 
-  for (auto& [connection_id, owned] : connections_) {
+  for (auto &[connection_id, owned] : connections_) {
     (void)connection_id;
-    BeginClose(owned.get(),
-               Status(StatusCode::kCancelled, "worker shutdown"),
+    BeginClose(owned.get(), Status(StatusCode::kCancelled, "worker shutdown"),
                CloseMode::kWorkerShutdown);
   }
   while (!connections_.empty() && RunOnce(false)) {
   }
 }
 
-}  // namespace celer
+} // namespace celer
