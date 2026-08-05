@@ -18,6 +18,7 @@
 #define CELER_IO_STORAGE_H_
 
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -54,10 +55,14 @@ Task<StatusOr<std::size_t>> ReadFixed(Worker& worker, FixedFile file,
 Task<StatusOr<std::size_t>> Read(Worker& worker, FixedFile file,
                                  std::span<std::byte> buffer,
                                  std::uint64_t offset);
+Task<StatusOr<std::size_t>> Write(Worker& worker, FixedFile file,
+                                  std::span<const std::byte> buffer,
+                                  std::uint64_t offset);
 Task<StatusOr<std::size_t>> WriteFixed(Worker& worker, FixedFile file,
                                        FixedBuffer buffer,
                                        std::uint64_t offset);
 Task<Status> Fdatasync(Worker& worker, FixedFile file);
+Task<Status> SleepFor(Worker& worker, std::chrono::milliseconds duration);
 
 }  // namespace celer
 

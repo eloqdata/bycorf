@@ -55,6 +55,7 @@ class Server {
   void AddService(Service* service);
 
   Status Start(const ServerOptions& options);
+  void StopAccepting() noexcept;
   void RequestStop() noexcept;
   void WaitUntilStopped();
 
@@ -70,6 +71,7 @@ class Server {
   ServerOptions options_{};
   std::vector<Service*> services_;
   std::atomic<bool> stop_requested_{false};
+  std::atomic<bool> accepting_stopped_{false};
   bool started_ = false;
   bool stopped_ = false;
 };

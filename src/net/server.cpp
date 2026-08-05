@@ -53,15 +53,20 @@ Status Server::Start(const ServerOptions& options) {
   return Status::Ok();
 }
 
+void Server::StopAccepting() noexcept {
+  if (!started_) return;
+  if (accepting_stopped_.exchange(true, std::memory_order_acq_rel)) return;
+  for (Service* service : services_) {
+    service->Stop();
+  }
+}
+
 void Server::RequestStop() noexcept {
   if (!started_) return;
   if (stop_requested_.exchange(true, std::memory_order_acq_rel)) return;
 
-  // Close every service's sockets first so its Run loops unblock, then stop the
-  // workers (which drain their connections and let the Run coroutines finish).
-  for (Service* service : services_) {
-    service->Stop();
-  }
+  // Listener shutdown may have happened earlier during graceful draining.
+  StopAccepting();
   runtime_.RequestStop();
 }
 

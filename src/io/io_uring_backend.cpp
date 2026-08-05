@@ -252,6 +252,19 @@ Status IoUringBackend::SubmitRead(FixedFile file,
   return Status::Ok();
 }
 
+Status IoUringBackend::SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
+                                   std::uint64_t offset, IoCompletion* tag) {
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return Status(StatusCode::kUnavailable, "failed to acquire write sqe");
+  }
+  io_uring_prep_write(sqe, static_cast<int>(file.index), buffer.data(),
+                      static_cast<unsigned>(buffer.size()), offset);
+  sqe->flags |= IOSQE_FIXED_FILE;
+  io_uring_sqe_set_data(sqe, tag);
+  return Status::Ok();
+}
+
 Status IoUringBackend::SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                                         std::uint64_t offset,
                                         IoCompletion* tag) {
@@ -275,6 +288,17 @@ Status IoUringBackend::SubmitFdatasync(FixedFile file, IoCompletion* tag) {
   io_uring_prep_fsync(sqe, static_cast<int>(file.index),
                       IORING_FSYNC_DATASYNC);
   sqe->flags |= IOSQE_FIXED_FILE;
+  io_uring_sqe_set_data(sqe, tag);
+  return Status::Ok();
+}
+
+Status IoUringBackend::SubmitTimeout(const __kernel_timespec& timeout,
+                                     IoCompletion* tag) {
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return Status(StatusCode::kUnavailable, "failed to acquire timeout sqe");
+  }
+  io_uring_prep_timeout(sqe, const_cast<__kernel_timespec*>(&timeout), 0, 0);
   io_uring_sqe_set_data(sqe, tag);
   return Status::Ok();
 }

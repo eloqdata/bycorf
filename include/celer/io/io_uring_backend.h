@@ -86,9 +86,12 @@ class IoUringBackend {
                          std::uint64_t offset, IoCompletion* tag);
   Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                     std::uint64_t offset, IoCompletion* tag);
+  Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
+                     std::uint64_t offset, IoCompletion* tag);
   Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                           std::uint64_t offset, IoCompletion* tag);
   Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
+  Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag);
 
   // Event loop.
   Status Submit();

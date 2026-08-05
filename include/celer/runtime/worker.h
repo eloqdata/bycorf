@@ -129,12 +129,19 @@ class Worker {
                     std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitRead(file, buffer, offset, tag);
   }
+  Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
+                     std::uint64_t offset, IoCompletion* tag) {
+    return backend_.SubmitWrite(file, buffer, offset, tag);
+  }
   Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                           std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitWriteFixed(file, buffer, offset, tag);
   }
   Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
     return backend_.SubmitFdatasync(file, tag);
+  }
+  Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag) {
+    return backend_.SubmitTimeout(timeout, tag);
   }
 
   Connection* AddConnection(Connection connection);
