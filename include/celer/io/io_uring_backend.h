@@ -19,13 +19,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <span>
+#include <sys/uio.h>
 #include <vector>
 
 #include <liburing.h>
 
 #include "celer/base/status.h"
 #include "celer/io/completion.h"
+#include "celer/io/storage.h"
 #include "celer/net/connection.h"
 
 namespace celer {
@@ -34,7 +37,8 @@ class Worker;
 
 struct IoBackendOptions {
   unsigned ring_entries = 256;        // io_uring SQ ring size
-  unsigned recv_buffer_count = 1024;  // multishot recv buffer-ring entries
+  // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
+  unsigned recv_buffer_count = 1024;
   unsigned recv_buffer_size = 4096;
   int idle_timeout_ms = -1;
 };
@@ -67,9 +71,24 @@ class IoUringBackend {
   Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag);  // multishot
   Status StartRecvMultishot(Connection* connection);              // multishot, idempotent
 
-  std::span<const std::byte> ViewRecvBuffer(std::uint16_t buffer_id, std::size_t offset,
-                                            std::size_t length) const;
-  void ReleaseRecvBuffer(std::uint16_t buffer_id);
+  std::span<const std::byte> ViewRecvBuffer(
+      const Connection* connection, std::uint16_t buffer_id,
+      std::size_t offset, std::size_t length) const;
+  void ReleaseRecvBuffer(Connection* connection, std::uint16_t buffer_id);
+
+  Status RegisterFixedFiles(unsigned count);
+  Status RegisterBuffers(std::span<const iovec> buffers);
+  void UnregisterStorageResources();
+  Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
+                          FixedFile file, IoCompletion* tag);
+  Status SubmitCloseDirect(FixedFile file, IoCompletion* tag);
+  Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+                         std::uint64_t offset, IoCompletion* tag);
+  Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
+                    std::uint64_t offset, IoCompletion* tag);
+  Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+                          std::uint64_t offset, IoCompletion* tag);
+  Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
 
   // Event loop.
   Status Submit();
@@ -106,10 +125,13 @@ class IoUringBackend {
   Worker* worker_ = nullptr;
   IoBackendOptions options_{};
   MultishotBufferRing multishot_ring_{};
+  bool recv_multishot_enabled_ = false;
   int wake_event_fd_ = -1;
   bool wake_poll_armed_ = false;
   bool owns_wake_fd_ = true;
   std::vector<Connection*> recv_rearm_queue_;
+  bool fixed_files_registered_ = false;
+  bool buffers_registered_ = false;
 };
 
 }  // namespace celer

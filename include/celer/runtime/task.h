@@ -30,8 +30,13 @@ template <typename T>
 class Task {
  public:
   struct promise_type {
+    using completion_fn =
+        void (*)(void*, std::coroutine_handle<>) noexcept;
+
     std::optional<T> value_;
     std::coroutine_handle<> continuation_{};
+    void* completion_context_ = nullptr;
+    completion_fn completion_ = nullptr;
 
     Task get_return_object() noexcept {
       return Task(std::coroutine_handle<promise_type>::from_promise(*this));
@@ -43,7 +48,12 @@ class Task {
         bool await_ready() const noexcept { return false; }
 
         std::coroutine_handle<> await_suspend(handle_type handle) noexcept {
-          auto continuation = handle.promise().continuation_;
+          auto& promise = handle.promise();
+          if (promise.completion_ != nullptr) {
+            promise.completion_(promise.completion_context_, handle);
+            return std::noop_coroutine();
+          }
+          auto continuation = promise.continuation_;
           if (continuation) {
             return continuation;
           }
@@ -87,6 +97,15 @@ class Task {
 
   bool valid() const noexcept { return static_cast<bool>(handle_); }
   bool done() const noexcept { return !handle_ || handle_.done(); }
+
+  void SetCompletionCallback(void* context,
+                             typename promise_type::completion_fn completion) noexcept {
+    if (!handle_) {
+      return;
+    }
+    handle_.promise().completion_context_ = context;
+    handle_.promise().completion_ = completion;
+  }
 
   struct Awaiter {
     handle_type handle;

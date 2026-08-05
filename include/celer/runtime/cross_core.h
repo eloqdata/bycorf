@@ -20,7 +20,9 @@
 #include <atomic>
 #include <coroutine>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -32,6 +34,7 @@
 #undef BLOCK_SIZE
 #endif
 #include "celer/runtime/concurrentqueue.h"
+#include "celer/runtime/task.h"
 
 namespace celer {
 
@@ -49,6 +52,16 @@ struct RemoteWork {
   unsigned origin = 0;
   std::coroutine_handle<> waiter{};
   void (*run_fn)(RemoteWork*) = nullptr;  // runs the user fn, stores result
+  bool reply_deferred = false;
+};
+
+// Small one-way control message. It is copied into the target mailbox, so the
+// sender does not have to keep an awaiter or heap allocation alive. Intended
+// for ownership hand-backs such as returning a registered buffer to its owner.
+struct RemoteNotification {
+  void* context = nullptr;
+  std::uint64_t value = 0;
+  void (*run_fn)(void*, std::uint64_t) noexcept = nullptr;
 };
 
 // wake_seq value meaning "the owner is parked": the owner CASes wake_seq to this
@@ -63,6 +76,7 @@ inline constexpr std::uint32_t kWakeSeqParked = 1u << 31;
 struct alignas(64) WorkerMailbox {
   moodycamel::ConcurrentQueue<RemoteWork*> requests;  // others -> me: run here
   moodycamel::ConcurrentQueue<RemoteWork*> replies;   // results coming back to me
+  moodycamel::ConcurrentQueue<RemoteNotification> notifications;
   int ring_fd = -1;
   int wake_fd = -1;
   std::atomic<std::uint32_t> wake_seq{0};
@@ -135,6 +149,16 @@ inline void PostReply(CrossCore* cc, unsigned origin, RemoteWork* work) noexcept
   MarkWakeWorker(origin);
 }
 
+inline void PostNotification(CrossCore* cc, unsigned target,
+                             RemoteNotification notification) noexcept {
+  cc->mailbox(target).notifications.enqueue(notification);
+  MarkWakeWorker(target);
+}
+
+// Defined in worker.cpp, where Worker is complete. This keeps the generic
+// cross-core awaiter independent of Worker's concrete scheduler layout.
+void SpawnOnCurrentWorker(Task<Status> task);
+
 // Awaiter returned by SubmitTo. Runs fn on the target worker's thread and
 // resumes the caller on the caller's (origin) worker. R must be default-
 // constructible (true for all Redis return types: optional, Status, bool, ...).
@@ -182,6 +206,70 @@ class SubmitAwaiter : public RemoteWork {
 template <typename Fn>
 SubmitAwaiter<Fn> SubmitTo(unsigned target, Fn fn) {
   return SubmitAwaiter<Fn>(target, std::move(fn));
+}
+
+template <typename T>
+struct IsTask : std::false_type {};
+
+template <typename T>
+struct IsTask<Task<T>> : std::true_type {
+  using value_type = T;
+};
+
+// Awaiter for a coroutine operation owned by another worker. Unlike SubmitTo,
+// the target function may suspend on that worker's io_uring operations. Its
+// result is sent back only after the Task completes, and the caller is always
+// resumed on its origin worker.
+template <typename Fn>
+class SubmitTaskAwaiter : public RemoteWork {
+ public:
+  using TaskType = std::invoke_result_t<Fn>;
+  static_assert(IsTask<TaskType>::value,
+                "SubmitTaskTo fn must return celer::Task<T>");
+  using R = typename IsTask<TaskType>::value_type;
+
+  SubmitTaskAwaiter(unsigned target, Fn fn)
+      : target_(target), fn_(std::move(fn)) {
+    run_fn = &SubmitTaskAwaiter::Start;
+  }
+
+  bool await_ready() const noexcept { return false; }
+
+  void await_suspend(std::coroutine_handle<> handle) noexcept {
+    waiter = handle;
+    origin = ThisWorker().id;
+    if (target_ == origin) {
+      Start(this);
+      return;
+    }
+    PostRequest(ThisWorker().cross_core, target_, this);
+  }
+
+  R await_resume() { return std::move(*result_); }
+
+ private:
+  static void Start(RemoteWork* base) {
+    auto* self = static_cast<SubmitTaskAwaiter*>(base);
+    self->reply_deferred = true;
+    SpawnOnCurrentWorker(self->Run());
+  }
+
+  Task<Status> Run() {
+    result_.emplace(co_await std::invoke(std::move(fn_)));
+    PostReply(ThisWorker().cross_core, origin, this);
+    co_return Status::Ok();
+  }
+
+  unsigned target_;
+  Fn fn_;
+  std::optional<R> result_;
+};
+
+// Run an asynchronous operation on target. fn is invoked on the target worker
+// and must return Task<R>; awaiting SubmitTaskTo yields R on the origin worker.
+template <typename Fn>
+auto SubmitTaskTo(unsigned target, Fn fn) {
+  return SubmitTaskAwaiter<Fn>(target, std::move(fn));
 }
 
 }  // namespace celer

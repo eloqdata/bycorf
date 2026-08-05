@@ -33,7 +33,8 @@ struct ServerOptions {
   unsigned thread_count = 1;
   bool reuse_port = true;
   int idle_timeout_ms = -1;
-  unsigned recv_buffer_count = 1024;  // multishot recv buffer-ring entries
+  // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
+  unsigned recv_buffer_count = 1024;
   unsigned ring_entries = 256;        // io_uring SQ ring size
 };
 

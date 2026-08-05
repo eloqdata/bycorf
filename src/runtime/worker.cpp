@@ -77,6 +77,10 @@ void Worker::Shutdown() {
 }
 
 void Worker::Spawn(Task<Status> task) {
+  task.SetCompletionCallback(
+      this, [](void* context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker*>(context)->Enqueue(completed, true);
+      });
   auto handle = std::move(task).ReleaseHandle();
   if (handle) {
     if (stop_requested_.load(std::memory_order_acquire) ||
@@ -84,8 +88,12 @@ void Worker::Spawn(Task<Status> task) {
       handle.destroy();
       return;
     }
-    Enqueue(handle, true);
+    Enqueue(handle);
   }
+}
+
+void SpawnOnCurrentWorker(Task<Status> task) {
+  ThisWorker().self->Spawn(std::move(task));
 }
 
 void Worker::RequestStop() noexcept {
@@ -192,11 +200,6 @@ void Worker::DrainReady() {
       continue;
     }
     handle.resume();
-    if (handle.done()) {
-      if (ready.destroy_when_done) {
-        handle.destroy();
-      }
-    }
   }
 }
 
@@ -242,7 +245,7 @@ void Worker::DiscardReceivedBuffers(Connection *connection) {
   while (!connection->received_buffers.empty()) {
     auto received = connection->received_buffers.front();
     connection->received_buffers.pop_front();
-    backend_.ReleaseRecvBuffer(received.buffer_id);
+    backend_.ReleaseRecvBuffer(connection, received.buffer_id);
   }
 }
 
@@ -272,6 +275,7 @@ void Worker::CheckIdleConnections() {
 bool Worker::DrainCrossCore() {
   WorkerMailbox &mb = cross_core_->mailbox(id_);
   RemoteWork *batch[64];
+  RemoteNotification notifications[64];
 
   // One bounded batch each, NOT drain-to-empty: leftover work is picked up on
   // the next loop iteration so io completions are not starved under load.
@@ -279,7 +283,9 @@ bool Worker::DrainCrossCore() {
   for (std::size_t i = 0; i < nreq; ++i) {
     RemoteWork *work = batch[i];
     work->run_fn(work); // run fn, store result in awaiter
-    PostReply(cross_core_, work->origin, work); // handed off; don't touch after
+    if (!work->reply_deferred) {
+      PostReply(cross_core_, work->origin, work); // handed off; don't touch after
+    }
   }
 
   const std::size_t nrep = mb.replies.try_dequeue_bulk(batch, 64);
@@ -287,7 +293,14 @@ bool Worker::DrainCrossCore() {
     batch[i]->waiter.resume(); // don't touch after resume
   }
 
-  return nreq > 0 || nrep > 0;
+  const std::size_t nnotifications =
+      mb.notifications.try_dequeue_bulk(notifications, 64);
+  for (std::size_t i = 0; i < nnotifications; ++i) {
+    RemoteNotification &notification = notifications[i];
+    notification.run_fn(notification.context, notification.value);
+  }
+
+  return nreq > 0 || nrep > 0 || nnotifications > 0;
 }
 
 void Worker::FlushWakes() {

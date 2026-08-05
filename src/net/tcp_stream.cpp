@@ -126,7 +126,7 @@ class ReadOperation final : public IoCompletion {
         static_cast<std::size_t>(received.size - received.offset);
     const std::size_t to_copy = std::min(buffer_.size(), available);
     auto chunk = connection_->worker->ViewMultishotBuffer(
-        received.buffer_id, received.offset, to_copy);
+        connection_, received.buffer_id, received.offset, to_copy);
     if (chunk.size() != to_copy) {
       return Status(StatusCode::kInternal, "invalid multishot buffer view");
     }

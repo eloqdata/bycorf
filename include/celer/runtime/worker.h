@@ -29,6 +29,7 @@
 
 #include "celer/io/completion.h"
 #include "celer/io/net_backend.h"
+#include "celer/io/storage.h"
 #include "celer/net/connection.h"
 #include "celer/base/status.h"
 #include "celer/runtime/cross_core.h"
@@ -40,7 +41,8 @@ class TcpServerImpl;
 
 struct WorkerOptions {
   unsigned ring_entries = 256;          // io_uring SQ ring size
-  unsigned recv_buffer_count = 1024;    // multishot recv buffer-ring entries
+  // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
+  unsigned recv_buffer_count = 1024;
   int idle_timeout_ms = -1;
 };
 
@@ -97,13 +99,42 @@ class Worker {
   Status EnsureRecvArmed(Connection* connection) {
     return backend_.StartRecvMultishot(connection);
   }
-  std::span<const std::byte> ViewMultishotBuffer(std::uint16_t buffer_id, std::size_t offset,
-                                                 std::size_t length) const {
-    return backend_.ViewRecvBuffer(buffer_id, offset, length);
+  std::span<const std::byte> ViewMultishotBuffer(
+      const Connection* connection, std::uint16_t buffer_id,
+      std::size_t offset, std::size_t length) const {
+    return backend_.ViewRecvBuffer(connection, buffer_id, offset, length);
   }
   void ReleaseReceivedBuffer(Connection* connection, std::uint16_t buffer_id) {
-    (void)connection;
-    backend_.ReleaseRecvBuffer(buffer_id);
+    backend_.ReleaseRecvBuffer(connection, buffer_id);
+  }
+
+  Status RegisterFixedFiles(unsigned count) {
+    return backend_.RegisterFixedFiles(count);
+  }
+  Status RegisterBuffers(std::span<const iovec> buffers) {
+    return backend_.RegisterBuffers(buffers);
+  }
+  Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
+                          FixedFile file, IoCompletion* tag) {
+    return backend_.SubmitOpenDirect(path, flags, mode, file, tag);
+  }
+  Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
+    return backend_.SubmitCloseDirect(file, tag);
+  }
+  Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+                         std::uint64_t offset, IoCompletion* tag) {
+    return backend_.SubmitReadFixed(file, buffer, offset, tag);
+  }
+  Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
+                    std::uint64_t offset, IoCompletion* tag) {
+    return backend_.SubmitRead(file, buffer, offset, tag);
+  }
+  Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+                          std::uint64_t offset, IoCompletion* tag) {
+    return backend_.SubmitWriteFixed(file, buffer, offset, tag);
+  }
+  Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
+    return backend_.SubmitFdatasync(file, tag);
   }
 
   Connection* AddConnection(Connection connection);
