@@ -17,15 +17,19 @@
 #ifndef CELER_IO_STORAGE_H_
 #define CELER_IO_STORAGE_H_
 
-#include <cstddef>
-#include <chrono>
-#include <cstdint>
-#include <span>
-#include <string>
+#include <linux/time_types.h>
 #include <sys/types.h>
 
+#include <chrono>
+#include <coroutine>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
+
 #include "celer/base/status.h"
-#include "celer/runtime/task.h"
+#include "celer/io/completion.h"
 
 namespace celer {
 
@@ -43,26 +47,124 @@ struct FixedBuffer {
   std::uint16_t index = 0;
 };
 
-// Coroutine wrappers around Worker's ring-local fixed-file/fixed-buffer
-// submissions. They suspend only until the corresponding CQE is dispatched;
-// no blocking filesystem calls or helper threads are involved.
-Task<Status> OpenFixedFile(Worker& worker, std::string path, int flags,
-                           mode_t mode, FixedFile file);
-Task<Status> CloseFixedFile(Worker& worker, FixedFile file);
-Task<StatusOr<std::size_t>> ReadFixed(Worker& worker, FixedFile file,
-                                      FixedBuffer buffer,
-                                      std::uint64_t offset);
-Task<StatusOr<std::size_t>> Read(Worker& worker, FixedFile file,
-                                 std::span<std::byte> buffer,
-                                 std::uint64_t offset);
-Task<StatusOr<std::size_t>> Write(Worker& worker, FixedFile file,
-                                  std::span<const std::byte> buffer,
-                                  std::uint64_t offset);
-Task<StatusOr<std::size_t>> WriteFixed(Worker& worker, FixedFile file,
-                                       FixedBuffer buffer,
-                                       std::uint64_t offset);
-Task<Status> Fdatasync(Worker& worker, FixedFile file);
-Task<Status> SleepFor(Worker& worker, std::chrono::milliseconds duration);
+// Shared completion state for one-shot operations. Concrete awaitables are
+// embedded directly in their caller's coroutine frame.
+class OneShotIoAwaitable : public IoCompletion {
+ public:
+  OneShotIoAwaitable(const OneShotIoAwaitable&) = delete;
+  OneShotIoAwaitable& operator=(const OneShotIoAwaitable&) = delete;
+  OneShotIoAwaitable(OneShotIoAwaitable&&) = delete;
+  OneShotIoAwaitable& operator=(OneShotIoAwaitable&&) = delete;
+
+  void Complete(Worker& worker, int result, unsigned flags) override;
+
+ protected:
+  OneShotIoAwaitable() = default;
+
+  bool Suspend(std::coroutine_handle<> awaiting, Status status);
+  StatusOr<int> Resume(const char* operation);
+  bool has_immediate_status() const noexcept {
+    return immediate_status_.has_value();
+  }
+  Status TakeImmediateStatus() { return std::move(*immediate_status_); }
+  int result() const noexcept { return result_; }
+
+ private:
+  std::optional<Status> immediate_status_;
+  int result_ = 0;
+};
+
+class SizeIoAwaitable final : public OneShotIoAwaitable {
+ public:
+  enum class Operation : std::uint8_t {
+    kRead,
+    kReadFixed,
+    kWrite,
+    kWriteFixed,
+  };
+
+  SizeIoAwaitable(Worker& worker, FixedFile file, FixedBuffer buffer,
+                  std::uint64_t offset, Operation operation) noexcept;
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  StatusOr<std::size_t> await_resume();
+
+ private:
+  Worker* worker_ = nullptr;
+  FixedFile file_{};
+  FixedBuffer buffer_{};
+  std::uint64_t offset_ = 0;
+  Operation operation_ = Operation::kRead;
+};
+
+class OpenFixedFileAwaitable final : public OneShotIoAwaitable {
+ public:
+  OpenFixedFileAwaitable(Worker& worker, std::string path, int flags,
+                         mode_t mode, FixedFile file);
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  Status await_resume();
+
+ private:
+  Worker* worker_ = nullptr;
+  std::string path_;
+  int flags_ = 0;
+  mode_t mode_ = 0;
+  FixedFile file_{};
+};
+
+class FileStatusAwaitable final : public OneShotIoAwaitable {
+ public:
+  enum class Operation : std::uint8_t {
+    kClose,
+    kFdatasync,
+  };
+
+  FileStatusAwaitable(Worker& worker, FixedFile file,
+                      Operation operation) noexcept;
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  Status await_resume();
+
+ private:
+  Worker* worker_ = nullptr;
+  FixedFile file_{};
+  Operation operation_ = Operation::kClose;
+};
+
+class TimeoutAwaitable final : public OneShotIoAwaitable {
+ public:
+  TimeoutAwaitable(Worker& worker,
+                   std::chrono::milliseconds duration) noexcept;
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  Status await_resume();
+
+ private:
+  Worker* worker_ = nullptr;
+  std::chrono::milliseconds duration_{};
+  __kernel_timespec timeout_{};
+};
+
+OpenFixedFileAwaitable OpenFixedFile(Worker& worker, std::string path,
+                                     int flags, mode_t mode, FixedFile file);
+FileStatusAwaitable CloseFixedFile(Worker& worker, FixedFile file);
+SizeIoAwaitable ReadFixed(Worker& worker, FixedFile file, FixedBuffer buffer,
+                          std::uint64_t offset);
+SizeIoAwaitable Read(Worker& worker, FixedFile file,
+                     std::span<std::byte> buffer, std::uint64_t offset);
+SizeIoAwaitable Write(Worker& worker, FixedFile file,
+                      std::span<const std::byte> buffer,
+                      std::uint64_t offset);
+SizeIoAwaitable WriteFixed(Worker& worker, FixedFile file,
+                           FixedBuffer buffer, std::uint64_t offset);
+FileStatusAwaitable Fdatasync(Worker& worker, FixedFile file);
+TimeoutAwaitable SleepFor(Worker& worker,
+                          std::chrono::milliseconds duration);
 
 }  // namespace celer
 

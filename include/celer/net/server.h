@@ -36,6 +36,7 @@ struct ServerOptions {
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
   unsigned recv_buffer_count = 1024;
   unsigned ring_entries = 256;        // io_uring SQ ring size
+  unsigned busy_poll_us = 0;
 };
 
 // Hosts one or more Services on a pool of thread-per-core workers. The Runtime

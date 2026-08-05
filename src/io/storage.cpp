@@ -18,13 +18,10 @@
 
 #include <cerrno>
 #include <chrono>
-#include <coroutine>
 #include <cstring>
-#include <optional>
 #include <string>
 #include <utility>
 
-#include "celer/io/completion.h"
 #include "celer/runtime/worker.h"
 
 namespace celer {
@@ -55,201 +52,206 @@ Status StorageError(int error, const char* operation) {
   }
 }
 
-template <typename Submit>
-class StorageOperation final : public IoCompletion {
- public:
-  StorageOperation(const char* operation, Submit submit)
-      : operation_(operation), submit_(std::move(submit)) {}
-
-  bool await_ready() const noexcept { return false; }
-
-  bool await_suspend(std::coroutine_handle<> awaiting) {
-    awaiting_ = awaiting;
-    Status status = submit_(this);
-    if (!status.ok()) {
-      immediate_status_.emplace(std::move(status));
-      return false;
-    }
-    return true;
-  }
-
-  StatusOr<int> await_resume() {
-    if (immediate_status_.has_value()) {
-      return std::move(*immediate_status_);
-    }
-    if (result_ < 0) {
-      return StorageError(-result_, operation_);
-    }
-    return result_;
-  }
-
-  void Complete(Worker& worker, int result, unsigned flags) override {
-    (void)flags;
-    result_ = result;
-    worker.Enqueue(awaiting_);
-  }
-
- private:
-  const char* operation_;
-  Submit submit_;
-  std::optional<Status> immediate_status_;
-  int result_ = 0;
-};
-
-class TimeoutOperation final : public IoCompletion {
- public:
-  TimeoutOperation(Worker& worker, std::chrono::milliseconds duration)
-      : worker_(&worker) {
-    const auto seconds =
-        std::chrono::duration_cast<std::chrono::seconds>(duration);
-    const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        duration - seconds);
-    timeout_.tv_sec = seconds.count();
-    timeout_.tv_nsec = nanoseconds.count();
-  }
-
-  bool await_ready() const noexcept { return false; }
-
-  bool await_suspend(std::coroutine_handle<> awaiting) {
-    awaiting_ = awaiting;
-    Status status = worker_->SubmitTimeout(timeout_, this);
-    if (!status.ok()) {
-      immediate_status_.emplace(std::move(status));
-      return false;
-    }
-    return true;
-  }
-
-  Status await_resume() {
-    if (immediate_status_.has_value()) {
-      return std::move(*immediate_status_);
-    }
-    if (result_ == -ETIME || result_ == 0) {
-      return Status::Ok();
-    }
-    return StorageError(-result_, "io_uring timeout failed");
-  }
-
-  void Complete(Worker& worker, int result, unsigned flags) override {
-    (void)flags;
-    result_ = result;
-    worker.Enqueue(awaiting_);
-  }
-
- private:
-  Worker* worker_ = nullptr;
-  __kernel_timespec timeout_{};
-  std::optional<Status> immediate_status_;
-  int result_ = 0;
-};
-
-template <typename Submit>
-StorageOperation<Submit> MakeStorageOperation(const char* operation,
-                                              Submit submit) {
-  return StorageOperation<Submit>(operation, std::move(submit));
-}
-
 }  // namespace
 
-Task<Status> OpenFixedFile(Worker& worker, std::string path, int flags,
-                           mode_t mode, FixedFile file) {
-  auto result = co_await MakeStorageOperation(
-      "open fixed O_DIRECT file failed",
-      [&worker, &path, flags, mode, file](IoCompletion* completion) {
-        return worker.SubmitOpenDirect(path, flags, mode, file, completion);
-      });
-  if (!result.ok()) {
-    co_return result.status();
+bool OneShotIoAwaitable::Suspend(std::coroutine_handle<> awaiting,
+                                 Status status) {
+  awaiting_ = awaiting;
+  if (!status.ok()) {
+    immediate_status_.emplace(std::move(status));
+    return false;
   }
-  co_return Status::Ok();
+  return true;
 }
 
-Task<Status> CloseFixedFile(Worker& worker, FixedFile file) {
-  auto result = co_await MakeStorageOperation(
-      "close fixed file failed",
-      [&worker, file](IoCompletion* completion) {
-        return worker.SubmitCloseDirect(file, completion);
-      });
-  if (!result.ok()) {
-    co_return result.status();
+StatusOr<int> OneShotIoAwaitable::Resume(const char* operation) {
+  if (immediate_status_.has_value()) {
+    return std::move(*immediate_status_);
   }
-  co_return Status::Ok();
+  if (result_ < 0) {
+    return StorageError(-result_, operation);
+  }
+  return result_;
 }
 
-Task<StatusOr<std::size_t>> ReadFixed(Worker& worker, FixedFile file,
-                                      FixedBuffer buffer,
-                                      std::uint64_t offset) {
-  auto result = co_await MakeStorageOperation(
-      "fixed-buffer read failed",
-      [&worker, file, buffer, offset](IoCompletion* completion) {
-        return worker.SubmitReadFixed(file, buffer, offset, completion);
-      });
-  if (!result.ok()) {
-    co_return result.status();
-  }
-  co_return static_cast<std::size_t>(*result);
+void OneShotIoAwaitable::Complete(Worker& worker, int result,
+                                  unsigned flags) {
+  (void)flags;
+  result_ = result;
+  worker.Enqueue(awaiting_);
 }
 
-Task<StatusOr<std::size_t>> Read(Worker& worker, FixedFile file,
-                                 std::span<std::byte> buffer,
-                                 std::uint64_t offset) {
-  auto result = co_await MakeStorageOperation(
-      "read failed",
-      [&worker, file, buffer, offset](IoCompletion* completion) {
-        return worker.SubmitRead(file, buffer, offset, completion);
-      });
-  if (!result.ok()) {
-    co_return result.status();
+SizeIoAwaitable::SizeIoAwaitable(Worker& worker, FixedFile file,
+                                 FixedBuffer buffer, std::uint64_t offset,
+                                 Operation operation) noexcept
+    : worker_(&worker),
+      file_(file),
+      buffer_(buffer),
+      offset_(offset),
+      operation_(operation) {}
+
+bool SizeIoAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
+  Status status;
+  switch (operation_) {
+    case Operation::kRead:
+      status = worker_->SubmitRead(
+          file_, std::span<std::byte>(buffer_.data, buffer_.size), offset_,
+          this);
+      break;
+    case Operation::kReadFixed:
+      status = worker_->SubmitReadFixed(file_, buffer_, offset_, this);
+      break;
+    case Operation::kWrite:
+      status = worker_->SubmitWrite(
+          file_, std::span<const std::byte>(buffer_.data, buffer_.size),
+          offset_, this);
+      break;
+    case Operation::kWriteFixed:
+      status = worker_->SubmitWriteFixed(file_, buffer_, offset_, this);
+      break;
   }
-  co_return static_cast<std::size_t>(*result);
+  return Suspend(awaiting, std::move(status));
 }
 
-Task<StatusOr<std::size_t>> Write(Worker& worker, FixedFile file,
-                                  std::span<const std::byte> buffer,
-                                  std::uint64_t offset) {
-  auto result = co_await MakeStorageOperation(
-      "write failed",
-      [&worker, file, buffer, offset](IoCompletion* completion) {
-        return worker.SubmitWrite(file, buffer, offset, completion);
-      });
-  if (!result.ok()) {
-    co_return result.status();
+StatusOr<std::size_t> SizeIoAwaitable::await_resume() {
+  const char* operation = nullptr;
+  switch (operation_) {
+    case Operation::kRead:
+      operation = "read failed";
+      break;
+    case Operation::kReadFixed:
+      operation = "fixed-buffer read failed";
+      break;
+    case Operation::kWrite:
+      operation = "write failed";
+      break;
+    case Operation::kWriteFixed:
+      operation = "fixed-buffer write failed";
+      break;
   }
-  co_return static_cast<std::size_t>(*result);
+  auto result = Resume(operation);
+  if (!result.ok()) {
+    return result.status();
+  }
+  return static_cast<std::size_t>(*result);
 }
 
-Task<StatusOr<std::size_t>> WriteFixed(Worker& worker, FixedFile file,
-                                       FixedBuffer buffer,
-                                       std::uint64_t offset) {
-  auto result = co_await MakeStorageOperation(
-      "fixed-buffer write failed",
-      [&worker, file, buffer, offset](IoCompletion* completion) {
-        return worker.SubmitWriteFixed(file, buffer, offset, completion);
-      });
-  if (!result.ok()) {
-    co_return result.status();
-  }
-  co_return static_cast<std::size_t>(*result);
+OpenFixedFileAwaitable::OpenFixedFileAwaitable(
+    Worker& worker, std::string path, int flags, mode_t mode, FixedFile file)
+    : worker_(&worker),
+      path_(std::move(path)),
+      flags_(flags),
+      mode_(mode),
+      file_(file) {}
+
+bool OpenFixedFileAwaitable::await_suspend(
+    std::coroutine_handle<> awaiting) {
+  return Suspend(awaiting, worker_->SubmitOpenDirect(
+                               path_, flags_, mode_, file_, this));
 }
 
-Task<Status> Fdatasync(Worker& worker, FixedFile file) {
-  auto result = co_await MakeStorageOperation(
-      "fixed-file fdatasync failed",
-      [&worker, file](IoCompletion* completion) {
-        return worker.SubmitFdatasync(file, completion);
-      });
-  if (!result.ok()) {
-    co_return result.status();
-  }
-  co_return Status::Ok();
+Status OpenFixedFileAwaitable::await_resume() {
+  auto result = Resume("open fixed O_DIRECT file failed");
+  return result.ok() ? Status::Ok() : result.status();
 }
 
-Task<Status> SleepFor(Worker& worker, std::chrono::milliseconds duration) {
-  if (duration.count() <= 0) {
-    co_return Status(StatusCode::kInvalidArgument,
-                     "sleep duration must be positive");
+FileStatusAwaitable::FileStatusAwaitable(Worker& worker, FixedFile file,
+                                         Operation operation) noexcept
+    : worker_(&worker), file_(file), operation_(operation) {}
+
+bool FileStatusAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
+  Status status = operation_ == Operation::kClose
+                      ? worker_->SubmitCloseDirect(file_, this)
+                      : worker_->SubmitFdatasync(file_, this);
+  return Suspend(awaiting, std::move(status));
+}
+
+Status FileStatusAwaitable::await_resume() {
+  auto result = Resume(operation_ == Operation::kClose
+                           ? "close fixed file failed"
+                           : "fixed-file fdatasync failed");
+  return result.ok() ? Status::Ok() : result.status();
+}
+
+TimeoutAwaitable::TimeoutAwaitable(
+    Worker& worker, std::chrono::milliseconds duration) noexcept
+    : worker_(&worker), duration_(duration) {
+  const auto seconds =
+      std::chrono::duration_cast<std::chrono::seconds>(duration);
+  const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      duration - seconds);
+  timeout_.tv_sec = seconds.count();
+  timeout_.tv_nsec = nanoseconds.count();
+}
+
+bool TimeoutAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
+  if (duration_.count() <= 0) {
+    return Suspend(awaiting,
+                   Status(StatusCode::kInvalidArgument,
+                          "sleep duration must be positive"));
   }
-  co_return co_await TimeoutOperation(worker, duration);
+  return Suspend(awaiting, worker_->SubmitTimeout(timeout_, this));
+}
+
+Status TimeoutAwaitable::await_resume() {
+  if (has_immediate_status()) {
+    return TakeImmediateStatus();
+  }
+  if (result() == -ETIME || result() == 0) {
+    return Status::Ok();
+  }
+  return StorageError(-result(), "io_uring timeout failed");
+}
+
+OpenFixedFileAwaitable OpenFixedFile(Worker& worker, std::string path,
+                                     int flags, mode_t mode, FixedFile file) {
+  return OpenFixedFileAwaitable(worker, std::move(path), flags, mode, file);
+}
+
+FileStatusAwaitable CloseFixedFile(Worker& worker, FixedFile file) {
+  return FileStatusAwaitable(worker, file,
+                             FileStatusAwaitable::Operation::kClose);
+}
+
+SizeIoAwaitable ReadFixed(Worker& worker, FixedFile file, FixedBuffer buffer,
+                          std::uint64_t offset) {
+  return SizeIoAwaitable(worker, file, buffer, offset,
+                         SizeIoAwaitable::Operation::kReadFixed);
+}
+
+SizeIoAwaitable Read(Worker& worker, FixedFile file,
+                     std::span<std::byte> buffer, std::uint64_t offset) {
+  return SizeIoAwaitable(
+      worker, file,
+      FixedBuffer{.data = buffer.data(), .size = buffer.size(), .index = 0},
+      offset, SizeIoAwaitable::Operation::kRead);
+}
+
+SizeIoAwaitable Write(Worker& worker, FixedFile file,
+                      std::span<const std::byte> buffer,
+                      std::uint64_t offset) {
+  return SizeIoAwaitable(
+      worker, file,
+      FixedBuffer{.data = const_cast<std::byte*>(buffer.data()),
+                  .size = buffer.size(),
+                  .index = 0},
+      offset, SizeIoAwaitable::Operation::kWrite);
+}
+
+SizeIoAwaitable WriteFixed(Worker& worker, FixedFile file,
+                           FixedBuffer buffer, std::uint64_t offset) {
+  return SizeIoAwaitable(worker, file, buffer, offset,
+                         SizeIoAwaitable::Operation::kWriteFixed);
+}
+
+FileStatusAwaitable Fdatasync(Worker& worker, FixedFile file) {
+  return FileStatusAwaitable(worker, file,
+                             FileStatusAwaitable::Operation::kFdatasync);
+}
+
+TimeoutAwaitable SleepFor(Worker& worker,
+                          std::chrono::milliseconds duration) {
+  return TimeoutAwaitable(worker, duration);
 }
 
 }  // namespace celer

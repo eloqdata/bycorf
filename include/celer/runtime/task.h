@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "celer/base/status.h"
+#include "celer/runtime/coroutine_frame_pool.h"
 
 namespace celer {
 
@@ -37,6 +38,18 @@ class Task {
     std::coroutine_handle<> continuation_{};
     void* completion_context_ = nullptr;
     completion_fn completion_ = nullptr;
+
+    static void* operator new(std::size_t size) {
+      return detail::AllocateCoroutineFrame(size);
+    }
+
+    static void operator delete(void* frame, std::size_t) noexcept {
+      detail::ReleaseCoroutineFrame(frame);
+    }
+
+    static void operator delete(void* frame) noexcept {
+      detail::ReleaseCoroutineFrame(frame);
+    }
 
     Task get_return_object() noexcept {
       return Task(std::coroutine_handle<promise_type>::from_promise(*this));

@@ -276,28 +276,86 @@ bool Worker::DrainCrossCore() {
   WorkerMailbox &mb = cross_core_->mailbox(id_);
   RemoteWork *batch[64];
   RemoteNotification notifications[64];
+  std::size_t nreq = 0;
+  std::size_t nrep = 0;
+  std::size_t nnotifications = 0;
 
-  // One bounded batch each, NOT drain-to-empty: leftover work is picked up on
-  // the next loop iteration so io completions are not starved under load.
-  const std::size_t nreq = mb.requests.try_dequeue_bulk(batch, 64);
-  for (std::size_t i = 0; i < nreq; ++i) {
-    RemoteWork *work = batch[i];
-    work->run_fn(work); // run fn, store result in awaiter
-    if (!work->reply_deferred) {
-      PostReply(cross_core_, work->origin, work); // handed off; don't touch after
+  // The bounded SPSC lane is the normal path. Only touch the old MPSC queues
+  // when a producer reported a full lane.
+  if (mb.overflow_pending.exchange(false, std::memory_order_acq_rel)) {
+    const std::size_t overflow_requests =
+        mb.requests.try_dequeue_bulk(batch, 64);
+    for (std::size_t i = 0; i < overflow_requests; ++i) {
+      RemoteWork *work = batch[i];
+      work->run_fn(work);
+      if (!work->reply_deferred) {
+        PostReply(cross_core_, work->origin, work);
+      }
+    }
+    nreq += overflow_requests;
+
+    const std::size_t overflow_replies = mb.replies.try_dequeue_bulk(batch, 64);
+    for (std::size_t i = 0; i < overflow_replies; ++i) {
+      batch[i]->waiter.resume();
+    }
+    nrep += overflow_replies;
+
+    const std::size_t overflow_notifications =
+        mb.notifications.try_dequeue_bulk(notifications, 64);
+    for (std::size_t i = 0; i < overflow_notifications; ++i) {
+      RemoteNotification &notification = notifications[i];
+      notification.run_fn(notification.context, notification.value);
+    }
+    nnotifications += overflow_notifications;
+
+    if (overflow_requests == 64 || overflow_replies == 64 ||
+        overflow_notifications == 64) {
+      mb.overflow_pending.store(true, std::memory_order_release);
     }
   }
 
-  const std::size_t nrep = mb.replies.try_dequeue_bulk(batch, 64);
-  for (std::size_t i = 0; i < nrep; ++i) {
-    batch[i]->waiter.resume(); // don't touch after resume
-  }
+  // Scan one independent pending flag per sender lane. Producers never contend
+  // with each other, and empty lanes avoid touching all three ring indices.
+  // One bounded batch per message kind across all lanes keeps io fair.
+  for (unsigned sender = 0; sender < cross_core_->size(); ++sender) {
+    CrossCoreLane &lane = cross_core_->lane(id_, sender);
+    if (!lane.pending.load(std::memory_order_acquire) ||
+        !lane.pending.exchange(false, std::memory_order_acq_rel)) {
+      continue;
+    }
 
-  const std::size_t nnotifications =
-      mb.notifications.try_dequeue_bulk(notifications, 64);
-  for (std::size_t i = 0; i < nnotifications; ++i) {
-    RemoteNotification &notification = notifications[i];
-    notification.run_fn(notification.context, notification.value);
+    if (nreq < 64) {
+      const std::size_t count =
+          lane.requests.try_dequeue_bulk(batch, 64 - nreq);
+      for (std::size_t i = 0; i < count; ++i) {
+        RemoteWork *work = batch[i];
+        work->run_fn(work);
+        if (!work->reply_deferred) {
+          PostReply(cross_core_, work->origin, work);
+        }
+      }
+      nreq += count;
+    }
+
+    if (nrep < 64) {
+      const std::size_t count =
+          lane.replies.try_dequeue_bulk(batch, 64 - nrep);
+      for (std::size_t i = 0; i < count; ++i) {
+        batch[i]->waiter.resume();
+      }
+      nrep += count;
+    }
+
+    if (nnotifications < 64) {
+      const std::size_t count = lane.notifications.try_dequeue_bulk(
+          notifications, 64 - nnotifications);
+      for (std::size_t i = 0; i < count; ++i) {
+        RemoteNotification &notification = notifications[i];
+        notification.run_fn(notification.context, notification.value);
+      }
+      nnotifications += count;
+    }
+
   }
 
   return nreq > 0 || nrep > 0 || nnotifications > 0;
@@ -311,11 +369,37 @@ void Worker::FlushWakes() {
   for (unsigned target : w.wake_list) {
     w.wake_pending[target] = 0;
     WorkerMailbox &mb = cross_core_->mailbox(target);
+    ++wake_checks_;
     if (mb.wake_seq.fetch_add(1, std::memory_order_acq_rel) == kWakeSeqParked) {
+      ++wake_sent_;
       backend_.WakeRemote(mb.ring_fd);
     }
   }
   w.wake_list.clear();
+}
+
+bool Worker::BusyPoll() {
+  if (options_.busy_poll_us == 0) {
+    return false;
+  }
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::microseconds(options_.busy_poll_us);
+  do {
+    bool did_work = DrainCrossCore();
+    did_work |= backend_.Poll();
+    if (did_work) {
+      DrainReady();
+      Flush();
+      ReclaimConnections();
+      return true;
+    }
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#else
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
 }
 
 void Worker::Flush() {
@@ -352,6 +436,10 @@ bool Worker::RunOnce(bool wait_for_completion) {
   }
   if (did_work) {
     return true; // had work; loop again without parking
+  }
+
+  if (BusyPoll()) {
+    return true;
   }
 
   // 3. Idle — park. Check idle timeouts only here, off the hot path. The

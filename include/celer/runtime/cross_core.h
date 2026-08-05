@@ -18,6 +18,8 @@
 #define CELER_RUNTIME_CROSS_CORE_H_
 
 #include <atomic>
+#include <array>
+#include <cstddef>
 #include <coroutine>
 #include <cstdint>
 #include <functional>
@@ -69,14 +71,70 @@ struct RemoteNotification {
 // only if it reads this back (so a parked owner is woken exactly once per round).
 inline constexpr std::uint32_t kWakeSeqParked = 1u << 31;
 
+template <typename T, std::size_t Capacity = 256>
+class alignas(64) SpscRing {
+ public:
+  static_assert(Capacity >= 2 && (Capacity & (Capacity - 1)) == 0,
+                "SPSC capacity must be a power of two");
+
+  bool try_enqueue(T value) noexcept {
+    const std::size_t tail = tail_.load(std::memory_order_relaxed);
+    const std::size_t next = (tail + 1) & (Capacity - 1);
+    if (next == head_.load(std::memory_order_acquire)) {
+      return false;
+    }
+    entries_[tail] = std::move(value);
+    tail_.store(next, std::memory_order_release);
+    return true;
+  }
+
+  std::size_t try_dequeue_bulk(T* output, std::size_t maximum) noexcept {
+    std::size_t head = head_.load(std::memory_order_relaxed);
+    const std::size_t tail = tail_.load(std::memory_order_acquire);
+    std::size_t count = 0;
+    while (head != tail && count < maximum) {
+      output[count++] = std::move(entries_[head]);
+      head = (head + 1) & (Capacity - 1);
+    }
+    if (count != 0) {
+      head_.store(head, std::memory_order_release);
+    }
+    return count;
+  }
+
+  bool empty() const noexcept {
+    return head_.load(std::memory_order_relaxed) ==
+           tail_.load(std::memory_order_acquire);
+  }
+
+ private:
+  alignas(64) std::atomic<std::size_t> head_{0};
+  alignas(64) std::atomic<std::size_t> tail_{0};
+  alignas(64) std::array<T, Capacity> entries_{};
+};
+
+// One SPSC lane for a fixed sender -> receiver pair.
+struct alignas(64) CrossCoreLane {
+  SpscRing<RemoteWork*> requests;
+  SpscRing<RemoteWork*> replies;
+  SpscRing<RemoteNotification> notifications;
+  std::atomic<bool> pending{false};
+
+  bool empty() const noexcept {
+    return requests.empty() && replies.empty() && notifications.empty();
+  }
+};
+
 // One mailbox per worker, cache-line aligned so neighbours in the contiguous
 // array never false-share their hot fields. Both queues are MPSC: every other
 // worker may push, only the owning worker drains. ring_fd / wake_fd are how to
 // wake it: MSG_RING to the io_uring ring, eventfd write as the legacy fallback.
 struct alignas(64) WorkerMailbox {
+  // Rare overflow path for a full bounded SPSC lane.
   moodycamel::ConcurrentQueue<RemoteWork*> requests;  // others -> me: run here
   moodycamel::ConcurrentQueue<RemoteWork*> replies;   // results coming back to me
   moodycamel::ConcurrentQueue<RemoteNotification> notifications;
+  std::atomic<bool> overflow_pending{false};
   int ring_fd = -1;
   int wake_fd = -1;
   std::atomic<std::uint32_t> wake_seq{0};
@@ -89,14 +147,21 @@ class CrossCore {
  public:
   CrossCore() = default;  // empty until the Runtime knows the worker count
   explicit CrossCore(unsigned n)
-      : size_(n), mailboxes_(std::make_unique<WorkerMailbox[]>(n)) {}
+      : size_(n),
+        mailboxes_(std::make_unique<WorkerMailbox[]>(n)),
+        lanes_(std::make_unique<CrossCoreLane[]>(
+            static_cast<std::size_t>(n) * n)) {}
 
   unsigned size() const noexcept { return size_; }
   WorkerMailbox& mailbox(unsigned i) noexcept { return mailboxes_[i]; }
+  CrossCoreLane& lane(unsigned receiver, unsigned sender) noexcept {
+    return lanes_[static_cast<std::size_t>(receiver) * size_ + sender];
+  }
 
  private:
   unsigned size_ = 0;
   std::unique_ptr<WorkerMailbox[]> mailboxes_;
+  std::unique_ptr<CrossCoreLane[]> lanes_;
 };
 
 // "Which worker is this thread", plus its per-round wake batch. Set at the top of
@@ -140,18 +205,42 @@ inline void MarkWakeWorker(unsigned target) noexcept {
 }
 
 inline void PostRequest(CrossCore* cc, unsigned target, RemoteWork* work) noexcept {
-  cc->mailbox(target).requests.enqueue(work);
+  const unsigned sender = ThisWorker().id;
+  CrossCoreLane& lane = cc->lane(target, sender);
+  if (lane.requests.try_enqueue(work)) {
+    lane.pending.store(true, std::memory_order_release);
+  } else {
+    WorkerMailbox& mailbox = cc->mailbox(target);
+    mailbox.requests.enqueue(work);
+    mailbox.overflow_pending.store(true, std::memory_order_release);
+  }
   MarkWakeWorker(target);
 }
 
 inline void PostReply(CrossCore* cc, unsigned origin, RemoteWork* work) noexcept {
-  cc->mailbox(origin).replies.enqueue(work);
+  const unsigned sender = ThisWorker().id;
+  CrossCoreLane& lane = cc->lane(origin, sender);
+  if (lane.replies.try_enqueue(work)) {
+    lane.pending.store(true, std::memory_order_release);
+  } else {
+    WorkerMailbox& mailbox = cc->mailbox(origin);
+    mailbox.replies.enqueue(work);
+    mailbox.overflow_pending.store(true, std::memory_order_release);
+  }
   MarkWakeWorker(origin);
 }
 
 inline void PostNotification(CrossCore* cc, unsigned target,
                              RemoteNotification notification) noexcept {
-  cc->mailbox(target).notifications.enqueue(notification);
+  const unsigned sender = ThisWorker().id;
+  CrossCoreLane& lane = cc->lane(target, sender);
+  if (lane.notifications.try_enqueue(notification)) {
+    lane.pending.store(true, std::memory_order_release);
+  } else {
+    WorkerMailbox& mailbox = cc->mailbox(target);
+    mailbox.notifications.enqueue(notification);
+    mailbox.overflow_pending.store(true, std::memory_order_release);
+  }
   MarkWakeWorker(target);
 }
 

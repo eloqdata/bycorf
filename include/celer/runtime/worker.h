@@ -44,6 +44,7 @@ struct WorkerOptions {
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
   unsigned recv_buffer_count = 1024;
   int idle_timeout_ms = -1;
+  unsigned busy_poll_us = 0;
 };
 
 // The per-core scheduler: ready queue, connection table, cross-core mailbox and
@@ -51,6 +52,11 @@ struct WorkerOptions {
 // only forwards typed submissions to it and reacts to completions.
 class Worker {
  public:
+  struct WakeStats {
+    std::uint64_t checks = 0;
+    std::uint64_t sent = 0;
+  };
+
   struct ReadyTask {
     std::coroutine_handle<> handle{};
     bool destroy_when_done = false;
@@ -85,6 +91,12 @@ class Worker {
   // Stop-signal handler, invoked by the backend when the wake eventfd fires.
   // Returns true once the worker should leave its loop.
   bool NotifyWake() noexcept;
+  WakeStats TakeWakeStats() noexcept {
+    WakeStats result{wake_checks_, wake_sent_};
+    wake_checks_ = 0;
+    wake_sent_ = 0;
+    return result;
+  }
 
   // Typed io submissions, forwarded to the backend (keeps io_uring out of the
   // net layer). recv multishot is driven by EnsureRecvArmed; its completions are
@@ -157,6 +169,7 @@ class Worker {
   void Flush();        // FlushWakes() + backend_.Submit()
   void FlushWakes();   // wake every marked, parked target once
   void CheckIdleConnections();
+  bool BusyPoll();
   bool CanReclaim(const Connection& connection) const noexcept;
   void ReclaimConnections();
   void DiscardReceivedBuffers(Connection* connection);
@@ -173,6 +186,8 @@ class Worker {
   std::uint64_t next_connection_id_ = 1;
   unsigned id_ = 0;
   CrossCore* cross_core_ = nullptr;
+  std::uint64_t wake_checks_ = 0;
+  std::uint64_t wake_sent_ = 0;
 };
 
 }  // namespace celer
