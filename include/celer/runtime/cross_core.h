@@ -344,7 +344,13 @@ class SubmitTaskAwaiter : public RemoteWork {
   }
 
   Task<Status> Run() {
-    result_.emplace(co_await std::invoke(std::move(fn_)));
+    // A coroutine lambda's frame retains a pointer to its closure object; it
+    // does not copy the captures into the coroutine frame. Move the closure
+    // into this Run coroutine's frame before invoking it, so it remains alive
+    // on the target worker across every suspension. Invoking a moved temporary
+    // (or retaining it only in the origin worker's awaiter) is unsafe here.
+    Fn target_fn = std::move(fn_);
+    result_.emplace(co_await std::invoke(target_fn));
     PostReply(ThisWorker().cross_core, origin, this);
     co_return Status::Ok();
   }

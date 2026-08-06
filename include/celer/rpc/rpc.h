@@ -36,8 +36,9 @@ namespace celer::rpc {
 using Bytes = std::vector<std::byte>;
 using BytesView = std::span<const std::byte>;
 
-// Fixed 16-byte wire header (no padding), followed by `len` payload bytes. This is
-// a same-host benchmark transport, so native byte order is fine.
+// Logical representation of the fixed 16-byte wire header. rpc.cpp encodes each
+// field explicitly in little-endian order; this struct is never memcpy'd onto
+// the wire.
 struct WireHeader {
   std::uint64_t req_id;
   std::uint32_t len;
@@ -53,6 +54,7 @@ enum : std::uint8_t { kRequest = 0, kResponse = 1 };
 // runs inline in the connection's read loop, so it must not block. Registered
 // before Start and read-only afterwards, hence safely shared across all workers.
 using Handler = std::function<Bytes(BytesView)>;
+using AsyncHandler = std::function<Task<Bytes>(BytesView)>;
 
 // An RPC server: a TcpService that frames requests, dispatches by verb to a
 // registered handler, and writes back the framed responses (batched per read).
@@ -61,12 +63,15 @@ class RpcServer : public TcpService {
   explicit RpcServer(std::uint16_t port) : TcpService(port) {}
 
   void OnVerb(std::uint16_t verb, Handler handler);  // call before Start
+  void OnVerbAsync(std::uint16_t verb,
+                   AsyncHandler handler);  // call before Start
 
  protected:
   Task<Status> Serve(TcpStream stream) override;
 
  private:
   std::unordered_map<std::uint16_t, Handler> handlers_;
+  std::unordered_map<std::uint16_t, AsyncHandler> async_handlers_;
 };
 
 // A multiplexing RPC client connection owned by one worker. Many Calls may be in

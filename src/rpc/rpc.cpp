@@ -37,11 +37,73 @@ namespace celer::rpc {
 namespace {
 
 constexpr std::size_t kHeader = sizeof(WireHeader);
+constexpr std::uint32_t kMaxPayloadBytes = 16U * 1024U * 1024U;
+
+void Store16(std::byte* out, std::uint16_t value) noexcept {
+  out[0] = static_cast<std::byte>(value & 0xffU);
+  out[1] = static_cast<std::byte>((value >> 8) & 0xffU);
+}
+
+void Store32(std::byte* out, std::uint32_t value) noexcept {
+  for (unsigned i = 0; i < 4; ++i) {
+    out[i] = static_cast<std::byte>((value >> (i * 8)) & 0xffU);
+  }
+}
+
+void Store64(std::byte* out, std::uint64_t value) noexcept {
+  for (unsigned i = 0; i < 8; ++i) {
+    out[i] = static_cast<std::byte>((value >> (i * 8)) & 0xffU);
+  }
+}
+
+std::uint16_t Load16(const std::byte* in) noexcept {
+  return static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(in[0])) |
+         (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(in[1]))
+          << 8);
+}
+
+std::uint32_t Load32(const std::byte* in) noexcept {
+  std::uint32_t value = 0;
+  for (unsigned i = 0; i < 4; ++i) {
+    value |= static_cast<std::uint32_t>(
+                 std::to_integer<std::uint8_t>(in[i]))
+             << (i * 8);
+  }
+  return value;
+}
+
+std::uint64_t Load64(const std::byte* in) noexcept {
+  std::uint64_t value = 0;
+  for (unsigned i = 0; i < 8; ++i) {
+    value |= static_cast<std::uint64_t>(
+                 std::to_integer<std::uint8_t>(in[i]))
+             << (i * 8);
+  }
+  return value;
+}
+
+void EncodeHeader(const WireHeader& header, std::byte* out) noexcept {
+  Store64(out, header.req_id);
+  Store32(out + 8, header.len);
+  Store16(out + 12, header.verb);
+  out[14] = static_cast<std::byte>(header.type);
+  out[15] = static_cast<std::byte>(header.pad);
+}
+
+WireHeader DecodeHeader(const std::byte* in) noexcept {
+  return WireHeader{
+      .req_id = Load64(in),
+      .len = Load32(in + 8),
+      .verb = Load16(in + 12),
+      .type = std::to_integer<std::uint8_t>(in[14]),
+      .pad = std::to_integer<std::uint8_t>(in[15]),
+  };
+}
 
 void AppendFrame(Bytes& out, const WireHeader& header, BytesView payload) {
   const std::size_t off = out.size();
   out.resize(off + kHeader + payload.size());
-  std::memcpy(out.data() + off, &header, kHeader);
+  EncodeHeader(header, out.data() + off);
   if (!payload.empty()) {
     std::memcpy(out.data() + off + kHeader, payload.data(), payload.size());
   }
@@ -55,6 +117,10 @@ void RpcServer::OnVerb(std::uint16_t verb, Handler handler) {
   handlers_[verb] = std::move(handler);
 }
 
+void RpcServer::OnVerbAsync(std::uint16_t verb, AsyncHandler handler) {
+  async_handlers_[verb] = std::move(handler);
+}
+
 Task<Status> RpcServer::Serve(TcpStream stream) {
   Bytes buf;
   std::array<std::byte, 16384> chunk{};
@@ -63,14 +129,26 @@ Task<Status> RpcServer::Serve(TcpStream stream) {
     std::size_t pos = 0;
     Bytes out;
     while (buf.size() - pos >= kHeader) {
-      WireHeader h;
-      std::memcpy(&h, buf.data() + pos, kHeader);
+      const WireHeader h = DecodeHeader(buf.data() + pos);
+      if (h.type != kRequest || h.pad != 0 || h.len > kMaxPayloadBytes) {
+        co_return Status(StatusCode::kInvalidArgument,
+                         "invalid rpc request header");
+      }
       if (buf.size() - pos - kHeader < h.len) {
         break;  // partial frame; wait for more
       }
       BytesView payload(buf.data() + pos + kHeader, h.len);
-      auto it = handlers_.find(h.verb);
-      Bytes resp = (it != handlers_.end()) ? it->second(payload) : Bytes{};
+      Bytes resp;
+      if (auto async = async_handlers_.find(h.verb);
+          async != async_handlers_.end()) {
+        resp = co_await async->second(payload);
+      } else if (auto sync = handlers_.find(h.verb); sync != handlers_.end()) {
+        resp = sync->second(payload);
+      }
+      if (resp.size() > kMaxPayloadBytes) {
+        co_return Status(StatusCode::kOutOfRange,
+                         "rpc response exceeds payload limit");
+      }
       WireHeader rh{
           .req_id = h.req_id,
           .len = static_cast<std::uint32_t>(resp.size()),
@@ -171,6 +249,10 @@ Task<StatusOr<Bytes>> RpcClient::Call(std::uint16_t verb, BytesView payload) {
   if (!stream_.IsOpen()) {
     co_return Status(StatusCode::kFailedPrecondition, "rpc client not connected");
   }
+  if (payload.size() > kMaxPayloadBytes) {
+    co_return Status(StatusCode::kOutOfRange,
+                     "rpc request exceeds payload limit");
+  }
 
   Pending pending;
   const std::uint64_t id = next_req_id_++;
@@ -206,8 +288,11 @@ Task<Status> RpcClient::ReadLoop() {
   while (stream_.IsOpen()) {
     std::size_t pos = 0;
     while (buf.size() - pos >= kHeader) {
-      WireHeader h;
-      std::memcpy(&h, buf.data() + pos, kHeader);
+      const WireHeader h = DecodeHeader(buf.data() + pos);
+      if (h.type != kResponse || h.pad != 0 || h.len > kMaxPayloadBytes) {
+        stream_.Close();
+        break;
+      }
       if (buf.size() - pos - kHeader < h.len) {
         break;
       }
