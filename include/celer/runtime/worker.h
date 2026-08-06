@@ -73,11 +73,11 @@ class Worker {
 
   // Wire this worker into the cross-core mailbox set before Run(). Called by the
   // Runtime, which creates the CrossCore (and eventfds) before any thread starts.
-  void BindCrossCore(unsigned id, CrossCore* cross_core) noexcept {
+  void BindCrossCore(WorkerId id, CrossCore* cross_core) noexcept {
     id_ = id;
     cross_core_ = cross_core;
   }
-  unsigned id() const noexcept { return id_; }
+  WorkerId id() const noexcept { return id_; }
 
   // Resume a coroutine on this worker's ready queue.
   void Enqueue(std::coroutine_handle<> handle, bool destroy_when_done = false);
@@ -184,7 +184,7 @@ class Worker {
   std::unordered_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
   std::vector<std::uint64_t> retired_connection_ids_;
   std::uint64_t next_connection_id_ = 1;
-  unsigned id_ = 0;
+  WorkerId id_ = 0;
   CrossCore* cross_core_ = nullptr;
   std::uint64_t wake_checks_ = 0;
   std::uint64_t wake_sent_ = 0;

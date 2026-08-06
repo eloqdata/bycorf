@@ -19,6 +19,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -66,6 +67,9 @@ class Runtime::Impl {
     if (thread_count == 0) {
       throw std::invalid_argument("thread_count must be >= 1");
     }
+    if (thread_count > std::numeric_limits<WorkerId>::max()) {
+      throw std::invalid_argument("thread_count exceeds WorkerId capacity");
+    }
 
     started_ = true;
 
@@ -85,7 +89,7 @@ class Runtime::Impl {
     for (unsigned i = 0; i < thread_count; ++i) {
       auto state = std::make_unique<State>();
       State* raw = state.get();
-      raw->worker.BindCrossCore(i, &cross_core_);
+      raw->worker.BindCrossCore(static_cast<WorkerId>(i), &cross_core_);
       raw->thread = std::thread([this, i, raw, main_fn] {
         int local_exit_code = main_fn(i, raw->worker);
 

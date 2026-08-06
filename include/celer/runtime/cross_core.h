@@ -41,6 +41,7 @@
 namespace celer {
 
 class Worker;
+using WorkerId = std::uint16_t;
 
 // A unit of cross-core work. It lives inside the awaiter, which lives in the
 // caller's coroutine frame — so there is NO separate heap allocation. Only the
@@ -51,7 +52,7 @@ class Worker;
 // run_fn is the one unavoidable indirect call: it invokes the type-erased user
 // closure, and only on the request leg.
 struct RemoteWork {
-  unsigned origin = 0;
+  WorkerId origin = 0;
   std::coroutine_handle<> waiter{};
   void (*run_fn)(RemoteWork*) = nullptr;  // runs the user fn, stores result
   bool reply_deferred = false;
@@ -169,7 +170,7 @@ class CrossCore {
 // cross-core post path marks wakes fully inline without needing Worker's
 // definition; the owning worker drains wake_list once per loop in FlushWakes.
 struct CurrentWorker {
-  unsigned id = 0;
+  WorkerId id = 0;
   CrossCore* cross_core = nullptr;
   Worker* self = nullptr;
   std::vector<std::uint8_t> wake_pending;  // per-target dedup flag
@@ -181,7 +182,8 @@ inline CurrentWorker& MutableThisWorker() noexcept {
   return w;
 }
 inline const CurrentWorker& ThisWorker() noexcept { return MutableThisWorker(); }
-inline void SetThisWorker(unsigned id, CrossCore* cross_core, Worker* self) noexcept {
+inline void SetThisWorker(WorkerId id, CrossCore* cross_core,
+                          Worker* self) noexcept {
   CurrentWorker& w = MutableThisWorker();
   w.id = id;
   w.cross_core = cross_core;
@@ -217,7 +219,8 @@ inline void PostRequest(CrossCore* cc, unsigned target, RemoteWork* work) noexce
   MarkWakeWorker(target);
 }
 
-inline void PostReply(CrossCore* cc, unsigned origin, RemoteWork* work) noexcept {
+inline void PostReply(CrossCore* cc, WorkerId origin,
+                      RemoteWork* work) noexcept {
   const unsigned sender = ThisWorker().id;
   CrossCoreLane& lane = cc->lane(origin, sender);
   if (lane.replies.try_enqueue(work)) {
