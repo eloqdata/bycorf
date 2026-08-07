@@ -650,6 +650,12 @@ bool IoUringBackend::Wait(int timeout_ms) {
   } else {
     rc = io_uring_wait_cqe(&ring_, &cqe);
   }
+  if (rc == -EINTR || rc == -EAGAIN) {
+    // A signal (debugger attach, profiler, timer) or a transient kernel
+    // shortage aborts the wait without a completion. Neither is fatal: the
+    // ring is intact and the caller re-enters on the next round.
+    return true;
+  }
   if (rc < 0) {
     spdlog::error("backend wait_cqe failed rc={}", rc);
     return false;
