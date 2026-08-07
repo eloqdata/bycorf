@@ -142,6 +142,11 @@ class Task {
     handle_.promise().completion_ = completion;
   }
 
+  // The awaiter only borrows the handle: ownership stays with the Task
+  // object, whose destructor at the end of the co_await full expression (or
+  // whenever the awaiting frame is destroyed while suspended here) destroys
+  // the child frame. This is what lets shutdown reclamation of a suspended
+  // coroutine cascade through its whole child chain.
   struct Awaiter {
     handle_type handle;
 
@@ -155,18 +160,10 @@ class Task {
       return handle;
     }
 
-    T await_resume() {
-      T value = std::move(*handle.promise().value_);
-      if (handle) {
-        ForgetTaskScheduling(handle);
-        handle.destroy();
-        handle = {};
-      }
-      return value;
-    }
+    T await_resume() { return std::move(*handle.promise().value_); }
   };
 
-  auto operator co_await() && noexcept { return Awaiter{std::exchange(handle_, {})}; }
+  auto operator co_await() && noexcept { return Awaiter{handle_}; }
 
   T TakeResult() && { return std::move(*handle_.promise().value_); }
   handle_type ReleaseHandle() && noexcept { return std::exchange(handle_, {}); }

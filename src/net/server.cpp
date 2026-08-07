@@ -104,7 +104,7 @@ int Server::RunWorker(unsigned index, Worker& worker) {
       .reuse_port = options_.reuse_port && options_.thread_count > 1,
   };
   for (Service* service : services_) {
-    worker.Spawn(service->Run(worker, ctx));
+    worker.SpawnRoot(service->Run(worker, ctx));
   }
 
   worker.Run();

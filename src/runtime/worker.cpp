@@ -148,6 +148,27 @@ void Worker::Spawn(Task<Status> task) {
   }
 }
 
+void Worker::SpawnRoot(Task<Status> task) {
+  task.SetCompletionCallback(
+      this, [](void* context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker*>(context)->Enqueue(completed, true);
+      });
+  auto handle = std::move(task).ReleaseHandle();
+  if (!handle) {
+    return;
+  }
+  if (stop_requested_.load(std::memory_order_acquire) ||
+      stopping_.load(std::memory_order_acquire)) {
+    handle.destroy();
+    return;
+  }
+  // Long-lived roots (service accept loops) never complete on their own, so
+  // they are tracked and reclaimed by DestroyDetachedTasks at shutdown. The
+  // registry holds only these few roots — ordinary Spawns stay untracked.
+  detached_tasks_.push_back(handle.address());
+  Enqueue(handle);
+}
+
 void Worker::SpawnBackground(Task<Status> task) {
   task.SetCompletionCallback(
       this, [](void* context, std::coroutine_handle<> completed) noexcept {
@@ -163,6 +184,9 @@ void Worker::SpawnBackground(Task<Status> task) {
     return;
   }
   RegisterBackground(handle);
+  // Maintenance loops commonly outlive the run loop suspended in a sleep or
+  // I/O wait; track them for shutdown reclamation like service roots.
+  detached_tasks_.push_back(handle.address());
   Enqueue(handle);
 }
 
@@ -303,6 +327,29 @@ void Worker::ForgetScheduling(std::coroutine_handle<> handle) noexcept {
   }
 }
 
+void Worker::ForgetDetached(std::coroutine_handle<> handle) noexcept {
+  if (!handle || detached_tasks_.empty()) {
+    return;
+  }
+  const auto found = std::find(detached_tasks_.begin(), detached_tasks_.end(),
+                               handle.address());
+  if (found != detached_tasks_.end()) {
+    *found = detached_tasks_.back();
+    detached_tasks_.pop_back();
+  }
+}
+
+void Worker::DestroyDetachedTasks() noexcept {
+  // Destroying a root frame runs its destructors, which release any child
+  // Task frames it owns; the io_uring ring must already be quiesced so no
+  // in-flight kernel operation can touch the freed frames.
+  std::vector<void*> tasks = std::move(detached_tasks_);
+  detached_tasks_.clear();
+  for (void* address : tasks) {
+    std::coroutine_handle<>::from_address(address).destroy();
+  }
+}
+
 bool Worker::IsBackground(std::coroutine_handle<> handle) const noexcept {
   if (!handle || background_tasks_.empty()) {
     return false;
@@ -321,6 +368,7 @@ void Worker::ResumeReady(ReadyTask ready, TaskClass task_class) {
   if (handle.done()) {
     if (ready.destroy_when_done) {
       ForgetScheduling(handle);
+      ForgetDetached(handle);
       handle.destroy();
     }
     return;
@@ -792,6 +840,10 @@ void Worker::Run() {
   }
   while (!connections_.empty() && RunOnce(false)) {
   }
+  // Frames of still-suspended detached tasks are reclaimed by the runtime
+  // after every worker thread has joined (DestroyDetachedTasks): destroying
+  // them here could race with another worker still holding cross-core
+  // references into those frames.
 }
 
 } // namespace celer

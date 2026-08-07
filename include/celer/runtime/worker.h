@@ -109,6 +109,8 @@ class Worker {
 
   void RegisterBackground(std::coroutine_handle<> handle);
   void ForgetScheduling(std::coroutine_handle<> handle) noexcept;
+  void ForgetDetached(std::coroutine_handle<> handle) noexcept;
+  void DestroyDetachedTasks() noexcept;
   bool IsBackground(std::coroutine_handle<> handle) const noexcept;
   bool BackgroundBudgetExpired() const noexcept;
 
@@ -194,6 +196,9 @@ class Worker {
   // Schedule a fire-and-forget session coroutine on this worker (e.g. a service's
   // accept loop or a per-connection session). The frame is destroyed on completion.
   void Spawn(Task<Status> task);
+  // Spawn a long-lived root (service loop). Tracked so the worker can destroy
+  // its frame at shutdown if it never completes (e.g. suspended in accept).
+  void SpawnRoot(Task<Status> task);
 
   // Schedule cooperative background work. Membership follows nested Task frames
   // and all subsequent resume paths.
@@ -229,6 +234,11 @@ class Worker {
   std::deque<ReadyTask> next_background_ready_;
   std::deque<RemoteWork*> background_remote_work_;
   std::vector<void*> background_tasks_;
+  // Root handles of Spawn/SpawnBackground tasks still alive. A task that
+  // completes is removed when its frame is destroyed; anything left when the
+  // run loop exits is destroyed by DestroyDetachedTasks so shutdown does not
+  // leak coroutine frames suspended on I/O that will never complete.
+  std::vector<void*> detached_tasks_;
   bool foreground_remote_turn_ = true;
   bool background_remote_turn_ = true;
   std::unordered_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
