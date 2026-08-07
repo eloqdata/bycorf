@@ -144,6 +144,7 @@ void Worker::Spawn(Task<Status> task) {
       handle.destroy();
       return;
     }
+    RegisterDetached(handle);
     Enqueue(handle);
   }
 }
@@ -162,10 +163,7 @@ void Worker::SpawnRoot(Task<Status> task) {
     handle.destroy();
     return;
   }
-  // Long-lived roots (service accept loops) never complete on their own, so
-  // they are tracked and reclaimed by DestroyDetachedTasks at shutdown. The
-  // registry holds only these few roots — ordinary Spawns stay untracked.
-  detached_tasks_.push_back(handle.address());
+  RegisterDetached(handle);
   Enqueue(handle);
 }
 
@@ -184,9 +182,7 @@ void Worker::SpawnBackground(Task<Status> task) {
     return;
   }
   RegisterBackground(handle);
-  // Maintenance loops commonly outlive the run loop suspended in a sleep or
-  // I/O wait; track them for shutdown reclamation like service roots.
-  detached_tasks_.push_back(handle.address());
+  RegisterDetached(handle);
   Enqueue(handle);
 }
 
@@ -327,15 +323,36 @@ void Worker::ForgetScheduling(std::coroutine_handle<> handle) noexcept {
   }
 }
 
+namespace {
+
+using SpawnPromise = Task<Status>::promise_type;
+
+SpawnPromise& PromiseOf(void* address) noexcept {
+  return std::coroutine_handle<SpawnPromise>::from_address(address).promise();
+}
+
+}  // namespace
+
+void Worker::RegisterDetached(std::coroutine_handle<> handle) {
+  PromiseOf(handle.address()).detached_index_ =
+      static_cast<std::uint32_t>(detached_tasks_.size());
+  detached_tasks_.push_back(handle.address());
+}
+
 void Worker::ForgetDetached(std::coroutine_handle<> handle) noexcept {
-  if (!handle || detached_tasks_.empty()) {
+  if (!handle) {
     return;
   }
-  const auto found = std::find(detached_tasks_.begin(), detached_tasks_.end(),
-                               handle.address());
-  if (found != detached_tasks_.end()) {
-    *found = detached_tasks_.back();
-    detached_tasks_.pop_back();
+  SpawnPromise& promise = PromiseOf(handle.address());
+  const std::uint32_t index = promise.detached_index_;
+  if (index == SpawnPromise::kNotDetached) {
+    return;
+  }
+  promise.detached_index_ = SpawnPromise::kNotDetached;
+  detached_tasks_[index] = detached_tasks_.back();
+  detached_tasks_.pop_back();
+  if (index != detached_tasks_.size()) {
+    PromiseOf(detached_tasks_[index]).detached_index_ = index;
   }
 }
 

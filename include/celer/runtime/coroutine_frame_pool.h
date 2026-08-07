@@ -122,6 +122,26 @@ class CoroutineFramePool {
 
 inline thread_local CoroutineFramePool g_coroutine_frame_pool;
 
+// Under AddressSanitizer, bypass the pool so every frame is an individual
+// allocation: use-after-free and double-destroy of coroutine frames then
+// produce precise reports instead of silent pool-recycled corruption.
+#if !defined(CELER_ASAN) && defined(__SANITIZE_ADDRESS__)
+#define CELER_ASAN 1
+#endif
+#if !defined(CELER_ASAN) && defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define CELER_ASAN 1
+#endif
+#endif
+#if defined(CELER_ASAN)
+inline void* AllocateCoroutineFrame(std::size_t size) {
+  return ::operator new(size);
+}
+
+inline void ReleaseCoroutineFrame(void* frame) noexcept {
+  ::operator delete(frame);
+}
+#else
 inline void* AllocateCoroutineFrame(std::size_t size) {
   return g_coroutine_frame_pool.Allocate(size);
 }
@@ -129,6 +149,7 @@ inline void* AllocateCoroutineFrame(std::size_t size) {
 inline void ReleaseCoroutineFrame(void* frame) noexcept {
   g_coroutine_frame_pool.Release(frame);
 }
+#endif
 
 }  // namespace celer::detail
 

@@ -109,6 +109,7 @@ class Worker {
 
   void RegisterBackground(std::coroutine_handle<> handle);
   void ForgetScheduling(std::coroutine_handle<> handle) noexcept;
+  void RegisterDetached(std::coroutine_handle<> handle);
   void ForgetDetached(std::coroutine_handle<> handle) noexcept;
   void DestroyDetachedTasks() noexcept;
   bool IsBackground(std::coroutine_handle<> handle) const noexcept;

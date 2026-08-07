@@ -76,6 +76,7 @@ class Server {
   std::vector<Service*> services_;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> accepting_stopped_{false};
+  std::atomic<unsigned> drained_workers_{0};
   bool started_ = false;
   bool stopped_ = false;
 };

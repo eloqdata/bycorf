@@ -148,15 +148,6 @@ class Runtime::Impl {
         state->thread.join();
       }
     }
-
-    // All worker threads have joined: no cross-core reference into any
-    // coroutine frame can still be touched. Quiesce each ring, then reclaim
-    // the frames of detached roots that never completed (accept loops,
-    // maintenance loops). Both calls are idempotent.
-    for (auto& state : states_) {
-      state->worker.Shutdown();
-      state->worker.DestroyDetachedTasks();
-    }
     stopped_ = true;
   }
 

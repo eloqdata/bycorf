@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <thread>
 #include "celer/net/server.h"
 
 #include "spdlog/spdlog.h"
@@ -108,6 +109,20 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   }
 
   worker.Run();
+
+  // Two-phase shutdown: wait until every worker has left its event loop, so
+  // no cross-core reference into another worker's coroutine frames can still
+  // be exercised, then reclaim this worker's remaining frames on its own
+  // thread — their destructors may touch thread-affine state such as buffer
+  // pools. The ring is quiesced first so no in-flight kernel operation can
+  // touch the freed frames.
+  drained_workers_.fetch_add(1, std::memory_order_acq_rel);
+  while (drained_workers_.load(std::memory_order_acquire) <
+         options_.thread_count) {
+    std::this_thread::yield();
+  }
+  worker.Shutdown();
+  worker.DestroyDetachedTasks();
 
   if (!worker.stop_requested()) [[unlikely]] {
     return 1;

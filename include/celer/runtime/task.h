@@ -58,6 +58,10 @@ class Task {
     std::coroutine_handle<> continuation_{};
     void* completion_context_ = nullptr;
     completion_fn completion_ = nullptr;
+    // Index in the owning worker's detached-task registry (O(1) removal),
+    // or kNotDetached while the task is owned by a Task object/awaiter.
+    static constexpr std::uint32_t kNotDetached = 0xffffffffu;
+    std::uint32_t detached_index_ = kNotDetached;
 
     static void* operator new(std::size_t size) {
       return detail::AllocateCoroutineFrame(size);
