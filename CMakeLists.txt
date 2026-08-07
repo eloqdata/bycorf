@@ -103,6 +103,9 @@ target_include_directories(celer
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party  # vendored header-only spdlog
 )
+target_include_directories(celer SYSTEM PUBLIC
+  ${CELER_ABSEIL_SOURCE_DIR}
+)
 
 target_compile_features(celer PUBLIC cxx_std_23)
 target_link_libraries(celer PUBLIC celer_liburing absl::base)

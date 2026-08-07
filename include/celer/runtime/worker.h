@@ -195,8 +195,8 @@ class Worker {
   // accept loop or a per-connection session). The frame is destroyed on completion.
   void Spawn(Task<Status> task);
 
-  // Schedule cooperative maintenance such as defrag or TTL scanning. Background
-  // membership follows nested Task frames and all subsequent resume paths.
+  // Schedule cooperative background work. Membership follows nested Task frames
+  // and all subsequent resume paths.
   void SpawnBackground(Task<Status> task);
 
  private:
