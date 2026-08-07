@@ -15,3 +15,6 @@
 [submodule "third_party/liburing"]
 	path = third_party/liburing
 	url = https://github.com/axboe/liburing.git
+[submodule "third_party/abseil"]
+	path = third_party/abseil
+	url = https://github.com/abseil/abseil-cpp.git

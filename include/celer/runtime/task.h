@@ -18,6 +18,7 @@
 #define CELER_RUNTIME_TASK_H_
 
 #include <coroutine>
+#include <cstdint>
 #include <exception>
 #include <optional>
 #include <utility>
@@ -26,6 +27,25 @@
 #include "celer/runtime/coroutine_frame_pool.h"
 
 namespace celer {
+
+enum class TaskClass : std::uint8_t {
+  kForeground,
+  kBackground,
+};
+
+inline TaskClass& MutableCurrentTaskClass() noexcept {
+  static thread_local TaskClass task_class = TaskClass::kForeground;
+  return task_class;
+}
+
+inline TaskClass CurrentTaskClass() noexcept {
+  return MutableCurrentTaskClass();
+}
+
+// Implemented by Worker. Background membership follows nested Task frames so
+// every later I/O, lock, or cross-core resume returns to the background queue.
+void RegisterBackgroundTask(std::coroutine_handle<> handle) noexcept;
+void ForgetTaskScheduling(std::coroutine_handle<> handle) noexcept;
 
 template <typename T>
 class Task {
@@ -92,6 +112,7 @@ class Task {
   Task& operator=(Task&& other) noexcept {
     if (this != &other) {
       if (handle_) {
+        ForgetTaskScheduling(handle_);
         handle_.destroy();
       }
       handle_ = std::exchange(other.handle_, {});
@@ -104,6 +125,7 @@ class Task {
 
   ~Task() {
     if (handle_) {
+      ForgetTaskScheduling(handle_);
       handle_.destroy();
     }
   }
@@ -127,12 +149,16 @@ class Task {
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting) noexcept {
       handle.promise().continuation_ = awaiting;
+      if (CurrentTaskClass() == TaskClass::kBackground) {
+        RegisterBackgroundTask(handle);
+      }
       return handle;
     }
 
     T await_resume() {
       T value = std::move(*handle.promise().value_);
       if (handle) {
+        ForgetTaskScheduling(handle);
         handle.destroy();
         handle = {};
       }

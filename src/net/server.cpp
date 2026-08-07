@@ -88,6 +88,10 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   worker_options.recv_buffer_count = options_.recv_buffer_count;
   worker_options.ring_entries = options_.ring_entries;
   worker_options.busy_poll_us = options_.busy_poll_us;
+  worker_options.foreground_budget_us = options_.foreground_budget_us;
+  worker_options.background_budget_us = options_.background_budget_us;
+  worker_options.background_warrant_percent =
+      options_.background_warrant_percent;
 
   auto init_status = worker.Init(worker_options);
   if (!init_status.ok()) [[unlikely]] {

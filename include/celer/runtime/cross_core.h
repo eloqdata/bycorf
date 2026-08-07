@@ -54,6 +54,7 @@ using WorkerId = std::uint16_t;
 struct RemoteWork {
   WorkerId origin = 0;
   std::coroutine_handle<> waiter{};
+  TaskClass task_class = TaskClass::kForeground;
   void (*run_fn)(RemoteWork*) = nullptr;  // runs the user fn, stores result
   bool reply_deferred = false;
 };
@@ -276,6 +277,7 @@ class SubmitAwaiter : public RemoteWork {
   void await_suspend(std::coroutine_handle<> h) noexcept {
     waiter = h;
     origin = ThisWorker().id;
+    task_class = CurrentTaskClass();
     PostRequest(ThisWorker().cross_core, target_, this);
   }
 
@@ -330,6 +332,7 @@ class SubmitTaskAwaiter : public RemoteWork {
   void await_suspend(std::coroutine_handle<> handle) noexcept {
     waiter = handle;
     origin = ThisWorker().id;
+    task_class = CurrentTaskClass();
     if (target_ == origin) {
       Start(this);
       return;

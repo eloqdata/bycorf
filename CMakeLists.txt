@@ -27,6 +27,21 @@ option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
 # = io_uring. DPDK is not implemented yet; turning this on is reserved for it.
 option(CELER_WITH_DPDK "Build with the DPDK net backend instead of io_uring" OFF)
 
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(CELER_ABSEIL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/abseil")
+if (NOT EXISTS "${CELER_ABSEIL_SOURCE_DIR}/CMakeLists.txt")
+  message(FATAL_ERROR
+    "Abseil submodule not found; run git submodule update --init --recursive")
+endif()
+if (NOT TARGET absl::base)
+  add_subdirectory(
+    "${CELER_ABSEIL_SOURCE_DIR}"
+    "${CMAKE_CURRENT_BINARY_DIR}/third_party/abseil"
+    EXCLUDE_FROM_ALL
+  )
+endif()
+
 set(CELER_LIBURING_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/liburing")
 if (NOT EXISTS "${CELER_LIBURING_SOURCE_DIR}/configure")
   message(FATAL_ERROR
@@ -90,7 +105,7 @@ target_include_directories(celer
 )
 
 target_compile_features(celer PUBLIC cxx_std_23)
-target_link_libraries(celer PUBLIC celer_liburing)
+target_link_libraries(celer PUBLIC celer_liburing absl::base)
 
 if (CELER_WITH_DPDK)
   target_compile_definitions(celer PUBLIC CELER_WITH_DPDK)

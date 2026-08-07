@@ -37,6 +37,9 @@ struct ServerOptions {
   unsigned recv_buffer_count = 1024;
   unsigned ring_entries = 256;        // io_uring SQ ring size
   unsigned busy_poll_us = 0;
+  unsigned foreground_budget_us = 1000;
+  unsigned background_budget_us = 50;
+  unsigned background_warrant_percent = 10;
 };
 
 // Hosts one or more Services on a pool of thread-per-core workers. The Runtime
