@@ -17,6 +17,7 @@
 #ifndef CELER_NET_TCP_SERVICE_H_
 #define CELER_NET_TCP_SERVICE_H_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -53,11 +54,18 @@ class TcpService : public Service {
   virtual Task<Status> Serve(TcpStream stream) = 0;
 
  private:
+  Status StartSession(Worker& worker, Connection connection);
   Task<Status> RunSession(Worker& worker, Connection* connection);
 
   std::uint16_t port_;
   int backlog_;
   std::vector<std::unique_ptr<TcpListener>> listeners_;  // one per worker, by id
+  unsigned thread_count_ = 0;
+  std::atomic<std::uint64_t> next_connection_worker_{0};
+
+  // TODO: If long-lived connections develop uneven workloads after this
+  // accept-time placement, add request-boundary live migration. It must first
+  // cancel and drain the old worker's multishot recv and provided buffers.
 };
 
 }  // namespace celer

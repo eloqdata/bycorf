@@ -245,20 +245,31 @@ Status TcpListener::Bind(Worker* worker, std::string_view ip, std::uint16_t port
   return Status::Ok();
 }
 
-Task<StatusOr<Connection*>> TcpListener::Accept() {
+Task<StatusOr<Connection>> TcpListener::AcceptUnregistered() {
   auto accepted = co_await AcceptAwaitable(this);
   if (!accepted.ok()) {
     co_return accepted.status();
   }
 
   Connection connection;
-  connection.worker = worker_;
   connection.file.fd = *accepted;
   connection.closed = false;
   connection.generation = next_generation_++;
+  co_return connection;
+}
+
+Task<StatusOr<Connection*>> TcpListener::Accept() {
+  auto accepted = co_await AcceptUnregistered();
+  if (!accepted.ok()) {
+    co_return accepted.status();
+  }
+
+  Connection connection = std::move(*accepted);
+  const int fd = connection.file.fd;
+  connection.worker = worker_;
   Connection* registered = worker_->AddConnection(std::move(connection));
   if (registered == nullptr) {
-    ::close(*accepted);
+    ::close(fd);
     co_return Status(StatusCode::kInternal, "failed to register accepted connection");
   }
   co_return registered;
