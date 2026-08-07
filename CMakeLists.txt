@@ -51,6 +51,11 @@ endif()
 include(ExternalProject)
 find_program(CELER_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
 
+set(CELER_LIBURING_JOBSERVER_ARGS)
+if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
+  list(APPEND CELER_LIBURING_JOBSERVER_ARGS BUILD_JOB_SERVER_AWARE TRUE)
+endif()
+
 set(CELER_LIBURING_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/liburing")
 set(CELER_LIBURING_ARCHIVE "${CELER_LIBURING_BINARY_DIR}/src/liburing.a")
 # CMake validates imported include paths during generation, before liburing's
@@ -72,6 +77,7 @@ ExternalProject_Add(celer_liburing_build
       liburing.a ENABLE_SHARED=0
   INSTALL_COMMAND ""
   BUILD_BYPRODUCTS "${CELER_LIBURING_ARCHIVE}"
+  ${CELER_LIBURING_JOBSERVER_ARGS}
 )
 
 add_library(celer_liburing STATIC IMPORTED GLOBAL)

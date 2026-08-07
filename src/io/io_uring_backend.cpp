@@ -672,7 +672,8 @@ void IoUringBackend::WakeSelf() noexcept {
     return;
   }
   const std::uint64_t one = 1;
-  (void)::write(wake_event_fd_, &one, sizeof(one));
+  const ssize_t result = ::write(wake_event_fd_, &one, sizeof(one));
+  (void)result;
 }
 
 }  // namespace celer

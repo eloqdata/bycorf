@@ -102,7 +102,8 @@ class Runtime::Impl {
 
         if (active_workers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
           const std::uint64_t ready = 1;
-          (void)write(completion_fd_, &ready, sizeof(ready));
+          const ssize_t result = write(completion_fd_, &ready, sizeof(ready));
+          (void)result;
           std::lock_guard<std::mutex> lk(mu_);
           stopped_ = true;
           cv_.notify_all();
