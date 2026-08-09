@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -65,6 +66,37 @@ double CycleFrequency() noexcept {
 #else
   return absl::base_internal::CycleClock::Frequency();
 #endif
+}
+
+const char *CycleCounterName() noexcept {
+#if defined(__x86_64__)
+  return "rdtsc";
+#elif defined(__aarch64__)
+  return "cntvct_el0";
+#else
+  return "absl::CycleClock";
+#endif
+}
+
+const char *CycleFrequencySourceName() noexcept {
+#if defined(__x86_64__)
+  return "absl::NominalCPUFrequency";
+#elif defined(__aarch64__)
+  return "cntfrq_el0";
+#else
+  return "absl::CycleClock::Frequency";
+#endif
+}
+
+void LogCycleCounterInfo(double frequency) {
+  static std::once_flag once;
+  std::call_once(once, [frequency] {
+    spdlog::info(
+        "runtime cycle-counter={} frequency-source={} frequency={:.0f} Hz "
+        "({:.3f} MHz) ticks-per-us={:.3f}",
+        CycleCounterName(), CycleFrequencySourceName(), frequency,
+        frequency / 1'000'000.0, frequency / 1'000'000.0);
+  });
 }
 
 std::uint64_t CyclesFromMicroseconds(double frequency,
@@ -121,6 +153,7 @@ absl::Status Worker::Init(const WorkerOptions &options) {
   }
   options_ = options;
   cycle_frequency_ = CycleFrequency();
+  LogCycleCounterInfo(cycle_frequency_);
   foreground_budget_cycles_ =
       CyclesFromMicroseconds(cycle_frequency_, options_.foreground_budget_us_);
   background_budget_cycles_ =
