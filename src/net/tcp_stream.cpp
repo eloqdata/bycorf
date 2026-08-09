@@ -63,13 +63,14 @@ class ReadOperation final : public IoCompletion {
       return false;
     }
     if (connection_ == nullptr || connection_->worker == nullptr) {
-      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument, "stream is not bound");
+      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument,
+                                       "stream is not bound");
       return false;
     }
-    if (connection_->state != ConnectionState::kActive ||
-        connection_->closed || connection_->closing) {
-      immediate_status_ =
-          absl::Status(absl::StatusCode::kFailedPrecondition, "read on closed stream");
+    if (connection_->state != ConnectionState::kActive || connection_->closed ||
+        connection_->closing) {
+      immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                       "read on closed stream");
       return false;
     }
 
@@ -79,8 +80,8 @@ class ReadOperation final : public IoCompletion {
     }
 
     if (connection_->read_inflight || connection_->read_waiter) {
-      immediate_status_ =
-          absl::Status(absl::StatusCode::kFailedPrecondition, "concurrent read is not allowed");
+      immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                       "concurrent read is not allowed");
       return false;
     }
 
@@ -104,7 +105,8 @@ class ReadOperation final : public IoCompletion {
     }
 
     if (connection_ == nullptr) {
-      return absl::Status(absl::StatusCode::kInvalidArgument, "stream is not bound");
+      return absl::Status(absl::StatusCode::kInvalidArgument,
+                          "stream is not bound");
     }
 
     if (!connection_->last_error.ok()) {
@@ -118,7 +120,8 @@ class ReadOperation final : public IoCompletion {
     }
 
     if (connection_->received_buffers.empty()) {
-      return absl::Status(absl::StatusCode::kUnavailable, "no received data available");
+      return absl::Status(absl::StatusCode::kUnavailable,
+                          "no received data available");
     }
 
     auto& received = connection_->received_buffers.front();
@@ -128,7 +131,8 @@ class ReadOperation final : public IoCompletion {
     auto chunk = connection_->worker->ViewMultishotBuffer(
         connection_, received.buffer_id, received.offset, to_copy);
     if (chunk.size() != to_copy) {
-      return absl::Status(absl::StatusCode::kInternal, "invalid multishot buffer view");
+      return absl::Status(absl::StatusCode::kInternal,
+                          "invalid multishot buffer view");
     }
 
     std::memcpy(buffer_.data(), chunk.data(), chunk.size());
@@ -168,8 +172,8 @@ class WriteOperation final : public IoCompletion {
       result_ = -EINVAL;
       return false;
     }
-    if (connection_->state != ConnectionState::kActive ||
-        connection_->closed || connection_->closing) {
+    if (connection_->state != ConnectionState::kActive || connection_->closed ||
+        connection_->closing) {
       result_ = -EBADF;
       return false;
     }
@@ -178,7 +182,8 @@ class WriteOperation final : public IoCompletion {
       return false;
     }
 
-    auto status = connection_->worker->SubmitSend(connection_->file, buffer_, this);
+    auto status =
+        connection_->worker->SubmitSend(connection_->file, buffer_, this);
     if (!status.ok()) {
       result_ = -EAGAIN;
       return false;
@@ -233,11 +238,13 @@ int TcpStream::NativeFd() const noexcept {
   return connection_ == nullptr ? -1 : connection_->file.fd;
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(std::span<std::byte> buffer) {
+Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(
+    std::span<std::byte> buffer) {
   co_return co_await ReadOperation(connection_, buffer);
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::WriteSome(std::span<const std::byte> buffer) {
+Task<absl::StatusOr<std::size_t>> TcpStream::WriteSome(
+    std::span<const std::byte> buffer) {
   co_return co_await WriteOperation(connection_, buffer);
 }
 
@@ -249,7 +256,8 @@ Task<absl::Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
       co_return result.status();
     }
     if (*result == 0) {
-      co_return absl::Status(absl::StatusCode::kInternal, "WriteSome returned 0");
+      co_return absl::Status(absl::StatusCode::kInternal,
+                             "WriteSome returned 0");
     }
     written += *result;
   }
@@ -263,7 +271,8 @@ absl::Status TcpStream::Close() noexcept {
   if (connection_->state != ConnectionState::kActive) {
     return absl::OkStatus();
   }
-  connection_->worker->BeginClose(connection_, absl::OkStatus(), CloseMode::kLocalClose);
+  connection_->worker->BeginClose(connection_, absl::OkStatus(),
+                                  CloseMode::kLocalClose);
   return absl::OkStatus();
 }
 

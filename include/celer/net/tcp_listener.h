@@ -23,8 +23,8 @@
 #include <string_view>
 
 #include "absl/status/statusor.h"
-#include "celer/net/connection.h"
 #include "celer/io/completion.h"
+#include "celer/net/connection.h"
 #include "celer/runtime/task.h"
 
 namespace celer {
@@ -70,8 +70,8 @@ class TcpListener {
   bool IsOpen() const noexcept;
   int NativeFd() const noexcept;
 
-  absl::Status Bind(Worker* worker, std::string_view ip, std::uint16_t port, int backlog = 128,
-              bool reuse_port = false);
+  absl::Status Bind(Worker* worker, std::string_view ip, std::uint16_t port,
+                    int backlog = 128, bool reuse_port = false);
   // Accept a socket without registering it with the accepting worker. This is
   // used by TcpService to hand a fresh socket to its selected owner before any
   // recv operation is armed.

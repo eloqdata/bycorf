@@ -28,11 +28,13 @@ namespace celer {
 
 inline void ValidateCapacity(std::size_t capacity) {
   if (capacity == 0 || (capacity & (capacity - 1)) != 0) {
-    throw std::invalid_argument("CircularQueue capacity must be a power of two");
+    throw std::invalid_argument(
+        "CircularQueue capacity must be a power of two");
   }
 }
 
-// Single-threaded growable ring buffer (power-of-two capacity, masked indexing).
+// Single-threaded growable ring buffer (power-of-two capacity, masked
+// indexing).
 template <typename T>
 class CircularQueue {
  public:

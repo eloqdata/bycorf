@@ -35,7 +35,7 @@ struct ServerOptions {
   int idle_timeout_ms = -1;
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
   unsigned recv_buffer_count = 1024;
-  unsigned ring_entries = 256;        // io_uring SQ ring size
+  unsigned ring_entries = 256;  // io_uring SQ ring size
   unsigned busy_poll_us = 0;
   unsigned foreground_budget_us = 1000;
   unsigned background_budget_us = 50;

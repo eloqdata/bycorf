@@ -18,9 +18,9 @@
 
 #include <unistd.h>
 
-#include "spdlog/spdlog.h"
 #include "celer/runtime/cross_core.h"
 #include "celer/runtime/worker.h"
+#include "spdlog/spdlog.h"
 
 namespace celer {
 
@@ -38,12 +38,12 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection) {
   const int fd = connection.file.fd;
   if (fd < 0) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
-                  "accepted connection has an invalid fd");
+                        "accepted connection has an invalid fd");
   }
   if (worker.stop_requested()) {
     ::close(fd);
     return absl::Status(absl::StatusCode::kCancelled,
-                  "target worker is stopping");
+                        "target worker is stopping");
   }
 
   connection.worker = &worker;
@@ -51,7 +51,7 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection) {
   if (registered == nullptr) {
     ::close(fd);
     return absl::Status(absl::StatusCode::kInternal,
-                  "failed to register accepted connection");
+                        "failed to register accepted connection");
   }
   worker.Spawn(RunSession(worker, registered));
   return absl::OkStatus();
@@ -100,8 +100,8 @@ Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
         [this, connection = std::move(*accepted)]() mutable -> absl::Status {
           return StartSession(*ThisWorker().self, std::move(connection));
         });
-    if (!started.ok() &&
-        started.code() != absl::StatusCode::kCancelled) [[unlikely]] {
+    if (!started.ok() && started.code() != absl::StatusCode::kCancelled)
+        [[unlikely]] {
       spdlog::warn("failed to start accepted connection on worker[{}]: {}",
                    target, started.message());
     }
@@ -110,16 +110,16 @@ Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
   co_return absl::OkStatus();
 }
 
-Task<absl::Status> TcpService::RunSession(Worker& worker, Connection* connection) {
+Task<absl::Status> TcpService::RunSession(Worker& worker,
+                                          Connection* connection) {
   TcpStream stream(connection);
   absl::Status status = co_await Serve(std::move(stream));
 
-  if (connection != nullptr &&
-      connection->state == ConnectionState::kActive &&
+  if (connection != nullptr && connection->state == ConnectionState::kActive &&
       !connection->closing) [[unlikely]] {
     if (status.ok()) {
-      const CloseMode mode =
-          connection->recv_eof ? CloseMode::kPeerClosed : CloseMode::kLocalClose;
+      const CloseMode mode = connection->recv_eof ? CloseMode::kPeerClosed
+                                                  : CloseMode::kLocalClose;
       worker.BeginClose(connection, absl::OkStatus(), mode);
     } else {
       worker.BeginClose(connection, status, CloseMode::kLocalError);

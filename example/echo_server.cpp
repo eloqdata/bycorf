@@ -14,23 +14,24 @@
  * limitations under the License.
  */
 
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
-#include <poll.h>
 #include <span>
 #include <string>
 #include <string_view>
-#include <sys/eventfd.h>
-#include <unistd.h>
 
-#include "spdlog/spdlog.h"
 #include "celer/base/status.h"
 #include "celer/net/server.h"
 #include "celer/net/tcp_service.h"
+#include "spdlog/spdlog.h"
 
 namespace celer {
 
@@ -94,8 +95,8 @@ class EchoService final : public TcpService {
       if (*read_result == 0) [[unlikely]] {
         co_return Status::Ok();
       }
-      auto write_status =
-          co_await stream.WriteAll(std::span<const std::byte>(buffer.data(), *read_result));
+      auto write_status = co_await stream.WriteAll(
+          std::span<const std::byte>(buffer.data(), *read_result));
       if (!write_status.ok()) [[unlikely]] {
         co_return write_status;
       }
@@ -164,8 +165,9 @@ int main(int argc, char** argv) {
     idle_timeout_ms = std::stoi(argv[4]);
   }
 
-  spdlog::info("celer echo server listening on {}:{} threads={} idle_timeout_ms={}",
-               bind_ip, port, thread_count, idle_timeout_ms);
+  spdlog::info(
+      "celer echo server listening on {}:{} threads={} idle_timeout_ms={}",
+      bind_ip, port, thread_count, idle_timeout_ms);
 
   const auto signal_status = celer::InstallShutdownSignalHandler();
   if (!signal_status.ok()) [[unlikely]] {
@@ -188,11 +190,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const celer::WaitResult wait_result = celer::WaitForSignalOrServerStop(server);
+  const celer::WaitResult wait_result =
+      celer::WaitForSignalOrServerStop(server);
   if (wait_result == celer::WaitResult::kSignal) {
     const int signal = static_cast<int>(celer::g_last_shutdown_signal);
-    spdlog::info("shutdown requested by signal {}",
-                 (signal == 0 ? std::string("unknown") : std::to_string(signal)));
+    spdlog::info(
+        "shutdown requested by signal {}",
+        (signal == 0 ? std::string("unknown") : std::to_string(signal)));
     server.RequestStop();
   }
 

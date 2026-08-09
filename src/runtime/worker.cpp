@@ -46,7 +46,7 @@ double CycleFrequency() noexcept {
 }
 
 std::uint64_t CyclesFromMicroseconds(double frequency,
-                                    unsigned microseconds) noexcept {
+                                     unsigned microseconds) noexcept {
   return std::max<std::uint64_t>(
       1, static_cast<std::uint64_t>(
              frequency * static_cast<double>(microseconds) / 1'000'000.0));
@@ -62,7 +62,7 @@ class TaskClassGuard {
   TaskClass previous_;
 };
 
-} // namespace
+}  // namespace
 
 void RegisterBackgroundTask(std::coroutine_handle<> handle) noexcept {
   if (ThisWorker().self != nullptr) {
@@ -87,14 +87,14 @@ absl::Status Worker::Init(const WorkerOptions &options) {
   // invariant.
   if (cross_core_ == nullptr) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
-                  "worker requires BindCrossCore before Init");
+                        "worker requires BindCrossCore before Init");
   }
-  if (options.foreground_budget_us == 0 ||
-      options.background_budget_us == 0 ||
+  if (options.foreground_budget_us == 0 || options.background_budget_us == 0 ||
       options.background_warrant_percent > 100) {
-    return absl::Status(absl::StatusCode::kInvalidArgument,
-                  "worker scheduler budgets must be positive and background "
-                  "warrant must be <= 100%");
+    return absl::Status(
+        absl::StatusCode::kInvalidArgument,
+        "worker scheduler budgets must be positive and background "
+        "warrant must be <= 100%");
   }
   options_ = options;
   cycle_frequency_ = CycleFrequency();
@@ -133,8 +133,8 @@ void Worker::Shutdown() {
 
 void Worker::Spawn(Task<absl::Status> task) {
   task.SetCompletionCallback(
-      this, [](void* context, std::coroutine_handle<> completed) noexcept {
-        static_cast<Worker*>(context)->Enqueue(completed, true);
+      this, [](void *context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker *>(context)->Enqueue(completed, true);
       });
   auto handle = std::move(task).ReleaseHandle();
   if (handle) {
@@ -151,8 +151,8 @@ void Worker::Spawn(Task<absl::Status> task) {
 
 void Worker::SpawnRoot(Task<absl::Status> task) {
   task.SetCompletionCallback(
-      this, [](void* context, std::coroutine_handle<> completed) noexcept {
-        static_cast<Worker*>(context)->Enqueue(completed, true);
+      this, [](void *context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker *>(context)->Enqueue(completed, true);
       });
   auto handle = std::move(task).ReleaseHandle();
   if (!handle) {
@@ -169,8 +169,8 @@ void Worker::SpawnRoot(Task<absl::Status> task) {
 
 void Worker::SpawnBackground(Task<absl::Status> task) {
   task.SetCompletionCallback(
-      this, [](void* context, std::coroutine_handle<> completed) noexcept {
-        static_cast<Worker*>(context)->Enqueue(completed, true);
+      this, [](void *context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker *>(context)->Enqueue(completed, true);
       });
   auto handle = std::move(task).ReleaseHandle();
   if (!handle) {
@@ -283,8 +283,7 @@ void Worker::Enqueue(std::coroutine_handle<> handle, bool destroy_when_done) {
   if (!handle) {
     return;
   }
-  ReadyTask ready{.handle = handle,
-                  .destroy_when_done = destroy_when_done};
+  ReadyTask ready{.handle = handle, .destroy_when_done = destroy_when_done};
   if (IsBackground(handle)) {
     background_ready_.push_back(ready);
   } else {
@@ -314,9 +313,8 @@ void Worker::ForgetScheduling(std::coroutine_handle<> handle) noexcept {
   if (!handle || background_tasks_.empty()) {
     return;
   }
-  const auto found =
-      std::find(background_tasks_.begin(), background_tasks_.end(),
-                handle.address());
+  const auto found = std::find(background_tasks_.begin(),
+                               background_tasks_.end(), handle.address());
   if (found != background_tasks_.end()) {
     *found = background_tasks_.back();
     background_tasks_.pop_back();
@@ -327,7 +325,7 @@ namespace {
 
 using SpawnPromise = Task<absl::Status>::promise_type;
 
-SpawnPromise& PromiseOf(void* address) noexcept {
+SpawnPromise &PromiseOf(void *address) noexcept {
   return std::coroutine_handle<SpawnPromise>::from_address(address).promise();
 }
 
@@ -343,7 +341,7 @@ void Worker::ForgetDetached(std::coroutine_handle<> handle) noexcept {
   if (!handle) {
     return;
   }
-  SpawnPromise& promise = PromiseOf(handle.address());
+  SpawnPromise &promise = PromiseOf(handle.address());
   const std::uint32_t index = promise.detached_index_;
   if (index == SpawnPromise::kNotDetached) {
     return;
@@ -360,9 +358,9 @@ void Worker::DestroyDetachedTasks() noexcept {
   // Destroying a root frame runs its destructors, which release any child
   // Task frames it owns; the io_uring ring must already be quiesced so no
   // in-flight kernel operation can touch the freed frames.
-  std::vector<void*> tasks = std::move(detached_tasks_);
+  std::vector<void *> tasks = std::move(detached_tasks_);
   detached_tasks_.clear();
-  for (void* address : tasks) {
+  for (void *address : tasks) {
     std::coroutine_handle<>::from_address(address).destroy();
   }
 }
@@ -397,11 +395,10 @@ void Worker::ResumeReady(ReadyTask ready, TaskClass task_class) {
 std::size_t Worker::DrainReadyUntil(std::int64_t deadline_cycles) {
   std::size_t resumed = 0;
   while (!ready_.empty() || !foreground_remote_work_.empty()) {
-    const bool run_remote =
-        !foreground_remote_work_.empty() &&
-        (ready_.empty() || foreground_remote_turn_);
+    const bool run_remote = !foreground_remote_work_.empty() &&
+                            (ready_.empty() || foreground_remote_turn_);
     if (run_remote) {
-      RemoteWork* work = foreground_remote_work_.front();
+      RemoteWork *work = foreground_remote_work_.front();
       foreground_remote_work_.pop_front();
       TaskClassGuard task_class_guard(TaskClass::kForeground);
       RunRemoteWork(work);
@@ -427,7 +424,7 @@ std::size_t Worker::DrainBackgroundUntil(std::int64_t deadline_cycles) {
         !background_remote_work_.empty() &&
         (background_ready_.empty() || background_remote_turn_);
     if (run_remote) {
-      RemoteWork* work = background_remote_work_.front();
+      RemoteWork *work = background_remote_work_.front();
       background_remote_work_.pop_front();
       TaskClassGuard task_class_guard(TaskClass::kBackground);
       RunRemoteWork(work);
@@ -564,13 +561,13 @@ void Worker::CheckIdleConnections() {
       continue;
     }
 
-    connection->last_error =
-        absl::Status(absl::StatusCode::kDeadlineExceeded, "connection idle timeout");
+    connection->last_error = absl::Status(absl::StatusCode::kDeadlineExceeded,
+                                          "connection idle timeout");
     BeginClose(connection, connection->last_error, CloseMode::kIdleTimeout);
   }
 }
 
-void Worker::RunRemoteWork(RemoteWork* work) {
+void Worker::RunRemoteWork(RemoteWork *work) {
   work->run_fn(work);
   if (!work->reply_deferred) {
     PostReply(cross_core_, work->origin, work);
@@ -584,7 +581,7 @@ bool Worker::DrainCrossCore() {
   std::size_t nreq = 0;
   std::size_t nrep = 0;
   std::size_t nnotifications = 0;
-  const auto schedule_request = [this](RemoteWork* work) {
+  const auto schedule_request = [this](RemoteWork *work) {
     if (work->task_class == TaskClass::kBackground) {
       background_remote_work_.push_back(work);
     } else {
@@ -642,8 +639,7 @@ bool Worker::DrainCrossCore() {
     }
 
     if (nrep < 64) {
-      const std::size_t count =
-          lane.replies.try_dequeue_bulk(batch, 64 - nrep);
+      const std::size_t count = lane.replies.try_dequeue_bulk(batch, 64 - nrep);
       for (std::size_t i = 0; i < count; ++i) {
         Enqueue(batch[i]->waiter);
       }
@@ -659,7 +655,6 @@ bool Worker::DrainCrossCore() {
       }
       nnotifications += count;
     }
-
   }
 
   return nreq > 0 || nrep > 0 || nnotifications > 0;
@@ -696,17 +691,16 @@ bool Worker::BusyPoll() {
       MergeDeferred();
       const std::int64_t foreground_start = CycleNow();
       const std::size_t foreground_resumes =
-          DrainReadyUntil(
-              foreground_start +
-              static_cast<std::int64_t>(foreground_budget_cycles_));
+          DrainReadyUntil(foreground_start +
+                          static_cast<std::int64_t>(foreground_budget_cycles_));
       const std::uint64_t foreground_cycles =
           static_cast<std::uint64_t>(CycleNow() - foreground_start);
       if (foreground_resumes != 0) {
         foreground_runtime_cycles_ += foreground_cycles;
         scheduler_stats_.foreground_resumes += foreground_resumes;
         scheduler_stats_.foreground_cycles += foreground_cycles;
-        scheduler_stats_.max_foreground_cycles = std::max(
-            scheduler_stats_.max_foreground_cycles, foreground_cycles);
+        scheduler_stats_.max_foreground_cycles =
+            std::max(scheduler_stats_.max_foreground_cycles, foreground_cycles);
         scheduler_stats_.foreground_overruns +=
             foreground_cycles > foreground_budget_cycles_;
       }
@@ -743,19 +737,17 @@ bool Worker::RunOnce(bool wait_for_completion) {
   // 1. Poll external work once, then run online coroutines within their normal
   //    budget. Deferred Yield continuations are appended after fresh I/O and
   //    cross-core work so yielding really returns control to the event loop.
-  bool did_work = !ready_.empty() || !next_ready_.empty() ||
-                  !foreground_remote_work_.empty() ||
-                  !background_ready_.empty() ||
-                  !next_background_ready_.empty() ||
-                  !background_remote_work_.empty();
+  bool did_work =
+      !ready_.empty() || !next_ready_.empty() ||
+      !foreground_remote_work_.empty() || !background_ready_.empty() ||
+      !next_background_ready_.empty() || !background_remote_work_.empty();
   did_work |= DrainCrossCore();
   did_work |= backend_.Poll();
   MergeDeferred();
 
   const std::int64_t foreground_start = CycleNow();
-  const std::size_t foreground_resumes =
-      DrainReadyUntil(foreground_start +
-                      static_cast<std::int64_t>(foreground_budget_cycles_));
+  const std::size_t foreground_resumes = DrainReadyUntil(
+      foreground_start + static_cast<std::int64_t>(foreground_budget_cycles_));
   const std::uint64_t foreground_cycles =
       static_cast<std::uint64_t>(CycleNow() - foreground_start);
   if (foreground_resumes != 0) {
@@ -763,8 +755,8 @@ bool Worker::RunOnce(bool wait_for_completion) {
     foreground_runtime_cycles_ += foreground_cycles;
     scheduler_stats_.foreground_resumes += foreground_resumes;
     scheduler_stats_.foreground_cycles += foreground_cycles;
-    scheduler_stats_.max_foreground_cycles = std::max(
-        scheduler_stats_.max_foreground_cycles, foreground_cycles);
+    scheduler_stats_.max_foreground_cycles =
+        std::max(scheduler_stats_.max_foreground_cycles, foreground_cycles);
     scheduler_stats_.foreground_overruns +=
         foreground_cycles > foreground_budget_cycles_;
   }
@@ -775,9 +767,8 @@ bool Worker::RunOnce(bool wait_for_completion) {
   if (ShouldRunBackground()) {
     const std::int64_t background_start = CycleNow();
     const std::size_t background_resumes =
-        DrainBackgroundUntil(
-            background_start +
-            static_cast<std::int64_t>(background_budget_cycles_));
+        DrainBackgroundUntil(background_start + static_cast<std::int64_t>(
+                                                    background_budget_cycles_));
     const std::uint64_t background_cycles =
         static_cast<std::uint64_t>(CycleNow() - background_start);
     if (background_resumes != 0) {
@@ -785,8 +776,8 @@ bool Worker::RunOnce(bool wait_for_completion) {
       background_runtime_cycles_ += background_cycles;
       scheduler_stats_.background_resumes += background_resumes;
       scheduler_stats_.background_cycles += background_cycles;
-      scheduler_stats_.max_background_cycles = std::max(
-          scheduler_stats_.max_background_cycles, background_cycles);
+      scheduler_stats_.max_background_cycles =
+          std::max(scheduler_stats_.max_background_cycles, background_cycles);
       scheduler_stats_.background_overruns +=
           background_cycles > background_budget_cycles_;
     }
@@ -802,10 +793,10 @@ bool Worker::RunOnce(bool wait_for_completion) {
   RecordRound(round_start);
 
   if (!wait_for_completion) {
-    return did_work; // shutdown drain: stop once no progress is left
+    return did_work;  // shutdown drain: stop once no progress is left
   }
   if (did_work) {
-    return true; // had work; loop again without parking
+    return true;  // had work; loop again without parking
   }
 
   if (BusyPoll()) {
@@ -823,19 +814,19 @@ bool Worker::RunOnce(bool wait_for_completion) {
   WorkerMailbox &mb = cross_core_->mailbox(id_);
   const std::uint32_t seq = mb.wake_seq.load(std::memory_order_acquire);
   if (DrainCrossCore()) {
-    return true; // raced: work arrived; next iteration drains + submits it
+    return true;  // raced: work arrived; next iteration drains + submits it
   }
   std::uint32_t expected = seq;
   if (!mb.wake_seq.compare_exchange_strong(expected, kWakeSeqParked,
                                            std::memory_order_acq_rel,
                                            std::memory_order_relaxed)) {
-    return true; // a producer published work; loop again instead of parking
+    return true;  // a producer published work; loop again instead of parking
   }
 
   const int timeout_ms = options_.idle_timeout_ms > 0 ? 100 : -1;
-  const bool ok = backend_.Wait(timeout_ms);       // blocks; dispatches on wake
-  mb.wake_seq.store(0, std::memory_order_release); // leave the parked state
-  return ok; // next iteration drains what Wait dispatched
+  const bool ok = backend_.Wait(timeout_ms);  // blocks; dispatches on wake
+  mb.wake_seq.store(0, std::memory_order_release);  // leave the parked state
+  return ok;  // next iteration drains what Wait dispatched
 }
 
 void Worker::Run() {
@@ -852,7 +843,8 @@ void Worker::Run() {
 
   for (auto &[connection_id, owned] : connections_) {
     (void)connection_id;
-    BeginClose(owned.get(), absl::Status(absl::StatusCode::kCancelled, "worker shutdown"),
+    BeginClose(owned.get(),
+               absl::Status(absl::StatusCode::kCancelled, "worker shutdown"),
                CloseMode::kWorkerShutdown);
   }
   while (!connections_.empty() && RunOnce(false)) {
@@ -863,4 +855,4 @@ void Worker::Run() {
   // references into those frames.
 }
 
-} // namespace celer
+}  // namespace celer

@@ -50,8 +50,9 @@ class Service {
   // sockets and serves until the worker stops, then returns.
   virtual Task<absl::Status> Run(Worker& worker, ServiceContext ctx) = 0;
 
-  // Called on the Server's thread at shutdown (before the workers are stopped) to
-  // close the service's sockets so its Run loops unblock. Must be thread-safe.
+  // Called on the Server's thread at shutdown (before the workers are stopped)
+  // to close the service's sockets so its Run loops unblock. Must be
+  // thread-safe.
   virtual void Stop() noexcept = 0;
 };
 

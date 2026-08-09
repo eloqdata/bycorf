@@ -15,7 +15,8 @@
  */
 
 // Closed-loop RPC echo benchmark for celer::rpc.
-//   rpc_bench [server_ip] [port] [threads] [conns_per_thread] [concurrency_per_conn]
+//   rpc_bench [server_ip] [port] [threads] [conns_per_thread]
+//   [concurrency_per_conn]
 //             [payload_bytes] [duration_sec]
 #include <atomic>
 #include <chrono>
@@ -24,10 +25,10 @@
 #include <thread>
 #include <vector>
 
-#include "spdlog/spdlog.h"
 #include "celer/rpc/rpc.h"
 #include "celer/runtime/runtime.h"
 #include "celer/runtime/worker.h"
+#include "spdlog/spdlog.h"
 
 namespace {
 
@@ -50,14 +51,15 @@ Task<Status> Caller(rpc::RpcClient* client, unsigned wid) {
   rpc::Bytes payload(g_payload, std::byte{'x'});
   while (!g_stop.load(std::memory_order_acquire)) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto reply = co_await client->Call(1, rpc::BytesView(payload.data(), payload.size()));
+    auto reply = co_await client->Call(
+        1, rpc::BytesView(payload.data(), payload.size()));
     if (!reply.ok()) [[unlikely]] {
       break;
     }
     const auto dt = std::chrono::steady_clock::now() - t0;
     g_stats[wid].calls += 1;
-    g_stats[wid].latency_ns +=
-        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count());
+    g_stats[wid].latency_ns += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count());
   }
   co_return Status::Ok();
 }
@@ -65,7 +67,8 @@ Task<Status> Caller(rpc::RpcClient* client, unsigned wid) {
 Task<Status> Setup(Worker& worker) {
   const unsigned wid = worker.id();
   for (unsigned c = 0; c < g_conns; ++c) {
-    auto* client = new rpc::RpcClient();  // leaked for the lifetime of the bench
+    auto* client =
+        new rpc::RpcClient();  // leaked for the lifetime of the bench
     auto status = co_await client->Connect(g_ip, g_port);
     if (!status.ok()) [[unlikely]] {
       spdlog::error("worker[{}] connect failed: {}", wid, status.message());
@@ -83,16 +86,19 @@ Task<Status> Setup(Worker& worker) {
 int main(int argc, char** argv) {
   if (argc >= 2) g_ip = argv[1];
   if (argc >= 3) g_port = static_cast<std::uint16_t>(std::stoi(argv[2]));
-  unsigned threads = (argc >= 4) ? static_cast<unsigned>(std::stoul(argv[3])) : 1;
+  unsigned threads =
+      (argc >= 4) ? static_cast<unsigned>(std::stoul(argv[3])) : 1;
   if (argc >= 5) g_conns = static_cast<unsigned>(std::stoul(argv[4]));
   if (argc >= 6) g_concurrency = static_cast<unsigned>(std::stoul(argv[5]));
   if (argc >= 7) g_payload = static_cast<std::size_t>(std::stoul(argv[6]));
-  unsigned duration_sec = (argc >= 8) ? static_cast<unsigned>(std::stoul(argv[7])) : 5;
+  unsigned duration_sec =
+      (argc >= 8) ? static_cast<unsigned>(std::stoul(argv[7])) : 5;
 
   g_stats.assign(threads, Stat{});
 
   spdlog::info(
-      "rpc_bench -> {}:{} threads={} conns/thread={} concurrency/conn={} payload={} dur={}s",
+      "rpc_bench -> {}:{} threads={} conns/thread={} concurrency/conn={} "
+      "payload={} dur={}s",
       g_ip, g_port, threads, g_conns, g_concurrency, g_payload, duration_sec);
 
   Runtime runtime;
@@ -121,9 +127,11 @@ int main(int argc, char** argv) {
   const double secs = std::chrono::duration<double>(elapsed).count();
   const double qps = (secs > 0) ? total_calls / secs : 0;
   const double avg_us =
-      (total_calls > 0) ? (static_cast<double>(total_latency) / total_calls) / 1000.0 : 0;
+      (total_calls > 0)
+          ? (static_cast<double>(total_latency) / total_calls) / 1000.0
+          : 0;
 
-  spdlog::info("calls={} elapsed={:.2f}s  QPS={:.0f}  avg_latency={:.2f}us", total_calls, secs,
-               qps, avg_us);
+  spdlog::info("calls={} elapsed={:.2f}s  QPS={:.0f}  avg_latency={:.2f}us",
+               total_calls, secs, qps, avg_us);
   return 0;
 }

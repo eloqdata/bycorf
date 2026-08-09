@@ -16,6 +16,9 @@
 
 #include "celer/runtime/runtime.h"
 
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -25,9 +28,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <sys/eventfd.h>
-#include <unistd.h>
 
 #include "celer/runtime/cross_core.h"
 
@@ -151,21 +151,15 @@ class Runtime::Impl {
     stopped_ = true;
   }
 
-  bool started() const noexcept {
-    return started_;
-  }
+  bool started() const noexcept { return started_; }
 
-  bool stopped() const noexcept {
-    return started_ && stopped_;
-  }
+  bool stopped() const noexcept { return started_ && stopped_; }
 
   int exit_code() const noexcept {
     return exit_code_.load(std::memory_order_acquire);
   }
 
-  int completion_fd() const noexcept {
-    return completion_fd_;
-  }
+  int completion_fd() const noexcept { return completion_fd_; }
 
  private:
   // Declared first so it outlives the workers that hold pointers into it.
@@ -181,8 +175,7 @@ class Runtime::Impl {
   int completion_fd_ = -1;
 };
 
-Runtime::Runtime() : impl_(std::make_unique<Impl>()) {
-}
+Runtime::Runtime() : impl_(std::make_unique<Impl>()) {}
 
 Runtime::Runtime(Runtime&&) noexcept = default;
 
@@ -199,28 +192,16 @@ void Runtime::Start(unsigned thread_count, WorkerMain main_fn) {
   impl_->Start(thread_count, std::move(main_fn));
 }
 
-void Runtime::RequestStop() noexcept {
-  impl_->RequestStop();
-}
+void Runtime::RequestStop() noexcept { impl_->RequestStop(); }
 
-void Runtime::WaitUntilStopped() {
-  impl_->WaitUntilStopped();
-}
+void Runtime::WaitUntilStopped() { impl_->WaitUntilStopped(); }
 
-bool Runtime::started() const noexcept {
-  return impl_->started();
-}
+bool Runtime::started() const noexcept { return impl_->started(); }
 
-bool Runtime::stopped() const noexcept {
-  return impl_->stopped();
-}
+bool Runtime::stopped() const noexcept { return impl_->stopped(); }
 
-int Runtime::exit_code() const noexcept {
-  return impl_->exit_code();
-}
+int Runtime::exit_code() const noexcept { return impl_->exit_code(); }
 
-int Runtime::completion_fd() const noexcept {
-  return impl_->completion_fd();
-}
+int Runtime::completion_fd() const noexcept { return impl_->completion_fd(); }
 
 }  // namespace celer

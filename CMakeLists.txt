@@ -27,6 +27,34 @@ option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
 # = io_uring. DPDK is not implemented yet; turning this on is reserved for it.
 option(CELER_WITH_DPDK "Build with the DPDK net backend instead of io_uring" OFF)
 
+find_program(CELER_CLANG_FORMAT NAMES clang-format-18 clang-format)
+file(GLOB_RECURSE CELER_FORMAT_FILES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/example/*.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/celer/*.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp
+)
+list(FILTER CELER_FORMAT_FILES EXCLUDE REGEX "/runtime/concurrentqueue\\.h$")
+if (CELER_CLANG_FORMAT)
+  add_custom_target(celer-format
+    COMMAND ${CELER_CLANG_FORMAT} -i ${CELER_FORMAT_FILES}
+    COMMENT "Formatting celer sources"
+    VERBATIM
+  )
+  add_custom_target(celer-format-check
+    COMMAND ${CELER_CLANG_FORMAT} --dry-run --Werror ${CELER_FORMAT_FILES}
+    COMMENT "Checking celer source formatting"
+    VERBATIM
+  )
+  if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    add_custom_target(format DEPENDS celer-format)
+    add_custom_target(format-check DEPENDS celer-format-check)
+  endif()
+else()
+  message(STATUS "clang-format not found; format targets are disabled")
+endif()
+
 set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(CELER_ABSEIL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/abseil")

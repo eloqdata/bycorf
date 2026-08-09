@@ -31,9 +31,10 @@ enum CompletionFlags : unsigned {
   kCompletionMore = 1u << 0,  // a multishot op will deliver further completions
 };
 
-// Backend-neutral completion callback. The io backend invokes Complete() when an
-// operation submitted with this object as its tag finishes. `result` is the op
-// result (>=0 byte count / fd, <0 -errno); `flags` is a CompletionFlags bitset.
+// Backend-neutral completion callback. The io backend invokes Complete() when
+// an operation submitted with this object as its tag finishes. `result` is the
+// op result (>=0 byte count / fd, <0 -errno); `flags` is a CompletionFlags
+// bitset.
 class IoCompletion {
  public:
   virtual ~IoCompletion() = default;

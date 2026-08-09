@@ -52,7 +52,8 @@ enum : std::uint8_t { kRequest = 0, kResponse = 1 };
 
 // Synchronous verb handler (fast path): request payload -> response payload. It
 // runs inline in the connection's read loop, so it must not block. Registered
-// before Start and read-only afterwards, hence safely shared across all workers.
+// before Start and read-only afterwards, hence safely shared across all
+// workers.
 using Handler = std::function<Bytes(BytesView)>;
 using AsyncHandler = std::function<Task<Bytes>(BytesView)>;
 
@@ -74,9 +75,9 @@ class RpcServer : public TcpService {
   std::unordered_map<std::uint16_t, AsyncHandler> async_handlers_;
 };
 
-// A multiplexing RPC client connection owned by one worker. Many Calls may be in
-// flight; responses are correlated to their waiters by req_id. Not thread-safe by
-// design — each worker uses its own RpcClient (shared-nothing).
+// A multiplexing RPC client connection owned by one worker. Many Calls may be
+// in flight; responses are correlated to their waiters by req_id. Not
+// thread-safe by design — each worker uses its own RpcClient (shared-nothing).
 class RpcClient {
  public:
   RpcClient() = default;
@@ -101,9 +102,11 @@ class RpcClient {
     bool done = false;
   };
 
-  void SendFrame(const WireHeader& header, BytesView payload);  // enqueue + kick
-  Task<absl::Status> WriteLoop();   // single writer: serializes concurrent requests
-  Task<absl::Status> ReadLoop();    // reads responses, resumes pending by req_id
+  void SendFrame(const WireHeader& header,
+                 BytesView payload);  // enqueue + kick
+  Task<absl::Status>
+  WriteLoop();  // single writer: serializes concurrent requests
+  Task<absl::Status> ReadLoop();  // reads responses, resumes pending by req_id
 
   TcpStream stream_;
   std::deque<Bytes> out_;

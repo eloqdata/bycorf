@@ -17,21 +17,21 @@
 #ifndef CELER_RUNTIME_WORKER_H_
 #define CELER_RUNTIME_WORKER_H_
 
+#include <atomic>
 #include <coroutine>
 #include <cstddef>
 #include <deque>
 #include <memory>
-#include <atomic>
 #include <span>
-#include <utility>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "celer/io/completion.h"
 #include "celer/io/net_backend.h"
 #include "celer/io/storage.h"
 #include "celer/net/connection.h"
-#include "absl/status/statusor.h"
 #include "celer/runtime/cross_core.h"
 #include "celer/runtime/task.h"
 
@@ -40,7 +40,7 @@ namespace celer {
 class TcpServerImpl;
 
 struct WorkerOptions {
-  unsigned ring_entries = 256;          // io_uring SQ ring size
+  unsigned ring_entries = 256;  // io_uring SQ ring size
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
   unsigned recv_buffer_count = 1024;
   int idle_timeout_ms = -1;
@@ -92,8 +92,9 @@ class Worker {
   absl::Status Init(const WorkerOptions& options = {});
   void Shutdown();
 
-  // Wire this worker into the cross-core mailbox set before Run(). Called by the
-  // Runtime, which creates the CrossCore (and eventfds) before any thread starts.
+  // Wire this worker into the cross-core mailbox set before Run(). Called by
+  // the Runtime, which creates the CrossCore (and eventfds) before any thread
+  // starts.
   void BindCrossCore(WorkerId id, CrossCore* cross_core) noexcept {
     id_ = id;
     cross_core_ = cross_core;
@@ -119,7 +120,9 @@ class Worker {
   void Run();
   void RequestStop() noexcept;
   void Stop() noexcept { RequestStop(); }
-  bool stop_requested() const noexcept { return stop_requested_.load(std::memory_order_acquire); }
+  bool stop_requested() const noexcept {
+    return stop_requested_.load(std::memory_order_acquire);
+  }
 
   // Stop-signal handler, invoked by the backend when the wake eventfd fires.
   // Returns true once the worker should leave its loop.
@@ -133,10 +136,12 @@ class Worker {
   SchedulerStats TakeSchedulerStats() noexcept;
 
   // Typed io submissions, forwarded to the backend (keeps io_uring out of the
-  // net layer). recv multishot is driven by EnsureRecvArmed; its completions are
-  // handled inside the backend, which calls back into Enqueue to resume readers.
-  absl::Status SubmitSend(const RegisteredFile& file, std::span<const std::byte> buffer,
-                    IoCompletion* tag) {
+  // net layer). recv multishot is driven by EnsureRecvArmed; its completions
+  // are handled inside the backend, which calls back into Enqueue to resume
+  // readers.
+  absl::Status SubmitSend(const RegisteredFile& file,
+                          std::span<const std::byte> buffer,
+                          IoCompletion* tag) {
     return backend_.SubmitSend(file, buffer, tag);
   }
   absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
@@ -145,9 +150,10 @@ class Worker {
   absl::Status EnsureRecvArmed(Connection* connection) {
     return backend_.StartRecvMultishot(connection);
   }
-  std::span<const std::byte> ViewMultishotBuffer(
-      const Connection* connection, std::uint16_t buffer_id,
-      std::size_t offset, std::size_t length) const {
+  std::span<const std::byte> ViewMultishotBuffer(const Connection* connection,
+                                                 std::uint16_t buffer_id,
+                                                 std::size_t offset,
+                                                 std::size_t length) const {
     return backend_.ViewRecvBuffer(connection, buffer_id, offset, length);
   }
   void ReleaseReceivedBuffer(Connection* connection, std::uint16_t buffer_id) {
@@ -161,41 +167,44 @@ class Worker {
     return backend_.RegisterBuffers(buffers);
   }
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
-                          FixedFile file, IoCompletion* tag) {
+                                FixedFile file, IoCompletion* tag) {
     return backend_.SubmitOpenDirect(path, flags, mode, file, tag);
   }
   absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
     return backend_.SubmitCloseDirect(file, tag);
   }
   absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
-                         std::uint64_t offset, IoCompletion* tag) {
+                               std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitReadFixed(file, buffer, offset, tag);
   }
   absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
-                    std::uint64_t offset, IoCompletion* tag) {
+                          std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitRead(file, buffer, offset, tag);
   }
   absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
-                     std::uint64_t offset, IoCompletion* tag) {
+                           std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitWrite(file, buffer, offset, tag);
   }
   absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
-                          std::uint64_t offset, IoCompletion* tag) {
+                                std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitWriteFixed(file, buffer, offset, tag);
   }
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
     return backend_.SubmitFdatasync(file, tag);
   }
-  absl::Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag) {
+  absl::Status SubmitTimeout(const __kernel_timespec& timeout,
+                             IoCompletion* tag) {
     return backend_.SubmitTimeout(timeout, tag);
   }
 
   Connection* AddConnection(Connection connection);
-  void BeginClose(Connection* connection, absl::Status reason, CloseMode mode) noexcept;
+  void BeginClose(Connection* connection, absl::Status reason,
+                  CloseMode mode) noexcept;
   void RetireConnection(Connection* connection);
 
-  // Schedule a fire-and-forget session coroutine on this worker (e.g. a service's
-  // accept loop or a per-connection session). The frame is destroyed on completion.
+  // Schedule a fire-and-forget session coroutine on this worker (e.g. a
+  // service's accept loop or a per-connection session). The frame is destroyed
+  // on completion.
   void Spawn(Task<absl::Status> task);
   // Spawn a long-lived root (service loop). Tracked so the worker can destroy
   // its frame at shutdown if it never completes (e.g. suspended in accept).
@@ -214,8 +223,8 @@ class Worker {
   bool ShouldRunBackground() const noexcept;
   void MaybeResetRuntimeWindow() noexcept;
   void RecordRound(std::int64_t start_cycles) noexcept;
-  void Flush();        // FlushWakes() + backend_.Submit()
-  void FlushWakes();   // wake every marked, parked target once
+  void Flush();       // FlushWakes() + backend_.Submit()
+  void FlushWakes();  // wake every marked, parked target once
   void CheckIdleConnections();
   bool BusyPoll();
   bool CanReclaim(const Connection& connection) const noexcept;

@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-#include <thread>
 #include "celer/net/server.h"
+
+#include <thread>
 
 #include "spdlog/spdlog.h"
 
@@ -34,13 +35,16 @@ void Server::AddService(Service* service) {
 
 absl::Status Server::Start(const ServerOptions& options) {
   if (started_) [[unlikely]] {
-    return absl::Status(absl::StatusCode::kFailedPrecondition, "server already started");
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
+                        "server already started");
   }
   if (options.thread_count == 0) [[unlikely]] {
-    return absl::Status(absl::StatusCode::kInvalidArgument, "thread_count must be >= 1");
+    return absl::Status(absl::StatusCode::kInvalidArgument,
+                        "thread_count must be >= 1");
   }
   if (services_.empty()) [[unlikely]] {
-    return absl::Status(absl::StatusCode::kFailedPrecondition, "no services registered");
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
+                        "no services registered");
   }
 
   options_ = options;

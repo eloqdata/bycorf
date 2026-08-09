@@ -65,8 +65,7 @@ std::uint16_t Load16(const std::byte* in) noexcept {
 std::uint32_t Load32(const std::byte* in) noexcept {
   std::uint32_t value = 0;
   for (unsigned i = 0; i < 4; ++i) {
-    value |= static_cast<std::uint32_t>(
-                 std::to_integer<std::uint8_t>(in[i]))
+    value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(in[i]))
              << (i * 8);
   }
   return value;
@@ -75,8 +74,7 @@ std::uint32_t Load32(const std::byte* in) noexcept {
 std::uint64_t Load64(const std::byte* in) noexcept {
   std::uint64_t value = 0;
   for (unsigned i = 0; i < 8; ++i) {
-    value |= static_cast<std::uint64_t>(
-                 std::to_integer<std::uint8_t>(in[i]))
+    value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(in[i]))
              << (i * 8);
   }
   return value;
@@ -132,7 +130,7 @@ Task<absl::Status> RpcServer::Serve(TcpStream stream) {
       const WireHeader h = DecodeHeader(buf.data() + pos);
       if (h.type != kRequest || h.pad != 0 || h.len > kMaxPayloadBytes) {
         co_return absl::Status(absl::StatusCode::kInvalidArgument,
-                         "invalid rpc request header");
+                               "invalid rpc request header");
       }
       if (buf.size() - pos - kHeader < h.len) {
         break;  // partial frame; wait for more
@@ -147,7 +145,7 @@ Task<absl::Status> RpcServer::Serve(TcpStream stream) {
       }
       if (resp.size() > kMaxPayloadBytes) {
         co_return absl::Status(absl::StatusCode::kOutOfRange,
-                         "rpc response exceeds payload limit");
+                               "rpc response exceeds payload limit");
       }
       WireHeader rh{
           .req_id = h.req_id,
@@ -190,27 +188,32 @@ Task<absl::Status> RpcClient::Connect(std::string_view ip, std::uint16_t port) {
   addr.sin_port = htons(port);
   if (::inet_pton(AF_INET, std::string(ip).c_str(), &addr.sin_addr) != 1) {
     ::close(fd);
-    co_return absl::Status(absl::StatusCode::kInvalidArgument, "invalid IPv4 address");
+    co_return absl::Status(absl::StatusCode::kInvalidArgument,
+                           "invalid IPv4 address");
   }
   // Blocking connect at setup (cold path); the data path below is async.
   if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     ::close(fd);
-    co_return absl::Status(absl::StatusCode::kUnavailable, "rpc connect failed");
+    co_return absl::Status(absl::StatusCode::kUnavailable,
+                           "rpc connect failed");
   }
   const int flags = ::fcntl(fd, F_GETFL, 0);
   if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
     ::close(fd);
-    co_return absl::Status(absl::StatusCode::kInternal, "fcntl(O_NONBLOCK) failed");
+    co_return absl::Status(absl::StatusCode::kInternal,
+                           "fcntl(O_NONBLOCK) failed");
   }
 
   Connection connection;
   connection.worker = ThisWorker().self;
   connection.file.fd = fd;
   connection.closed = false;
-  Connection* registered = ThisWorker().self->AddConnection(std::move(connection));
+  Connection* registered =
+      ThisWorker().self->AddConnection(std::move(connection));
   if (registered == nullptr) {
     ::close(fd);
-    co_return absl::Status(absl::StatusCode::kInternal, "failed to register rpc connection");
+    co_return absl::Status(absl::StatusCode::kInternal,
+                           "failed to register rpc connection");
   }
   stream_ = TcpStream(registered);
   ThisWorker().self->Spawn(ReadLoop());
@@ -245,13 +248,15 @@ Task<absl::Status> RpcClient::WriteLoop() {
   co_return absl::OkStatus();
 }
 
-Task<absl::StatusOr<Bytes>> RpcClient::Call(std::uint16_t verb, BytesView payload) {
+Task<absl::StatusOr<Bytes>> RpcClient::Call(std::uint16_t verb,
+                                            BytesView payload) {
   if (!stream_.IsOpen()) {
-    co_return absl::Status(absl::StatusCode::kFailedPrecondition, "rpc client not connected");
+    co_return absl::Status(absl::StatusCode::kFailedPrecondition,
+                           "rpc client not connected");
   }
   if (payload.size() > kMaxPayloadBytes) {
     co_return absl::Status(absl::StatusCode::kOutOfRange,
-                     "rpc request exceeds payload limit");
+                           "rpc request exceeds payload limit");
   }
 
   Pending pending;
@@ -270,7 +275,9 @@ Task<absl::StatusOr<Bytes>> RpcClient::Call(std::uint16_t verb, BytesView payloa
   struct PendingAwaiter {
     Pending* p;
     bool await_ready() const noexcept { return p->done; }
-    void await_suspend(std::coroutine_handle<> handle) noexcept { p->waiter = handle; }
+    void await_suspend(std::coroutine_handle<> handle) noexcept {
+      p->waiter = handle;
+    }
     void await_resume() const noexcept {}
   };
   co_await PendingAwaiter{&pending};  // ReadLoop fills *pending and resumes us
@@ -321,7 +328,8 @@ Task<absl::Status> RpcClient::ReadLoop() {
   // Connection ended: fail every outstanding call so callers don't hang.
   for (auto& [id, p] : pending_) {
     (void)id;
-    p->status = absl::Status(absl::StatusCode::kUnavailable, "rpc connection closed");
+    p->status =
+        absl::Status(absl::StatusCode::kUnavailable, "rpc connection closed");
     p->done = true;
     if (p->waiter) {
       ThisWorker().self->Enqueue(p->waiter);

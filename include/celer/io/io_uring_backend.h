@@ -17,14 +17,14 @@
 #ifndef CELER_IO_IO_URING_BACKEND_H_
 #define CELER_IO_IO_URING_BACKEND_H_
 
+#include <liburing.h>
+#include <sys/uio.h>
+
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
 #include <span>
-#include <sys/uio.h>
+#include <string_view>
 #include <vector>
-
-#include <liburing.h>
 
 #include "absl/status/statusor.h"
 #include "celer/io/completion.h"
@@ -36,7 +36,7 @@ namespace celer {
 class Worker;
 
 struct IoBackendOptions {
-  unsigned ring_entries = 256;        // io_uring SQ ring size
+  unsigned ring_entries = 256;  // io_uring SQ ring size
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
   unsigned recv_buffer_count = 1024;
   unsigned recv_buffer_size = 4096;
@@ -56,42 +56,50 @@ class IoUringBackend {
   IoUringBackend& operator=(const IoUringBackend&) = delete;
   ~IoUringBackend();
 
-  // wake_fd: a pre-created eventfd (from the cross-core mailbox), or -1 to own one.
-  absl::Status Init(const IoBackendOptions& options, Worker* worker, int wake_fd);
+  // wake_fd: a pre-created eventfd (from the cross-core mailbox), or -1 to own
+  // one.
+  absl::Status Init(const IoBackendOptions& options, Worker* worker,
+                    int wake_fd);
   void Shutdown();
 
-  int WakeHandle() const noexcept { return ring_.ring_fd; }  // peers' MSG_RING target
+  int WakeHandle() const noexcept {
+    return ring_.ring_fd;
+  }  // peers' MSG_RING target
 
   // Typed submissions. On completion the backend invokes tag->Complete(worker,
-  // result, flags) — send (one-shot) and accept (multishot) both go through this
-  // path; the backend is agnostic to which. recv does NOT use Complete: the
-  // backend updates the Connection directly and resumes its reader.
-  absl::Status SubmitSend(const RegisteredFile& file, std::span<const std::byte> buffer,
-                    IoCompletion* tag);
-  absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag);  // multishot
-  absl::Status StartRecvMultishot(Connection* connection);              // multishot, idempotent
+  // result, flags) — send (one-shot) and accept (multishot) both go through
+  // this path; the backend is agnostic to which. recv does NOT use Complete:
+  // the backend updates the Connection directly and resumes its reader.
+  absl::Status SubmitSend(const RegisteredFile& file,
+                          std::span<const std::byte> buffer, IoCompletion* tag);
+  absl::Status SubmitAcceptMultishot(int listen_fd,
+                                     IoCompletion* tag);  // multishot
+  absl::Status StartRecvMultishot(
+      Connection* connection);  // multishot, idempotent
 
-  std::span<const std::byte> ViewRecvBuffer(
-      const Connection* connection, std::uint16_t buffer_id,
-      std::size_t offset, std::size_t length) const;
+  std::span<const std::byte> ViewRecvBuffer(const Connection* connection,
+                                            std::uint16_t buffer_id,
+                                            std::size_t offset,
+                                            std::size_t length) const;
   void ReleaseRecvBuffer(Connection* connection, std::uint16_t buffer_id);
 
   absl::Status RegisterFixedFiles(unsigned count);
   absl::Status RegisterBuffers(std::span<const iovec> buffers);
   void UnregisterStorageResources();
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
-                          FixedFile file, IoCompletion* tag);
+                                FixedFile file, IoCompletion* tag);
   absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag);
   absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
-                         std::uint64_t offset, IoCompletion* tag);
+                               std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
-                    std::uint64_t offset, IoCompletion* tag);
-  absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
-                     std::uint64_t offset, IoCompletion* tag);
-  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                           std::uint64_t offset, IoCompletion* tag);
+  absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
+                           std::uint64_t offset, IoCompletion* tag);
+  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+                                std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
-  absl::Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag);
+  absl::Status SubmitTimeout(const __kernel_timespec& timeout,
+                             IoCompletion* tag);
 
   // Event loop.
   absl::Status Submit();
@@ -120,7 +128,8 @@ class IoUringBackend {
   void HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe);
   void RecycleMultishotBuffer(std::uint16_t buffer_id);
   void DispatchCqe(io_uring_cqe* cqe);
-  bool ReapCompletions();  // reap + dispatch only (no re-arm; used by AcquireSqe)
+  bool
+  ReapCompletions();  // reap + dispatch only (no re-arm; used by AcquireSqe)
   void DrainRecvRearm();
 
   io_uring ring_{};

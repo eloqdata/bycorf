@@ -76,7 +76,8 @@ struct Connection {
   std::deque<ReceivedBuffer> received_buffers;
   std::coroutine_handle<> read_waiter{};
   bool recv_armed = false;
-  bool needs_recv_rearm = false;  // re-arm deferred out of the completion handler
+  bool needs_recv_rearm =
+      false;  // re-arm deferred out of the completion handler
   bool recv_eof = false;
   void* protocol_context = nullptr;
 };

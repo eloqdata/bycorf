@@ -50,8 +50,7 @@ template <typename T>
 class Task {
  public:
   struct promise_type {
-    using completion_fn =
-        void (*)(void*, std::coroutine_handle<>) noexcept;
+    using completion_fn = void (*)(void*, std::coroutine_handle<>) noexcept;
 
     promise_type() = default;
 
@@ -138,8 +137,8 @@ class Task {
   bool valid() const noexcept { return static_cast<bool>(handle_); }
   bool done() const noexcept { return !handle_ || handle_.done(); }
 
-  void SetCompletionCallback(void* context,
-                             typename promise_type::completion_fn completion) noexcept {
+  void SetCompletionCallback(
+      void* context, typename promise_type::completion_fn completion) noexcept {
     if (!handle_) {
       return;
     }
@@ -157,7 +156,8 @@ class Task {
 
     bool await_ready() const noexcept { return !handle || handle.done(); }
 
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting) noexcept {
+    std::coroutine_handle<> await_suspend(
+        std::coroutine_handle<> awaiting) noexcept {
       handle.promise().continuation_ = awaiting;
       if (CurrentTaskClass() == TaskClass::kBackground) {
         RegisterBackgroundTask(handle);

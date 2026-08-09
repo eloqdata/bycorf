@@ -17,10 +17,10 @@
 #ifndef CELER_RUNTIME_CROSS_CORE_H_
 #define CELER_RUNTIME_CROSS_CORE_H_
 
-#include <atomic>
 #include <array>
-#include <cstddef>
+#include <atomic>
 #include <coroutine>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,10 +48,10 @@ using WorkerId = std::uint16_t;
 // caller's coroutine frame — so there is NO separate heap allocation. Only the
 // pointer travels: origin -> target (request) -> origin (reply).
 //
-// Two separate queues (request / reply) mean the queue an item came from already
-// tells us what to do with it — no phase tag, no dispatch function pointer.
-// run_fn is the one unavoidable indirect call: it invokes the type-erased user
-// closure, and only on the request leg.
+// Two separate queues (request / reply) mean the queue an item came from
+// already tells us what to do with it — no phase tag, no dispatch function
+// pointer. run_fn is the one unavoidable indirect call: it invokes the
+// type-erased user closure, and only on the request leg.
 struct RemoteWork {
   WorkerId origin = 0;
   std::coroutine_handle<> waiter{};
@@ -69,9 +69,10 @@ struct RemoteNotification {
   void (*run_fn)(void*, std::uint64_t) noexcept = nullptr;
 };
 
-// wake_seq value meaning "the owner is parked": the owner CASes wake_seq to this
-// before blocking; a producer bumps wake_seq after enqueuing and wakes the owner
-// only if it reads this back (so a parked owner is woken exactly once per round).
+// wake_seq value meaning "the owner is parked": the owner CASes wake_seq to
+// this before blocking; a producer bumps wake_seq after enqueuing and wakes the
+// owner only if it reads this back (so a parked owner is woken exactly once per
+// round).
 inline constexpr std::uint32_t kWakeSeqParked = 1u << 31;
 
 template <typename T, std::size_t Capacity = 256>
@@ -135,7 +136,8 @@ struct alignas(64) CrossCoreLane {
 struct alignas(64) WorkerMailbox {
   // Rare overflow path for a full bounded SPSC lane.
   moodycamel::ConcurrentQueue<RemoteWork*> requests;  // others -> me: run here
-  moodycamel::ConcurrentQueue<RemoteWork*> replies;   // results coming back to me
+  moodycamel::ConcurrentQueue<RemoteWork*>
+      replies;  // results coming back to me
   moodycamel::ConcurrentQueue<RemoteNotification> notifications;
   std::atomic<bool> overflow_pending{false};
   int ring_fd = -1;
@@ -152,8 +154,8 @@ class CrossCore {
   explicit CrossCore(unsigned n)
       : size_(n),
         mailboxes_(std::make_unique<WorkerMailbox[]>(n)),
-        lanes_(std::make_unique<CrossCoreLane[]>(
-            static_cast<std::size_t>(n) * n)) {}
+        lanes_(std::make_unique<CrossCoreLane[]>(static_cast<std::size_t>(n) *
+                                                 n)) {}
 
   unsigned size() const noexcept { return size_; }
   WorkerMailbox& mailbox(unsigned i) noexcept { return mailboxes_[i]; }
@@ -167,8 +169,8 @@ class CrossCore {
   std::unique_ptr<CrossCoreLane[]> lanes_;
 };
 
-// "Which worker is this thread", plus its per-round wake batch. Set at the top of
-// Worker::Run. wake_pending/wake_list live here (not on Worker) so the hot
+// "Which worker is this thread", plus its per-round wake batch. Set at the top
+// of Worker::Run. wake_pending/wake_list live here (not on Worker) so the hot
 // cross-core post path marks wakes fully inline without needing Worker's
 // definition; the owning worker drains wake_list once per loop in FlushWakes.
 struct CurrentWorker {
@@ -183,7 +185,9 @@ inline CurrentWorker& MutableThisWorker() noexcept {
   static thread_local CurrentWorker w;
   return w;
 }
-inline const CurrentWorker& ThisWorker() noexcept { return MutableThisWorker(); }
+inline const CurrentWorker& ThisWorker() noexcept {
+  return MutableThisWorker();
+}
 inline void SetThisWorker(WorkerId id, CrossCore* cross_core,
                           Worker* self) noexcept {
   CurrentWorker& w = MutableThisWorker();
@@ -208,7 +212,8 @@ inline void MarkWakeWorker(unsigned target) noexcept {
   }
 }
 
-inline void PostRequest(CrossCore* cc, unsigned target, RemoteWork* work) noexcept {
+inline void PostRequest(CrossCore* cc, unsigned target,
+                        RemoteWork* work) noexcept {
   const unsigned sender = ThisWorker().id;
   CrossCoreLane& lane = cc->lane(target, sender);
   if (lane.requests.try_enqueue(work)) {
@@ -255,7 +260,8 @@ void SpawnOnCurrentWorker(Task<absl::Status> task);
 
 // Awaiter returned by SubmitTo. Runs fn on the target worker's thread and
 // resumes the caller on the caller's (origin) worker. R must be default-
-// constructible (true for all Redis return types: optional, absl::Status, bool, ...).
+// constructible (true for all Redis return types: optional, absl::Status, bool,
+// ...).
 template <typename Fn>
 class SubmitAwaiter : public RemoteWork {
  public:
@@ -295,9 +301,10 @@ class SubmitAwaiter : public RemoteWork {
   R result_{};
 };
 
-// Run `fn` on `target` worker's thread; suspend the caller; resume it on its own
-// worker once the result returns. fn must be a leaf op (no further cross-core
-// calls, no blocking). If target is the current worker, fn runs inline.
+// Run `fn` on `target` worker's thread; suspend the caller; resume it on its
+// own worker once the result returns. fn must be a leaf op (no further
+// cross-core calls, no blocking). If target is the current worker, fn runs
+// inline.
 template <typename Fn>
 SubmitAwaiter<Fn> SubmitTo(unsigned target, Fn fn) {
   return SubmitAwaiter<Fn>(target, std::move(fn));

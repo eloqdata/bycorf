@@ -37,14 +37,17 @@ absl::Status StorageError(int error, const char* operation) {
     case ECANCELED:
       return absl::Status(absl::StatusCode::kCancelled, std::move(message));
     case EINVAL:
-      return absl::Status(absl::StatusCode::kInvalidArgument, std::move(message));
+      return absl::Status(absl::StatusCode::kInvalidArgument,
+                          std::move(message));
     case EBADF:
-      return absl::Status(absl::StatusCode::kFailedPrecondition, std::move(message));
+      return absl::Status(absl::StatusCode::kFailedPrecondition,
+                          std::move(message));
     case ENOSPC:
     case EMFILE:
     case ENFILE:
     case ENOMEM:
-      return absl::Status(absl::StatusCode::kResourceExhausted, std::move(message));
+      return absl::Status(absl::StatusCode::kResourceExhausted,
+                          std::move(message));
     case ENOENT:
       return absl::Status(absl::StatusCode::kNotFound, std::move(message));
     default:
@@ -74,8 +77,7 @@ absl::StatusOr<int> OneShotIoAwaitable::Resume(const char* operation) {
   return result_;
 }
 
-void OneShotIoAwaitable::Complete(Worker& worker, int result,
-                                  unsigned flags) {
+void OneShotIoAwaitable::Complete(Worker& worker, int result, unsigned flags) {
   (void)flags;
   result_ = result;
   worker.Enqueue(awaiting_);
@@ -136,18 +138,18 @@ absl::StatusOr<std::size_t> SizeIoAwaitable::await_resume() {
   return static_cast<std::size_t>(*result);
 }
 
-OpenFixedFileAwaitable::OpenFixedFileAwaitable(
-    Worker& worker, std::string path, int flags, mode_t mode, FixedFile file)
+OpenFixedFileAwaitable::OpenFixedFileAwaitable(Worker& worker, std::string path,
+                                               int flags, mode_t mode,
+                                               FixedFile file)
     : worker_(&worker),
       path_(std::move(path)),
       flags_(flags),
       mode_(mode),
       file_(file) {}
 
-bool OpenFixedFileAwaitable::await_suspend(
-    std::coroutine_handle<> awaiting) {
-  return Suspend(awaiting, worker_->SubmitOpenDirect(
-                               path_, flags_, mode_, file_, this));
+bool OpenFixedFileAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
+  return Suspend(awaiting,
+                 worker_->SubmitOpenDirect(path_, flags_, mode_, file_, this));
 }
 
 absl::Status OpenFixedFileAwaitable::await_resume() {
@@ -161,34 +163,33 @@ FileStatusAwaitable::FileStatusAwaitable(Worker& worker, FixedFile file,
 
 bool FileStatusAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
   absl::Status status = operation_ == Operation::kClose
-                      ? worker_->SubmitCloseDirect(file_, this)
-                      : worker_->SubmitFdatasync(file_, this);
+                            ? worker_->SubmitCloseDirect(file_, this)
+                            : worker_->SubmitFdatasync(file_, this);
   return Suspend(awaiting, std::move(status));
 }
 
 absl::Status FileStatusAwaitable::await_resume() {
-  auto result = Resume(operation_ == Operation::kClose
-                           ? "close fixed file failed"
-                           : "fixed-file fdatasync failed");
+  auto result =
+      Resume(operation_ == Operation::kClose ? "close fixed file failed"
+                                             : "fixed-file fdatasync failed");
   return result.ok() ? absl::OkStatus() : result.status();
 }
 
-TimeoutAwaitable::TimeoutAwaitable(
-    Worker& worker, std::chrono::milliseconds duration) noexcept
+TimeoutAwaitable::TimeoutAwaitable(Worker& worker,
+                                   std::chrono::milliseconds duration) noexcept
     : worker_(&worker), duration_(duration) {
   const auto seconds =
       std::chrono::duration_cast<std::chrono::seconds>(duration);
-  const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
-      duration - seconds);
+  const auto nanoseconds =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(duration - seconds);
   timeout_.tv_sec = seconds.count();
   timeout_.tv_nsec = nanoseconds.count();
 }
 
 bool TimeoutAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
   if (duration_.count() <= 0) {
-    return Suspend(awaiting,
-                   absl::Status(absl::StatusCode::kInvalidArgument,
-                          "sleep duration must be positive"));
+    return Suspend(awaiting, absl::Status(absl::StatusCode::kInvalidArgument,
+                                          "sleep duration must be positive"));
   }
   return Suspend(awaiting, worker_->SubmitTimeout(timeout_, this));
 }
@@ -228,8 +229,7 @@ SizeIoAwaitable Read(Worker& worker, FixedFile file,
 }
 
 SizeIoAwaitable Write(Worker& worker, FixedFile file,
-                      std::span<const std::byte> buffer,
-                      std::uint64_t offset) {
+                      std::span<const std::byte> buffer, std::uint64_t offset) {
   return SizeIoAwaitable(
       worker, file,
       FixedBuffer{.data = const_cast<std::byte*>(buffer.data()),
@@ -238,8 +238,8 @@ SizeIoAwaitable Write(Worker& worker, FixedFile file,
       offset, SizeIoAwaitable::Operation::kWrite);
 }
 
-SizeIoAwaitable WriteFixed(Worker& worker, FixedFile file,
-                           FixedBuffer buffer, std::uint64_t offset) {
+SizeIoAwaitable WriteFixed(Worker& worker, FixedFile file, FixedBuffer buffer,
+                           std::uint64_t offset) {
   return SizeIoAwaitable(worker, file, buffer, offset,
                          SizeIoAwaitable::Operation::kWriteFixed);
 }
@@ -249,8 +249,7 @@ FileStatusAwaitable Fdatasync(Worker& worker, FixedFile file) {
                              FileStatusAwaitable::Operation::kFdatasync);
 }
 
-TimeoutAwaitable SleepFor(Worker& worker,
-                          std::chrono::milliseconds duration) {
+TimeoutAwaitable SleepFor(Worker& worker, std::chrono::milliseconds duration) {
   return TimeoutAwaitable(worker, duration);
 }
 

@@ -16,19 +16,20 @@
 
 // Minimal RPC echo server for benchmarking celer::rpc.
 //   rpc_echo_server [bind_ip] [port] [threads]
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
-#include <poll.h>
 #include <string>
 #include <string_view>
-#include <sys/eventfd.h>
-#include <unistd.h>
 
-#include "spdlog/spdlog.h"
 #include "celer/net/server.h"
 #include "celer/rpc/rpc.h"
+#include "spdlog/spdlog.h"
 
 namespace {
 
@@ -45,8 +46,10 @@ void OnSignal(int) {
 
 int main(int argc, char** argv) {
   std::string bind_ip = (argc >= 2) ? argv[1] : "127.0.0.1";
-  std::uint16_t port = (argc >= 3) ? static_cast<std::uint16_t>(std::stoi(argv[2])) : 9000;
-  unsigned threads = (argc >= 4) ? static_cast<unsigned>(std::stoul(argv[3])) : 1;
+  std::uint16_t port =
+      (argc >= 3) ? static_cast<std::uint16_t>(std::stoi(argv[2])) : 9000;
+  unsigned threads =
+      (argc >= 4) ? static_cast<unsigned>(std::stoul(argv[3])) : 1;
 
   g_signal_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   struct sigaction sa {};

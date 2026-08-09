@@ -59,7 +59,8 @@ class TcpService : public Service {
 
   std::uint16_t port_;
   int backlog_;
-  std::vector<std::unique_ptr<TcpListener>> listeners_;  // one per worker, by id
+  std::vector<std::unique_ptr<TcpListener>>
+      listeners_;  // one per worker, by id
   unsigned thread_count_ = 0;
   std::atomic<std::uint64_t> next_connection_worker_{0};
 

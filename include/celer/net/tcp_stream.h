@@ -41,7 +41,8 @@ class TcpStream {
   int NativeFd() const noexcept;
 
   Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
-  Task<absl::StatusOr<std::size_t>> WriteSome(std::span<const std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> WriteSome(
+      std::span<const std::byte> buffer);
   Task<absl::Status> WriteAll(std::span<const std::byte> buffer);
 
   absl::Status Close() noexcept;
