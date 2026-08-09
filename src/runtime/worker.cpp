@@ -25,6 +25,9 @@
 #include <vector>
 
 #include "absl/base/internal/cycleclock.h"
+#if defined(__x86_64__)
+#include "absl/base/internal/sysinfo.h"
+#endif
 #include "spdlog/spdlog.h"
 
 namespace celer {
@@ -38,11 +41,30 @@ std::int64_t NowMs() {
 }
 
 std::int64_t CycleNow() noexcept {
+#if defined(__x86_64__)
+  std::uint64_t low = 0;
+  std::uint64_t high = 0;
+  __asm__ volatile("rdtsc" : "=a"(low), "=d"(high) : : "memory");
+  return static_cast<std::int64_t>((high << 32U) | low);
+#elif defined(__aarch64__)
+  std::int64_t counter = 0;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(counter) : : "memory");
+  return counter;
+#else
   return absl::base_internal::CycleClock::Now();
+#endif
 }
 
 double CycleFrequency() noexcept {
+#if defined(__x86_64__)
+  return absl::base_internal::NominalCPUFrequency();
+#elif defined(__aarch64__)
+  std::uint64_t frequency = 0;
+  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+  return static_cast<double>(frequency);
+#else
   return absl::base_internal::CycleClock::Frequency();
+#endif
 }
 
 std::uint64_t CyclesFromMicroseconds(double frequency,
