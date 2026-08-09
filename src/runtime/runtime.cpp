@@ -48,7 +48,7 @@ class Runtime::Impl {
     }
     // size() is 0 if Start() was never called — loop simply does nothing.
     for (unsigned i = 0; i < cross_core_.size(); ++i) {
-      const int fd = cross_core_.mailbox(i).wake_fd;
+      const int fd = cross_core_.mailbox(i).wake_fd_;
       if (fd >= 0) {
         close(fd);
       }
@@ -56,8 +56,8 @@ class Runtime::Impl {
   }
 
   struct State {
-    Worker worker;
-    std::thread thread;
+    Worker worker_;
+    std::thread thread_;
   };
 
   void Start(unsigned thread_count, WorkerMain main_fn) {
@@ -81,7 +81,7 @@ class Runtime::Impl {
       if (fd < 0) {
         throw std::runtime_error("failed to create worker wake eventfd");
       }
-      cross_core_.mailbox(i).wake_fd = fd;
+      cross_core_.mailbox(i).wake_fd_ = fd;
     }
 
     states_.reserve(thread_count);
@@ -89,9 +89,9 @@ class Runtime::Impl {
     for (unsigned i = 0; i < thread_count; ++i) {
       auto state = std::make_unique<State>();
       State* raw = state.get();
-      raw->worker.BindCrossCore(static_cast<WorkerId>(i), &cross_core_);
-      raw->thread = std::thread([this, i, raw, main_fn] {
-        int local_exit_code = main_fn(i, raw->worker);
+      raw->worker_.BindCrossCore(static_cast<WorkerId>(i), &cross_core_);
+      raw->thread_ = std::thread([this, i, raw, main_fn] {
+        int local_exit_code = main_fn(i, raw->worker_);
 
         if (local_exit_code != 0) {
           int expected = 0;
@@ -125,7 +125,7 @@ class Runtime::Impl {
       return;
     }
     for (auto& state : states_) {
-      state->worker.RequestStop();
+      state->worker_.RequestStop();
     }
     std::lock_guard<std::mutex> lk(mu_);
     cv_.notify_all();
@@ -144,8 +144,8 @@ class Runtime::Impl {
     }
 
     for (auto& state : states_) {
-      if (state->thread.joinable()) {
-        state->thread.join();
+      if (state->thread_.joinable()) {
+        state->thread_.join();
       }
     }
     stopped_ = true;

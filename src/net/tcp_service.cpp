@@ -35,7 +35,7 @@ void TcpService::Prepare(unsigned thread_count) {
 }
 
 absl::Status TcpService::StartSession(Worker& worker, Connection connection) {
-  const int fd = connection.file.fd;
+  const int fd = connection.file_.fd_;
   if (fd < 0) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "accepted connection has an invalid fd");
@@ -46,7 +46,7 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection) {
                         "target worker is stopping");
   }
 
-  connection.worker = &worker;
+  connection.worker_ = &worker;
   Connection* registered = worker.AddConnection(std::move(connection));
   if (registered == nullptr) {
     ::close(fd);
@@ -70,7 +70,7 @@ void TcpService::Stop() noexcept {
 Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
   TcpListener& listener = *listeners_[worker.id()];
   auto bind_status =
-      listener.Bind(&worker, ctx.bind_ip, port_, backlog_, ctx.reuse_port);
+      listener.Bind(&worker, ctx.bind_ip_, port_, backlog_, ctx.reuse_port_);
   if (!bind_status.ok()) [[unlikely]] {
     spdlog::error("worker[{}] bind :{} failed: {}", worker.id(), port_,
                   bind_status.message());
@@ -98,7 +98,7 @@ Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
     absl::Status started = co_await SubmitTo(
         target,
         [this, connection = std::move(*accepted)]() mutable -> absl::Status {
-          return StartSession(*ThisWorker().self, std::move(connection));
+          return StartSession(*ThisWorker().self_, std::move(connection));
         });
     if (!started.ok() && started.code() != absl::StatusCode::kCancelled)
         [[unlikely]] {
@@ -115,11 +115,11 @@ Task<absl::Status> TcpService::RunSession(Worker& worker,
   TcpStream stream(connection);
   absl::Status status = co_await Serve(std::move(stream));
 
-  if (connection != nullptr && connection->state == ConnectionState::kActive &&
-      !connection->closing) [[unlikely]] {
+  if (connection != nullptr && connection->state_ == ConnectionState::kActive &&
+      !connection->closing_) [[unlikely]] {
     if (status.ok()) {
-      const CloseMode mode = connection->recv_eof ? CloseMode::kPeerClosed
-                                                  : CloseMode::kLocalClose;
+      const CloseMode mode = connection->recv_eof_ ? CloseMode::kPeerClosed
+                                                   : CloseMode::kLocalClose;
       worker.BeginClose(connection, absl::OkStatus(), mode);
     } else {
       worker.BeginClose(connection, status, CloseMode::kLocalError);

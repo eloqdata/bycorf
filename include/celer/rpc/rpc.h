@@ -40,11 +40,11 @@ using BytesView = std::span<const std::byte>;
 // field explicitly in little-endian order; this struct is never memcpy'd onto
 // the wire.
 struct WireHeader {
-  std::uint64_t req_id;
-  std::uint32_t len;
-  std::uint16_t verb;
-  std::uint8_t type;  // kRequest / kResponse
-  std::uint8_t pad;
+  std::uint64_t req_id_;
+  std::uint32_t len_;
+  std::uint16_t verb_;
+  std::uint8_t type_;  // kRequest / kResponse
+  std::uint8_t pad_;
 };
 static_assert(sizeof(WireHeader) == 16, "WireHeader must be 16 bytes");
 
@@ -96,10 +96,10 @@ class RpcClient {
 
  private:
   struct Pending {
-    std::coroutine_handle<> waiter{};
-    Bytes result;
-    absl::Status status = absl::OkStatus();
-    bool done = false;
+    std::coroutine_handle<> waiter_{};
+    Bytes result_;
+    absl::Status status_ = absl::OkStatus();
+    bool done_ = false;
   };
 
   void SendFrame(const WireHeader& header,

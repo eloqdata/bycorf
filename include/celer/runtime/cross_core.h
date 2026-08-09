@@ -53,20 +53,20 @@ using WorkerId = std::uint16_t;
 // pointer. run_fn is the one unavoidable indirect call: it invokes the
 // type-erased user closure, and only on the request leg.
 struct RemoteWork {
-  WorkerId origin = 0;
-  std::coroutine_handle<> waiter{};
-  TaskClass task_class = TaskClass::kForeground;
-  void (*run_fn)(RemoteWork*) = nullptr;  // runs the user fn, stores result
-  bool reply_deferred = false;
+  WorkerId origin_ = 0;
+  std::coroutine_handle<> waiter_{};
+  TaskClass task_class_ = TaskClass::kForeground;
+  void (*run_fn_)(RemoteWork*) = nullptr;  // runs the user fn, stores result
+  bool reply_deferred_ = false;
 };
 
 // Small one-way control message. It is copied into the target mailbox, so the
 // sender does not have to keep an awaiter or heap allocation alive. Intended
 // for ownership hand-backs such as returning a registered buffer to its owner.
 struct RemoteNotification {
-  void* context = nullptr;
-  std::uint64_t value = 0;
-  void (*run_fn)(void*, std::uint64_t) noexcept = nullptr;
+  void* context_ = nullptr;
+  std::uint64_t value_ = 0;
+  void (*run_fn_)(void*, std::uint64_t) noexcept = nullptr;
 };
 
 // wake_seq value meaning "the owner is parked": the owner CASes wake_seq to
@@ -119,13 +119,13 @@ class alignas(64) SpscRing {
 
 // One SPSC lane for a fixed sender -> receiver pair.
 struct alignas(64) CrossCoreLane {
-  SpscRing<RemoteWork*> requests;
-  SpscRing<RemoteWork*> replies;
-  SpscRing<RemoteNotification> notifications;
-  std::atomic<bool> pending{false};
+  SpscRing<RemoteWork*> requests_;
+  SpscRing<RemoteWork*> replies_;
+  SpscRing<RemoteNotification> notifications_;
+  std::atomic<bool> pending_{false};
 
   bool empty() const noexcept {
-    return requests.empty() && replies.empty() && notifications.empty();
+    return requests_.empty() && replies_.empty() && notifications_.empty();
   }
 };
 
@@ -135,14 +135,14 @@ struct alignas(64) CrossCoreLane {
 // wake it: MSG_RING to the io_uring ring, eventfd write as the legacy fallback.
 struct alignas(64) WorkerMailbox {
   // Rare overflow path for a full bounded SPSC lane.
-  moodycamel::ConcurrentQueue<RemoteWork*> requests;  // others -> me: run here
+  moodycamel::ConcurrentQueue<RemoteWork*> requests_;  // others -> me: run here
   moodycamel::ConcurrentQueue<RemoteWork*>
-      replies;  // results coming back to me
-  moodycamel::ConcurrentQueue<RemoteNotification> notifications;
-  std::atomic<bool> overflow_pending{false};
-  int ring_fd = -1;
-  int wake_fd = -1;
-  std::atomic<std::uint32_t> wake_seq{0};
+      replies_;  // results coming back to me
+  moodycamel::ConcurrentQueue<RemoteNotification> notifications_;
+  std::atomic<bool> overflow_pending_{false};
+  int ring_fd_ = -1;
+  int wake_fd_ = -1;
+  std::atomic<std::uint32_t> wake_seq_{0};
 };
 
 // All workers' mailboxes — a contiguous, fixed-size array (one indirection per
@@ -174,11 +174,11 @@ class CrossCore {
 // cross-core post path marks wakes fully inline without needing Worker's
 // definition; the owning worker drains wake_list once per loop in FlushWakes.
 struct CurrentWorker {
-  WorkerId id = 0;
-  CrossCore* cross_core = nullptr;
-  Worker* self = nullptr;
-  std::vector<std::uint8_t> wake_pending;  // per-target dedup flag
-  std::vector<unsigned> wake_list;         // targets marked this round
+  WorkerId id_ = 0;
+  CrossCore* cross_core_ = nullptr;
+  Worker* self_ = nullptr;
+  std::vector<std::uint8_t> wake_pending_;  // per-target dedup flag
+  std::vector<unsigned> wake_list_;         // targets marked this round
 };
 
 inline CurrentWorker& MutableThisWorker() noexcept {
@@ -191,11 +191,11 @@ inline const CurrentWorker& ThisWorker() noexcept {
 inline void SetThisWorker(WorkerId id, CrossCore* cross_core,
                           Worker* self) noexcept {
   CurrentWorker& w = MutableThisWorker();
-  w.id = id;
-  w.cross_core = cross_core;
-  w.self = self;
-  w.wake_pending.assign(cross_core->size(), 0);
-  w.wake_list.clear();
+  w.id_ = id;
+  w.cross_core_ = cross_core;
+  w.self_ = self;
+  w.wake_pending_.assign(cross_core->size(), 0);
+  w.wake_list_.clear();
 }
 
 // Mark worker `target` to be woken at the end of the current loop iteration.
@@ -203,53 +203,53 @@ inline void SetThisWorker(WorkerId id, CrossCore* cross_core,
 // by FlushWakes. Inline on the hot post path — touches only thread-local state.
 inline void MarkWakeWorker(unsigned target) noexcept {
   CurrentWorker& w = MutableThisWorker();
-  if (target == w.id) {
+  if (target == w.id_) {
     return;  // never wake self
   }
-  if (w.wake_pending[target] == 0) {
-    w.wake_pending[target] = 1;
-    w.wake_list.push_back(target);
+  if (w.wake_pending_[target] == 0) {
+    w.wake_pending_[target] = 1;
+    w.wake_list_.push_back(target);
   }
 }
 
 inline void PostRequest(CrossCore* cc, unsigned target,
                         RemoteWork* work) noexcept {
-  const unsigned sender = ThisWorker().id;
+  const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(target, sender);
-  if (lane.requests.try_enqueue(work)) {
-    lane.pending.store(true, std::memory_order_release);
+  if (lane.requests_.try_enqueue(work)) {
+    lane.pending_.store(true, std::memory_order_release);
   } else {
     WorkerMailbox& mailbox = cc->mailbox(target);
-    mailbox.requests.enqueue(work);
-    mailbox.overflow_pending.store(true, std::memory_order_release);
+    mailbox.requests_.enqueue(work);
+    mailbox.overflow_pending_.store(true, std::memory_order_release);
   }
   MarkWakeWorker(target);
 }
 
 inline void PostReply(CrossCore* cc, WorkerId origin,
                       RemoteWork* work) noexcept {
-  const unsigned sender = ThisWorker().id;
+  const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(origin, sender);
-  if (lane.replies.try_enqueue(work)) {
-    lane.pending.store(true, std::memory_order_release);
+  if (lane.replies_.try_enqueue(work)) {
+    lane.pending_.store(true, std::memory_order_release);
   } else {
     WorkerMailbox& mailbox = cc->mailbox(origin);
-    mailbox.replies.enqueue(work);
-    mailbox.overflow_pending.store(true, std::memory_order_release);
+    mailbox.replies_.enqueue(work);
+    mailbox.overflow_pending_.store(true, std::memory_order_release);
   }
   MarkWakeWorker(origin);
 }
 
 inline void PostNotification(CrossCore* cc, unsigned target,
                              RemoteNotification notification) noexcept {
-  const unsigned sender = ThisWorker().id;
+  const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(target, sender);
-  if (lane.notifications.try_enqueue(notification)) {
-    lane.pending.store(true, std::memory_order_release);
+  if (lane.notifications_.try_enqueue(notification)) {
+    lane.pending_.store(true, std::memory_order_release);
   } else {
     WorkerMailbox& mailbox = cc->mailbox(target);
-    mailbox.notifications.enqueue(notification);
-    mailbox.overflow_pending.store(true, std::memory_order_release);
+    mailbox.notifications_.enqueue(notification);
+    mailbox.overflow_pending_.store(true, std::memory_order_release);
   }
   MarkWakeWorker(target);
 }
@@ -270,11 +270,11 @@ class SubmitAwaiter : public RemoteWork {
                 "SubmitTo fn must return a default-constructible value");
 
   SubmitAwaiter(unsigned target, Fn fn) : target_(target), fn_(std::move(fn)) {
-    run_fn = &SubmitAwaiter::RunFn;
+    run_fn_ = &SubmitAwaiter::RunFn;
   }
 
   bool await_ready() noexcept {
-    if (target_ == ThisWorker().id) {  // local shard: run inline, no hop
+    if (target_ == ThisWorker().id_) {  // local shard: run inline, no hop
       result_ = fn_();
       return true;
     }
@@ -282,10 +282,10 @@ class SubmitAwaiter : public RemoteWork {
   }
 
   void await_suspend(std::coroutine_handle<> h) noexcept {
-    waiter = h;
-    origin = ThisWorker().id;
-    task_class = CurrentTaskClass();
-    PostRequest(ThisWorker().cross_core, target_, this);
+    waiter_ = h;
+    origin_ = ThisWorker().id_;
+    task_class_ = CurrentTaskClass();
+    PostRequest(ThisWorker().cross_core_, target_, this);
   }
 
   R await_resume() { return std::move(result_); }
@@ -332,20 +332,20 @@ class SubmitTaskAwaiter : public RemoteWork {
 
   SubmitTaskAwaiter(unsigned target, Fn fn)
       : target_(target), fn_(std::move(fn)) {
-    run_fn = &SubmitTaskAwaiter::Start;
+    run_fn_ = &SubmitTaskAwaiter::Start;
   }
 
   bool await_ready() const noexcept { return false; }
 
   void await_suspend(std::coroutine_handle<> handle) noexcept {
-    waiter = handle;
-    origin = ThisWorker().id;
-    task_class = CurrentTaskClass();
-    if (target_ == origin) {
+    waiter_ = handle;
+    origin_ = ThisWorker().id_;
+    task_class_ = CurrentTaskClass();
+    if (target_ == origin_) {
       Start(this);
       return;
     }
-    PostRequest(ThisWorker().cross_core, target_, this);
+    PostRequest(ThisWorker().cross_core_, target_, this);
   }
 
   R await_resume() { return std::move(*result_); }
@@ -353,7 +353,7 @@ class SubmitTaskAwaiter : public RemoteWork {
  private:
   static void Start(RemoteWork* base) {
     auto* self = static_cast<SubmitTaskAwaiter*>(base);
-    self->reply_deferred = true;
+    self->reply_deferred_ = true;
     SpawnOnCurrentWorker(self->Run());
   }
 
@@ -365,7 +365,7 @@ class SubmitTaskAwaiter : public RemoteWork {
     // (or retaining it only in the origin worker's awaiter) is unsafe here.
     Fn target_fn = std::move(fn_);
     result_.emplace(co_await std::invoke(target_fn));
-    PostReply(ThisWorker().cross_core, origin, this);
+    PostReply(ThisWorker().cross_core_, origin_, this);
     co_return absl::OkStatus();
   }
 

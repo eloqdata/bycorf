@@ -40,17 +40,17 @@ namespace celer {
 class TcpServerImpl;
 
 struct WorkerOptions {
-  unsigned ring_entries = 256;  // io_uring SQ ring size
+  unsigned ring_entries_ = 256;  // io_uring SQ ring size
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
-  unsigned recv_buffer_count = 1024;
-  int idle_timeout_ms = -1;
-  unsigned busy_poll_us = 0;
+  unsigned recv_buffer_count_ = 1024;
+  int idle_timeout_ms_ = -1;
+  unsigned busy_poll_us_ = 0;
   // Match Dragonfly's normal/background fiber scheduler defaults. These are
   // cooperative budgets: a coroutine must suspend or call Yield to be
   // preemptible.
-  unsigned foreground_budget_us = 1000;
-  unsigned background_budget_us = 50;
-  unsigned background_warrant_percent = 10;
+  unsigned foreground_budget_us_ = 1000;
+  unsigned background_budget_us_ = 50;
+  unsigned background_warrant_percent_ = 10;
 };
 
 // The per-core scheduler: ready queue, connection table, cross-core mailbox and
@@ -59,28 +59,28 @@ struct WorkerOptions {
 class Worker {
  public:
   struct WakeStats {
-    std::uint64_t checks = 0;
-    std::uint64_t sent = 0;
+    std::uint64_t checks_ = 0;
+    std::uint64_t sent_ = 0;
   };
 
   struct SchedulerStats {
-    std::uint64_t rounds = 0;
-    std::uint64_t foreground_resumes = 0;
-    std::uint64_t background_resumes = 0;
-    std::uint64_t round_cycles = 0;
-    std::uint64_t foreground_cycles = 0;
-    std::uint64_t background_cycles = 0;
-    std::uint64_t max_round_cycles = 0;
-    std::uint64_t max_foreground_cycles = 0;
-    std::uint64_t max_background_cycles = 0;
-    std::uint64_t foreground_overruns = 0;
-    std::uint64_t background_overruns = 0;
-    double cycles_per_second = 0.0;
+    std::uint64_t rounds_ = 0;
+    std::uint64_t foreground_resumes_ = 0;
+    std::uint64_t background_resumes_ = 0;
+    std::uint64_t round_cycles_ = 0;
+    std::uint64_t foreground_cycles_ = 0;
+    std::uint64_t background_cycles_ = 0;
+    std::uint64_t max_round_cycles_ = 0;
+    std::uint64_t max_foreground_cycles_ = 0;
+    std::uint64_t max_background_cycles_ = 0;
+    std::uint64_t foreground_overruns_ = 0;
+    std::uint64_t background_overruns_ = 0;
+    double cycles_per_second_ = 0.0;
   };
 
   struct ReadyTask {
-    std::coroutine_handle<> handle{};
-    bool destroy_when_done = false;
+    std::coroutine_handle<> handle_{};
+    bool destroy_when_done_ = false;
   };
 
   Worker() = default;

@@ -36,11 +36,11 @@ namespace celer {
 class Worker;
 
 struct IoBackendOptions {
-  unsigned ring_entries = 256;  // io_uring SQ ring size
+  unsigned ring_entries_ = 256;  // io_uring SQ ring size
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
-  unsigned recv_buffer_count = 1024;
-  unsigned recv_buffer_size = 4096;
-  int idle_timeout_ms = -1;
+  unsigned recv_buffer_count_ = 1024;
+  unsigned recv_buffer_size_ = 4096;
+  int idle_timeout_ms_ = -1;
 };
 
 // The io_uring network backend: a concrete (non-virtual) class selected at
@@ -114,11 +114,11 @@ class IoUringBackend {
  private:
   struct MultishotBufferRing {
     static constexpr std::uint16_t kGroupId = 1;
-    io_uring_buf_ring* ring = nullptr;
-    std::vector<std::byte> storage;
-    unsigned entries = 0;
-    unsigned buffer_size = 0;
-    int mask = 0;
+    io_uring_buf_ring* ring_ = nullptr;
+    std::vector<std::byte> storage_;
+    unsigned entries_ = 0;
+    unsigned buffer_size_ = 0;
+    int mask_ = 0;
   };
 
   io_uring_sqe* AcquireSqe();

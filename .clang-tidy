@@ -12,54 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build directories
-/build/
-/build-*/
-/cmake-build-*/
-/out/
-
-# CMake generated files
-/CMakeCache.txt
-/CMakeFiles/
-/Makefile
-/cmake_install.cmake
-/compile_commands.json
-/CTestTestfile.cmake
-/Testing/
-
-# Ninja generated files
-/.ninja_deps
-/.ninja_log
-/build.ninja
-
-# Generated binaries and libraries
-*.o
-*.obj
-*.a
-*.so
-*.so.*
-*.dylib
-*.dll
-*.lib
-*.exe
-
-# Debug / profiling artifacts
-*.dSYM/
-*.profraw
-*.profdata
-*.gcda
-*.gcno
-*.gcov
-core
-vgcore.*
-
-# Editors / IDEs
-/.idea/
-/.vscode/
-/.cache/
-/.codex
-.clangd
-
-# OS cruft
-.DS_Store
-Thumbs.db
+---
+Checks: '-*,readability-identifier-naming'
+WarningsAsErrors: 'readability-identifier-naming'
+HeaderFilterRegex: '(^|.*/)(src|example)/.*|(^|.*/)include/celer/(io|net|rpc)/.*|(^|.*/)include/celer/runtime/(coroutine_frame_pool|cross_core|runtime|sync|task|worker)\.h'
+CheckOptions:
+  readability-identifier-naming.AggressiveDependentMemberLookup: true
+  readability-identifier-naming.PrivateMemberSuffix: '_'
+  readability-identifier-naming.ProtectedMemberSuffix: '_'
+  readability-identifier-naming.PublicMemberSuffix: '_'
+...

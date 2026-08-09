@@ -37,7 +37,7 @@ class CoroutineFramePool {
   ~CoroutineFramePool() {
     for (Block* head : free_) {
       while (head != nullptr) {
-        Block* next = head->next;
+        Block* next = head->next_;
         ::operator delete(head);
         head = next;
       }
@@ -50,19 +50,19 @@ class CoroutineFramePool {
     if (class_index < kClassCount) {
       block = free_[class_index];
       if (block != nullptr) {
-        free_[class_index] = block->next;
+        free_[class_index] = block->next_;
         --count_[class_index];
         cached_bytes_ -= ClassBytes(class_index);
       } else {
         block = static_cast<Block*>(
             ::operator new(sizeof(Block) + ClassBytes(class_index)));
       }
-      block->class_index = static_cast<std::uint16_t>(class_index);
+      block->class_index_ = static_cast<std::uint16_t>(class_index);
     } else {
       block = static_cast<Block*>(::operator new(sizeof(Block) + requested));
-      block->class_index = kUncachedClass;
+      block->class_index_ = kUncachedClass;
     }
-    block->next = nullptr;
+    block->next_ = nullptr;
     return block + 1;
   }
 
@@ -71,7 +71,7 @@ class CoroutineFramePool {
       return;
     }
     Block* block = static_cast<Block*>(frame) - 1;
-    const std::size_t class_index = block->class_index;
+    const std::size_t class_index = block->class_index_;
     if (class_index >= kClassCount) {
       ::operator delete(block);
       return;
@@ -83,7 +83,7 @@ class CoroutineFramePool {
       ::operator delete(block);
       return;
     }
-    block->next = free_[class_index];
+    block->next_ = free_[class_index];
     free_[class_index] = block;
     ++count_[class_index];
     cached_bytes_ += bytes;
@@ -91,8 +91,8 @@ class CoroutineFramePool {
 
  private:
   struct alignas(std::max_align_t) Block {
-    Block* next = nullptr;
-    std::uint16_t class_index = 0;
+    Block* next_ = nullptr;
+    std::uint16_t class_index_ = 0;
   };
 
   static constexpr std::size_t kMinClassBytes = 64;

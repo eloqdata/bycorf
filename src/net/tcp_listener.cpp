@@ -264,9 +264,9 @@ Task<absl::StatusOr<Connection>> TcpListener::AcceptUnregistered() {
   }
 
   Connection connection;
-  connection.file.fd = *accepted;
-  connection.closed = false;
-  connection.generation = next_generation_++;
+  connection.file_.fd_ = *accepted;
+  connection.closed_ = false;
+  connection.generation_ = next_generation_++;
   co_return connection;
 }
 
@@ -277,8 +277,8 @@ Task<absl::StatusOr<Connection*>> TcpListener::Accept() {
   }
 
   Connection connection = std::move(*accepted);
-  const int fd = connection.file.fd;
-  connection.worker = worker_;
+  const int fd = connection.file_.fd_;
+  connection.worker_ = worker_;
   Connection* registered = worker_->AddConnection(std::move(connection));
   if (registered == nullptr) {
     ::close(fd);

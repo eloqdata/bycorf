@@ -29,17 +29,17 @@
 namespace celer {
 
 struct ServerOptions {
-  std::string bind_ip = "0.0.0.0";
-  unsigned thread_count = 1;
-  bool reuse_port = true;
-  int idle_timeout_ms = -1;
+  std::string bind_ip_ = "0.0.0.0";
+  unsigned thread_count_ = 1;
+  bool reuse_port_ = true;
+  int idle_timeout_ms_ = -1;
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
-  unsigned recv_buffer_count = 1024;
-  unsigned ring_entries = 256;  // io_uring SQ ring size
-  unsigned busy_poll_us = 0;
-  unsigned foreground_budget_us = 1000;
-  unsigned background_budget_us = 50;
-  unsigned background_warrant_percent = 10;
+  unsigned recv_buffer_count_ = 1024;
+  unsigned ring_entries_ = 256;  // io_uring SQ ring size
+  unsigned busy_poll_us_ = 0;
+  unsigned foreground_budget_us_ = 1000;
+  unsigned background_budget_us_ = 50;
+  unsigned background_warrant_percent_ = 10;
 };
 
 // Hosts one or more Services on a pool of thread-per-core workers. The Runtime

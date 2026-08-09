@@ -28,8 +28,8 @@ class Worker;
 
 // Host-level binding config handed to a service when it starts on a worker.
 struct ServiceContext {
-  std::string_view bind_ip;
-  bool reuse_port = false;
+  std::string_view bind_ip_;
+  bool reuse_port_ = false;
 };
 
 // A unit of work hosted by a Server across all workers. The Server owns the

@@ -152,20 +152,20 @@ class Task {
   // the child frame. This is what lets shutdown reclamation of a suspended
   // coroutine cascade through its whole child chain.
   struct Awaiter {
-    handle_type handle;
+    handle_type handle_;
 
-    bool await_ready() const noexcept { return !handle || handle.done(); }
+    bool await_ready() const noexcept { return !handle_ || handle_.done(); }
 
     std::coroutine_handle<> await_suspend(
         std::coroutine_handle<> awaiting) noexcept {
-      handle.promise().continuation_ = awaiting;
+      handle_.promise().continuation_ = awaiting;
       if (CurrentTaskClass() == TaskClass::kBackground) {
-        RegisterBackgroundTask(handle);
+        RegisterBackgroundTask(handle_);
       }
-      return handle;
+      return handle_;
     }
 
-    T await_resume() { return std::move(*handle.promise().value_); }
+    T await_resume() { return std::move(*handle_.promise().value_); }
   };
 
   auto operator co_await() && noexcept { return Awaiter{handle_}; }

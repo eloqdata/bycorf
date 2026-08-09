@@ -38,7 +38,7 @@ absl::Status Server::Start(const ServerOptions& options) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "server already started");
   }
-  if (options.thread_count == 0) [[unlikely]] {
+  if (options.thread_count_ == 0) [[unlikely]] {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "thread_count must be >= 1");
   }
@@ -49,12 +49,12 @@ absl::Status Server::Start(const ServerOptions& options) {
 
   options_ = options;
   for (Service* service : services_) {
-    service->Prepare(options_.thread_count);
+    service->Prepare(options_.thread_count_);
   }
 
   started_ = true;
   auto fn = [this](unsigned i, Worker& worker) { return RunWorker(i, worker); };
-  runtime_.Start(options_.thread_count, std::move(fn));
+  runtime_.Start(options_.thread_count_, std::move(fn));
   return absl::OkStatus();
 }
 
@@ -89,14 +89,14 @@ int Server::exit_code() const noexcept { return runtime_.exit_code(); }
 
 int Server::RunWorker(unsigned index, Worker& worker) {
   WorkerOptions worker_options;
-  worker_options.idle_timeout_ms = options_.idle_timeout_ms;
-  worker_options.recv_buffer_count = options_.recv_buffer_count;
-  worker_options.ring_entries = options_.ring_entries;
-  worker_options.busy_poll_us = options_.busy_poll_us;
-  worker_options.foreground_budget_us = options_.foreground_budget_us;
-  worker_options.background_budget_us = options_.background_budget_us;
-  worker_options.background_warrant_percent =
-      options_.background_warrant_percent;
+  worker_options.idle_timeout_ms_ = options_.idle_timeout_ms_;
+  worker_options.recv_buffer_count_ = options_.recv_buffer_count_;
+  worker_options.ring_entries_ = options_.ring_entries_;
+  worker_options.busy_poll_us_ = options_.busy_poll_us_;
+  worker_options.foreground_budget_us_ = options_.foreground_budget_us_;
+  worker_options.background_budget_us_ = options_.background_budget_us_;
+  worker_options.background_warrant_percent_ =
+      options_.background_warrant_percent_;
 
   auto init_status = worker.Init(worker_options);
   if (!init_status.ok()) [[unlikely]] {
@@ -105,8 +105,8 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   }
 
   ServiceContext ctx{
-      .bind_ip = options_.bind_ip,
-      .reuse_port = options_.reuse_port && options_.thread_count > 1,
+      .bind_ip_ = options_.bind_ip_,
+      .reuse_port_ = options_.reuse_port_ && options_.thread_count_ > 1,
   };
   for (Service* service : services_) {
     worker.SpawnRoot(service->Run(worker, ctx));
@@ -122,7 +122,7 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   // touch the freed frames.
   drained_workers_.fetch_add(1, std::memory_order_acq_rel);
   while (drained_workers_.load(std::memory_order_acquire) <
-         options_.thread_count) {
+         options_.thread_count_) {
     std::this_thread::yield();
   }
   worker.Shutdown();

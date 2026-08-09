@@ -75,7 +75,7 @@ absl::Status IoUringBackend::Init(const IoBackendOptions& options,
   params.flags = IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN |
                  IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_SINGLE_ISSUER;
   const int rc =
-      io_uring_queue_init_params(options.ring_entries, &ring_, &params);
+      io_uring_queue_init_params(options.ring_entries_, &ring_, &params);
   if (rc < 0) {
     if (rc == -ENOMEM) {
       return absl::Status(
@@ -121,9 +121,9 @@ absl::Status IoUringBackend::Init(const IoBackendOptions& options,
                         "multishot recv setup failed");
   }
   if (!ArmWakePoll()) {
-    if (multishot_ring_.ring != nullptr) {
-      io_uring_free_buf_ring(&ring_, multishot_ring_.ring,
-                             multishot_ring_.entries,
+    if (multishot_ring_.ring_ != nullptr) {
+      io_uring_free_buf_ring(&ring_, multishot_ring_.ring_,
+                             multishot_ring_.entries_,
                              MultishotBufferRing::kGroupId);
     }
     initialized_ = false;
@@ -144,9 +144,9 @@ void IoUringBackend::Shutdown() {
   if (!initialized_) {
     return;
   }
-  if (multishot_ring_.ring != nullptr) {
-    io_uring_free_buf_ring(&ring_, multishot_ring_.ring,
-                           multishot_ring_.entries,
+  if (multishot_ring_.ring_ != nullptr) {
+    io_uring_free_buf_ring(&ring_, multishot_ring_.ring_,
+                           multishot_ring_.entries_,
                            MultishotBufferRing::kGroupId);
   }
   UnregisterStorageResources();
@@ -216,7 +216,7 @@ absl::Status IoUringBackend::SubmitOpenDirect(std::string_view path, int flags,
                         "failed to acquire open sqe");
   }
   io_uring_prep_openat_direct(sqe, AT_FDCWD, path.data(), flags, mode,
-                              file.index);
+                              file.index_);
   io_uring_sqe_set_data(sqe, tag);
   return absl::OkStatus();
 }
@@ -228,7 +228,7 @@ absl::Status IoUringBackend::SubmitCloseDirect(FixedFile file,
     return absl::Status(absl::StatusCode::kUnavailable,
                         "failed to acquire close sqe");
   }
-  io_uring_prep_close_direct(sqe, file.index);
+  io_uring_prep_close_direct(sqe, file.index_);
   io_uring_sqe_set_data(sqe, tag);
   return absl::OkStatus();
 }
@@ -241,9 +241,9 @@ absl::Status IoUringBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
     return absl::Status(absl::StatusCode::kUnavailable,
                         "failed to acquire read sqe");
   }
-  io_uring_prep_read_fixed(sqe, static_cast<int>(file.index), buffer.data,
-                           static_cast<unsigned>(buffer.size), offset,
-                           buffer.index);
+  io_uring_prep_read_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
+                           static_cast<unsigned>(buffer.size_), offset,
+                           buffer.index_);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
   return absl::OkStatus();
@@ -258,7 +258,7 @@ absl::Status IoUringBackend::SubmitRead(FixedFile file,
     return absl::Status(absl::StatusCode::kUnavailable,
                         "failed to acquire read sqe");
   }
-  io_uring_prep_read(sqe, static_cast<int>(file.index), buffer.data(),
+  io_uring_prep_read(sqe, static_cast<int>(file.index_), buffer.data(),
                      static_cast<unsigned>(buffer.size()), offset);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
@@ -274,7 +274,7 @@ absl::Status IoUringBackend::SubmitWrite(FixedFile file,
     return absl::Status(absl::StatusCode::kUnavailable,
                         "failed to acquire write sqe");
   }
-  io_uring_prep_write(sqe, static_cast<int>(file.index), buffer.data(),
+  io_uring_prep_write(sqe, static_cast<int>(file.index_), buffer.data(),
                       static_cast<unsigned>(buffer.size()), offset);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
@@ -290,9 +290,9 @@ absl::Status IoUringBackend::SubmitWriteFixed(FixedFile file,
     return absl::Status(absl::StatusCode::kUnavailable,
                         "failed to acquire write sqe");
   }
-  io_uring_prep_write_fixed(sqe, static_cast<int>(file.index), buffer.data,
-                            static_cast<unsigned>(buffer.size), offset,
-                            buffer.index);
+  io_uring_prep_write_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
+                            static_cast<unsigned>(buffer.size_), offset,
+                            buffer.index_);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
   return absl::OkStatus();
@@ -305,7 +305,8 @@ absl::Status IoUringBackend::SubmitFdatasync(FixedFile file,
     return absl::Status(absl::StatusCode::kUnavailable,
                         "failed to acquire fsync sqe");
   }
-  io_uring_prep_fsync(sqe, static_cast<int>(file.index), IORING_FSYNC_DATASYNC);
+  io_uring_prep_fsync(sqe, static_cast<int>(file.index_),
+                      IORING_FSYNC_DATASYNC);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
   return absl::OkStatus();
@@ -364,20 +365,20 @@ absl::Status IoUringBackend::Submit() {
 }
 
 bool IoUringBackend::InitMultishotRecv() {
-  if (options_.recv_buffer_count == 0) {
+  if (options_.recv_buffer_count_ == 0) {
     recv_multishot_enabled_ = false;
     spdlog::info(
         "provided-buffer ring disabled; using per-connection io_uring recv");
     return true;
   }
 
-  multishot_ring_.entries = options_.recv_buffer_count;
-  multishot_ring_.buffer_size = options_.recv_buffer_size;
+  multishot_ring_.entries_ = options_.recv_buffer_count_;
+  multishot_ring_.buffer_size_ = options_.recv_buffer_size_;
 
   int err = 0;
-  multishot_ring_.ring = io_uring_setup_buf_ring(
-      &ring_, multishot_ring_.entries, MultishotBufferRing::kGroupId, 0, &err);
-  if (multishot_ring_.ring == nullptr) {
+  multishot_ring_.ring_ = io_uring_setup_buf_ring(
+      &ring_, multishot_ring_.entries_, MultishotBufferRing::kGroupId, 0, &err);
+  if (multishot_ring_.ring_ == nullptr) {
     spdlog::warn(
         "io_uring_setup_buf_ring failed: {} ({}); falling back to "
         "per-connection io_uring recv",
@@ -387,20 +388,20 @@ bool IoUringBackend::InitMultishotRecv() {
     return true;
   }
 
-  multishot_ring_.mask = io_uring_buf_ring_mask(multishot_ring_.entries);
-  multishot_ring_.storage.resize(multishot_ring_.entries *
-                                 multishot_ring_.buffer_size);
+  multishot_ring_.mask_ = io_uring_buf_ring_mask(multishot_ring_.entries_);
+  multishot_ring_.storage_.resize(multishot_ring_.entries_ *
+                                  multishot_ring_.buffer_size_);
 
-  io_uring_buf_ring_init(multishot_ring_.ring);
-  for (unsigned i = 0; i < multishot_ring_.entries; ++i) {
+  io_uring_buf_ring_init(multishot_ring_.ring_);
+  for (unsigned i = 0; i < multishot_ring_.entries_; ++i) {
     void* addr =
-        multishot_ring_.storage.data() + i * multishot_ring_.buffer_size;
+        multishot_ring_.storage_.data() + i * multishot_ring_.buffer_size_;
     io_uring_buf_ring_add(
-        multishot_ring_.ring, addr, multishot_ring_.buffer_size,
-        static_cast<unsigned short>(i), multishot_ring_.mask, i);
+        multishot_ring_.ring_, addr, multishot_ring_.buffer_size_,
+        static_cast<unsigned short>(i), multishot_ring_.mask_, i);
   }
-  io_uring_buf_ring_advance(multishot_ring_.ring,
-                            static_cast<int>(multishot_ring_.entries));
+  io_uring_buf_ring_advance(multishot_ring_.ring_,
+                            static_cast<int>(multishot_ring_.entries_));
   recv_multishot_enabled_ = true;
   return true;
 }
@@ -444,9 +445,9 @@ absl::Status IoUringBackend::SubmitSend(const RegisteredFile& file,
                         "failed to acquire send sqe");
   }
   io_uring_prep_send(
-      sqe, file.is_fixed ? static_cast<int>(file.fixed_index) : file.fd,
+      sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
       buffer.data(), static_cast<unsigned>(buffer.size()), 0);
-  if (file.is_fixed) {
+  if (file.is_fixed_) {
     sqe->flags |= IOSQE_FIXED_FILE;
   }
   io_uring_sqe_set_data(sqe, tag);
@@ -471,10 +472,10 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "connection must not be null");
   }
-  if (connection->recv_armed || connection->closed || connection->closing) {
+  if (connection->recv_armed_ || connection->closed_ || connection->closing_) {
     return absl::OkStatus();  // already armed / not arm-able (idempotent)
   }
-  if (!recv_multishot_enabled_ && !connection->received_buffers.empty()) {
+  if (!recv_multishot_enabled_ && !connection->received_buffers_.empty()) {
     return absl::OkStatus();
   }
   auto* sqe = AcquireSqe();
@@ -482,62 +483,64 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
     return absl::Status(absl::StatusCode::kUnavailable,
                         "failed to acquire recv multishot sqe");
   }
-  const int fd = connection->file.is_fixed
-                     ? static_cast<int>(connection->file.fixed_index)
-                     : connection->file.fd;
+  const int fd = connection->file_.is_fixed_
+                     ? static_cast<int>(connection->file_.fixed_index_)
+                     : connection->file_.fd_;
   if (recv_multishot_enabled_) {
     io_uring_prep_recv_multishot(sqe, fd, nullptr, 0, 0);
     sqe->flags |= IOSQE_BUFFER_SELECT;
     sqe->buf_group = MultishotBufferRing::kGroupId;
   } else {
-    if (connection->read_buffer.empty()) {
-      connection->read_buffer.resize(options_.recv_buffer_size);
+    if (connection->read_buffer_.empty()) {
+      connection->read_buffer_.resize(options_.recv_buffer_size_);
     }
-    io_uring_prep_recv(sqe, fd, connection->read_buffer.data(),
-                       static_cast<unsigned>(connection->read_buffer.size()),
+    io_uring_prep_recv(sqe, fd, connection->read_buffer_.data(),
+                       static_cast<unsigned>(connection->read_buffer_.size()),
                        0);
   }
   sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
-  if (connection->file.is_fixed) {
+  if (connection->file_.is_fixed_) {
     sqe->flags |= IOSQE_FIXED_FILE;
   }
   io_uring_sqe_set_data(sqe, EncodeMultishotData(connection));
 
-  connection->recv_armed = true;
-  connection->inflight_ops += 1;
+  connection->recv_armed_ = true;
+  connection->inflight_ops_ += 1;
   return absl::OkStatus();
 }
 
 void IoUringBackend::RecycleMultishotBuffer(std::uint16_t buffer_id) {
-  if (multishot_ring_.ring == nullptr || buffer_id >= multishot_ring_.entries) {
+  if (multishot_ring_.ring_ == nullptr ||
+      buffer_id >= multishot_ring_.entries_) {
     return;
   }
-  void* addr =
-      multishot_ring_.storage.data() + buffer_id * multishot_ring_.buffer_size;
-  io_uring_buf_ring_add(multishot_ring_.ring, addr, multishot_ring_.buffer_size,
-                        buffer_id, multishot_ring_.mask, 0);
-  io_uring_buf_ring_advance(multishot_ring_.ring, 1);
+  void* addr = multishot_ring_.storage_.data() +
+               buffer_id * multishot_ring_.buffer_size_;
+  io_uring_buf_ring_add(multishot_ring_.ring_, addr,
+                        multishot_ring_.buffer_size_, buffer_id,
+                        multishot_ring_.mask_, 0);
+  io_uring_buf_ring_advance(multishot_ring_.ring_, 1);
 }
 
 std::span<const std::byte> IoUringBackend::ViewRecvBuffer(
     const Connection* connection, std::uint16_t buffer_id, std::size_t offset,
     std::size_t length) const {
   if (recv_multishot_enabled_) {
-    if (buffer_id >= multishot_ring_.entries ||
-        offset > multishot_ring_.buffer_size ||
-        length > multishot_ring_.buffer_size - offset) {
+    if (buffer_id >= multishot_ring_.entries_ ||
+        offset > multishot_ring_.buffer_size_ ||
+        length > multishot_ring_.buffer_size_ - offset) {
       return {};
     }
-    const auto* base = multishot_ring_.storage.data() +
-                       buffer_id * multishot_ring_.buffer_size + offset;
+    const auto* base = multishot_ring_.storage_.data() +
+                       buffer_id * multishot_ring_.buffer_size_ + offset;
     return std::span<const std::byte>(base, length);
   }
   if (connection == nullptr || buffer_id != 0 ||
-      offset > connection->read_buffer.size() ||
-      length > connection->read_buffer.size() - offset) {
+      offset > connection->read_buffer_.size() ||
+      length > connection->read_buffer_.size() - offset) {
     return {};
   }
-  return std::span<const std::byte>(connection->read_buffer.data() + offset,
+  return std::span<const std::byte>(connection->read_buffer_.data() + offset,
                                     length);
 }
 
@@ -563,19 +566,20 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
   bool notify_reader = false;
 
   if (cqe->res > 0 && (has_buffer || !recv_multishot_enabled_)) {
-    connection->last_active_ms = NowMs();
-    connection->received_buffers.push_back(ReceivedBuffer{
-        .buffer_id = buffer_id, .size = static_cast<std::uint32_t>(cqe->res)});
+    connection->last_active_ms_ = NowMs();
+    connection->received_buffers_.push_back(
+        ReceivedBuffer{.buffer_id_ = buffer_id,
+                       .size_ = static_cast<std::uint32_t>(cqe->res)});
     notify_reader = true;
   } else if (cqe->res == 0) {
-    connection->recv_eof = true;
+    connection->recv_eof_ = true;
     notify_reader = true;
   } else if (cqe->res < 0 && cqe->res != -ECANCELED && cqe->res != -ENOBUFS) {
-    connection->last_error =
+    connection->last_error_ =
         absl::Status(absl::StatusCode::kUnknown, "recv multishot failed");
     notify_reader = true;
   } else if (cqe->res > 0) {
-    connection->last_error = absl::Status(
+    connection->last_error_ = absl::Status(
         absl::StatusCode::kInternal, "recv completion missing selected buffer");
     notify_reader = true;
   }
@@ -587,30 +591,31 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
   }
 
   if ((cqe->flags & IORING_CQE_F_MORE) == 0) {
-    connection->recv_armed = false;
-    if (connection->inflight_ops > 0) {
-      connection->inflight_ops -= 1;
+    connection->recv_armed_ = false;
+    if (connection->inflight_ops_ > 0) {
+      connection->inflight_ops_ -= 1;
     }
     if (recv_multishot_enabled_ &&
-        connection->state == ConnectionState::kActive && !connection->closed &&
-        !connection->closing && !connection->recv_eof) {
+        connection->state_ == ConnectionState::kActive &&
+        !connection->closed_ && !connection->closing_ &&
+        !connection->recv_eof_) {
       // Defer re-arm out of completion dispatch (DrainRecvRearm runs after the
       // reap loop) so AcquireSqe is never reached from inside it.
-      if (!connection->needs_recv_rearm) {
-        connection->needs_recv_rearm = true;
+      if (!connection->needs_recv_rearm_) {
+        connection->needs_recv_rearm_ = true;
         recv_rearm_queue_.push_back(connection);
       }
-    } else if (connection->state != ConnectionState::kActive) {
-      connection->state = ConnectionState::kDraining;
+    } else if (connection->state_ != ConnectionState::kActive) {
+      connection->state_ = ConnectionState::kDraining;
     }
   }
 
   // Resume the waiting reader (deferred via the worker's ready queue —
   // completion dispatch must not run coroutines inline).
-  if (notify_reader && connection->read_waiter) {
-    auto waiter = connection->read_waiter;
-    connection->read_waiter = {};
-    connection->read_inflight = false;
+  if (notify_reader && connection->read_waiter_) {
+    auto waiter = connection->read_waiter_;
+    connection->read_waiter_ = {};
+    connection->read_inflight_ = false;
     worker_->Enqueue(waiter);
   }
 }
@@ -657,12 +662,13 @@ void IoUringBackend::DrainRecvRearm() {
   std::vector<Connection*> batch;
   batch.swap(recv_rearm_queue_);
   for (Connection* connection : batch) {
-    connection->needs_recv_rearm = false;
-    if (connection->state == ConnectionState::kActive && !connection->closed &&
-        !connection->closing && !connection->recv_eof) {
+    connection->needs_recv_rearm_ = false;
+    if (connection->state_ == ConnectionState::kActive &&
+        !connection->closed_ && !connection->closing_ &&
+        !connection->recv_eof_) {
       auto status = StartRecvMultishot(connection);
       if (!status.ok()) {
-        connection->last_error = status;
+        connection->last_error_ = status;
       }
     }
   }

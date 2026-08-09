@@ -44,42 +44,42 @@ enum class CloseMode : std::uint8_t {
 };
 
 struct RegisteredFile {
-  int fd = -1;
-  std::uint32_t fixed_index = 0;
-  bool is_fixed = false;
+  int fd_ = -1;
+  std::uint32_t fixed_index_ = 0;
+  bool is_fixed_ = false;
 };
 
 struct ReceivedBuffer {
-  std::uint16_t buffer_id = 0;
-  std::uint32_t size = 0;
-  std::uint32_t offset = 0;
+  std::uint16_t buffer_id_ = 0;
+  std::uint32_t size_ = 0;
+  std::uint32_t offset_ = 0;
 };
 
 struct Connection {
-  Worker* worker = nullptr;
-  std::uint64_t id = 0;
-  RegisteredFile file;
-  ConnectionState state = ConnectionState::kActive;
-  std::uint64_t generation = 0;
-  std::int64_t last_active_ms = 0;
+  Worker* worker_ = nullptr;
+  std::uint64_t id_ = 0;
+  RegisteredFile file_;
+  ConnectionState state_ = ConnectionState::kActive;
+  std::uint64_t generation_ = 0;
+  std::int64_t last_active_ms_ = 0;
 
-  bool closing = false;
-  bool closed = true;
-  bool retired = false;
-  bool read_inflight = false;
-  bool write_inflight = false;
+  bool closing_ = false;
+  bool closed_ = true;
+  bool retired_ = false;
+  bool read_inflight_ = false;
+  bool write_inflight_ = false;
 
-  std::uint32_t inflight_ops = 0;
-  absl::Status last_error = absl::OkStatus();
+  std::uint32_t inflight_ops_ = 0;
+  absl::Status last_error_ = absl::OkStatus();
 
-  std::vector<std::byte> read_buffer;
-  std::deque<ReceivedBuffer> received_buffers;
-  std::coroutine_handle<> read_waiter{};
-  bool recv_armed = false;
-  bool needs_recv_rearm =
+  std::vector<std::byte> read_buffer_;
+  std::deque<ReceivedBuffer> received_buffers_;
+  std::coroutine_handle<> read_waiter_{};
+  bool recv_armed_ = false;
+  bool needs_recv_rearm_ =
       false;  // re-arm deferred out of the completion handler
-  bool recv_eof = false;
-  void* protocol_context = nullptr;
+  bool recv_eof_ = false;
+  void* protocol_context_ = nullptr;
 };
 
 }  // namespace celer

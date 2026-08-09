@@ -161,8 +161,8 @@ class CoroutineBarrier {
 
  private:
   struct Waiter {
-    Worker* worker = nullptr;
-    std::coroutine_handle<> handle{};
+    Worker* worker_ = nullptr;
+    std::coroutine_handle<> handle_{};
   };
 
   static void ResumeRemote(void* context, std::uint64_t value) noexcept {
@@ -193,16 +193,16 @@ class CoroutineBarrier {
   void Wake(const std::vector<Waiter>& waiters) {
     const CurrentWorker& current = ThisWorker();
     for (const Waiter& waiter : waiters) {
-      if (waiter.worker->id() == current.id) {
-        waiter.worker->Enqueue(waiter.handle);
+      if (waiter.worker_->id() == current.id_) {
+        waiter.worker_->Enqueue(waiter.handle_);
       } else {
         PostNotification(
-            current.cross_core, waiter.worker->id(),
+            current.cross_core_, waiter.worker_->id(),
             RemoteNotification{
-                .context = waiter.worker,
-                .value = static_cast<std::uint64_t>(
-                    reinterpret_cast<std::uintptr_t>(waiter.handle.address())),
-                .run_fn = &CoroutineBarrier::ResumeRemote,
+                .context_ = waiter.worker_,
+                .value_ = static_cast<std::uint64_t>(
+                    reinterpret_cast<std::uintptr_t>(waiter.handle_.address())),
+                .run_fn_ = &CoroutineBarrier::ResumeRemote,
             });
       }
     }

@@ -97,7 +97,7 @@ bool SizeIoAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
   switch (operation_) {
     case Operation::kRead:
       status = worker_->SubmitRead(
-          file_, std::span<std::byte>(buffer_.data, buffer_.size), offset_,
+          file_, std::span<std::byte>(buffer_.data_, buffer_.size_), offset_,
           this);
       break;
     case Operation::kReadFixed:
@@ -105,7 +105,7 @@ bool SizeIoAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
       break;
     case Operation::kWrite:
       status = worker_->SubmitWrite(
-          file_, std::span<const std::byte>(buffer_.data, buffer_.size),
+          file_, std::span<const std::byte>(buffer_.data_, buffer_.size_),
           offset_, this);
       break;
     case Operation::kWriteFixed:
@@ -224,7 +224,7 @@ SizeIoAwaitable Read(Worker& worker, FixedFile file,
                      std::span<std::byte> buffer, std::uint64_t offset) {
   return SizeIoAwaitable(
       worker, file,
-      FixedBuffer{.data = buffer.data(), .size = buffer.size(), .index = 0},
+      FixedBuffer{.data_ = buffer.data(), .size_ = buffer.size(), .index_ = 0},
       offset, SizeIoAwaitable::Operation::kRead);
 }
 
@@ -232,9 +232,9 @@ SizeIoAwaitable Write(Worker& worker, FixedFile file,
                       std::span<const std::byte> buffer, std::uint64_t offset) {
   return SizeIoAwaitable(
       worker, file,
-      FixedBuffer{.data = const_cast<std::byte*>(buffer.data()),
-                  .size = buffer.size(),
-                  .index = 0},
+      FixedBuffer{.data_ = const_cast<std::byte*>(buffer.data()),
+                  .size_ = buffer.size(),
+                  .index_ = 0},
       offset, SizeIoAwaitable::Operation::kWrite);
 }
 

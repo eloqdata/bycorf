@@ -37,14 +37,14 @@ class Worker;
 
 // Ring-local file-table reference. It is intentionally not an OS descriptor.
 struct FixedFile {
-  std::uint32_t index = 0;
+  std::uint32_t index_ = 0;
 };
 
 // A range inside an iovec registered with this worker's ring.
 struct FixedBuffer {
-  std::byte* data = nullptr;
-  std::size_t size = 0;
-  std::uint16_t index = 0;
+  std::byte* data_ = nullptr;
+  std::size_t size_ = 0;
+  std::uint16_t index_ = 0;
 };
 
 // Shared completion state for one-shot operations. Concrete awaitables are

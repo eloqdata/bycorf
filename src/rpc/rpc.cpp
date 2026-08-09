@@ -81,20 +81,20 @@ std::uint64_t Load64(const std::byte* in) noexcept {
 }
 
 void EncodeHeader(const WireHeader& header, std::byte* out) noexcept {
-  Store64(out, header.req_id);
-  Store32(out + 8, header.len);
-  Store16(out + 12, header.verb);
-  out[14] = static_cast<std::byte>(header.type);
-  out[15] = static_cast<std::byte>(header.pad);
+  Store64(out, header.req_id_);
+  Store32(out + 8, header.len_);
+  Store16(out + 12, header.verb_);
+  out[14] = static_cast<std::byte>(header.type_);
+  out[15] = static_cast<std::byte>(header.pad_);
 }
 
 WireHeader DecodeHeader(const std::byte* in) noexcept {
   return WireHeader{
-      .req_id = Load64(in),
-      .len = Load32(in + 8),
-      .verb = Load16(in + 12),
-      .type = std::to_integer<std::uint8_t>(in[14]),
-      .pad = std::to_integer<std::uint8_t>(in[15]),
+      .req_id_ = Load64(in),
+      .len_ = Load32(in + 8),
+      .verb_ = Load16(in + 12),
+      .type_ = std::to_integer<std::uint8_t>(in[14]),
+      .pad_ = std::to_integer<std::uint8_t>(in[15]),
   };
 }
 
@@ -128,19 +128,19 @@ Task<absl::Status> RpcServer::Serve(TcpStream stream) {
     Bytes out;
     while (buf.size() - pos >= kHeader) {
       const WireHeader h = DecodeHeader(buf.data() + pos);
-      if (h.type != kRequest || h.pad != 0 || h.len > kMaxPayloadBytes) {
+      if (h.type_ != kRequest || h.pad_ != 0 || h.len_ > kMaxPayloadBytes) {
         co_return absl::Status(absl::StatusCode::kInvalidArgument,
                                "invalid rpc request header");
       }
-      if (buf.size() - pos - kHeader < h.len) {
+      if (buf.size() - pos - kHeader < h.len_) {
         break;  // partial frame; wait for more
       }
-      BytesView payload(buf.data() + pos + kHeader, h.len);
+      BytesView payload(buf.data() + pos + kHeader, h.len_);
       Bytes resp;
-      if (auto async = async_handlers_.find(h.verb);
+      if (auto async = async_handlers_.find(h.verb_);
           async != async_handlers_.end()) {
         resp = co_await async->second(payload);
-      } else if (auto sync = handlers_.find(h.verb); sync != handlers_.end()) {
+      } else if (auto sync = handlers_.find(h.verb_); sync != handlers_.end()) {
         resp = sync->second(payload);
       }
       if (resp.size() > kMaxPayloadBytes) {
@@ -148,14 +148,14 @@ Task<absl::Status> RpcServer::Serve(TcpStream stream) {
                                "rpc response exceeds payload limit");
       }
       WireHeader rh{
-          .req_id = h.req_id,
-          .len = static_cast<std::uint32_t>(resp.size()),
-          .verb = h.verb,
-          .type = kResponse,
-          .pad = 0,
+          .req_id_ = h.req_id_,
+          .len_ = static_cast<std::uint32_t>(resp.size()),
+          .verb_ = h.verb_,
+          .type_ = kResponse,
+          .pad_ = 0,
       };
       AppendFrame(out, rh, BytesView(resp.data(), resp.size()));
-      pos += kHeader + h.len;
+      pos += kHeader + h.len_;
     }
     if (pos != 0) {
       buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(pos));
@@ -205,18 +205,18 @@ Task<absl::Status> RpcClient::Connect(std::string_view ip, std::uint16_t port) {
   }
 
   Connection connection;
-  connection.worker = ThisWorker().self;
-  connection.file.fd = fd;
-  connection.closed = false;
+  connection.worker_ = ThisWorker().self_;
+  connection.file_.fd_ = fd;
+  connection.closed_ = false;
   Connection* registered =
-      ThisWorker().self->AddConnection(std::move(connection));
+      ThisWorker().self_->AddConnection(std::move(connection));
   if (registered == nullptr) {
     ::close(fd);
     co_return absl::Status(absl::StatusCode::kInternal,
                            "failed to register rpc connection");
   }
   stream_ = TcpStream(registered);
-  ThisWorker().self->Spawn(ReadLoop());
+  ThisWorker().self_->Spawn(ReadLoop());
   co_return absl::OkStatus();
 }
 
@@ -226,7 +226,7 @@ void RpcClient::SendFrame(const WireHeader& header, BytesView payload) {
   out_.push_back(std::move(frame));
   if (!writing_) {
     writing_ = true;
-    ThisWorker().self->Spawn(WriteLoop());
+    ThisWorker().self_->Spawn(WriteLoop());
   }
 }
 
@@ -264,28 +264,28 @@ Task<absl::StatusOr<Bytes>> RpcClient::Call(std::uint16_t verb,
   pending_[id] = &pending;
 
   WireHeader h{
-      .req_id = id,
-      .len = static_cast<std::uint32_t>(payload.size()),
-      .verb = verb,
-      .type = kRequest,
-      .pad = 0,
+      .req_id_ = id,
+      .len_ = static_cast<std::uint32_t>(payload.size()),
+      .verb_ = verb,
+      .type_ = kRequest,
+      .pad_ = 0,
   };
   SendFrame(h, payload);
 
   struct PendingAwaiter {
-    Pending* p;
-    bool await_ready() const noexcept { return p->done; }
+    Pending* p_;
+    bool await_ready() const noexcept { return p_->done_; }
     void await_suspend(std::coroutine_handle<> handle) noexcept {
-      p->waiter = handle;
+      p_->waiter_ = handle;
     }
     void await_resume() const noexcept {}
   };
   co_await PendingAwaiter{&pending};  // ReadLoop fills *pending and resumes us
 
-  if (!pending.status.ok()) {
-    co_return pending.status;
+  if (!pending.status_.ok()) {
+    co_return pending.status_;
   }
-  co_return std::move(pending.result);
+  co_return std::move(pending.result_);
 }
 
 Task<absl::Status> RpcClient::ReadLoop() {
@@ -296,25 +296,25 @@ Task<absl::Status> RpcClient::ReadLoop() {
     std::size_t pos = 0;
     while (buf.size() - pos >= kHeader) {
       const WireHeader h = DecodeHeader(buf.data() + pos);
-      if (h.type != kResponse || h.pad != 0 || h.len > kMaxPayloadBytes) {
+      if (h.type_ != kResponse || h.pad_ != 0 || h.len_ > kMaxPayloadBytes) {
         stream_.Close().IgnoreError();
         break;
       }
-      if (buf.size() - pos - kHeader < h.len) {
+      if (buf.size() - pos - kHeader < h.len_) {
         break;
       }
       const std::byte* pl = buf.data() + pos + kHeader;
-      auto it = pending_.find(h.req_id);
+      auto it = pending_.find(h.req_id_);
       if (it != pending_.end()) {
         Pending* p = it->second;
-        p->result.assign(pl, pl + h.len);
-        p->done = true;
+        p->result_.assign(pl, pl + h.len_);
+        p->done_ = true;
         pending_.erase(it);
-        if (p->waiter) {
-          ThisWorker().self->Enqueue(p->waiter);
+        if (p->waiter_) {
+          ThisWorker().self_->Enqueue(p->waiter_);
         }
       }
-      pos += kHeader + h.len;
+      pos += kHeader + h.len_;
     }
     if (pos != 0) {
       buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(pos));
@@ -328,11 +328,11 @@ Task<absl::Status> RpcClient::ReadLoop() {
   // Connection ended: fail every outstanding call so callers don't hang.
   for (auto& [id, p] : pending_) {
     (void)id;
-    p->status =
+    p->status_ =
         absl::Status(absl::StatusCode::kUnavailable, "rpc connection closed");
-    p->done = true;
-    if (p->waiter) {
-      ThisWorker().self->Enqueue(p->waiter);
+    p->done_ = true;
+    if (p->waiter_) {
+      ThisWorker().self_->Enqueue(p->waiter_);
     }
   }
   pending_.clear();

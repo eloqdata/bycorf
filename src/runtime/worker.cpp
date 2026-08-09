@@ -87,14 +87,14 @@ class TaskClassGuard {
 }  // namespace
 
 void RegisterBackgroundTask(std::coroutine_handle<> handle) noexcept {
-  if (ThisWorker().self != nullptr) {
-    ThisWorker().self->RegisterBackground(handle);
+  if (ThisWorker().self_ != nullptr) {
+    ThisWorker().self_->RegisterBackground(handle);
   }
 }
 
 void ForgetTaskScheduling(std::coroutine_handle<> handle) noexcept {
-  if (ThisWorker().self != nullptr) {
-    ThisWorker().self->ForgetScheduling(handle);
+  if (ThisWorker().self_ != nullptr) {
+    ThisWorker().self_->ForgetScheduling(handle);
   }
 }
 
@@ -111,8 +111,9 @@ absl::Status Worker::Init(const WorkerOptions &options) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "worker requires BindCrossCore before Init");
   }
-  if (options.foreground_budget_us == 0 || options.background_budget_us == 0 ||
-      options.background_warrant_percent > 100) {
+  if (options.foreground_budget_us_ == 0 ||
+      options.background_budget_us_ == 0 ||
+      options.background_warrant_percent_ > 100) {
     return absl::Status(
         absl::StatusCode::kInvalidArgument,
         "worker scheduler budgets must be positive and background "
@@ -121,26 +122,26 @@ absl::Status Worker::Init(const WorkerOptions &options) {
   options_ = options;
   cycle_frequency_ = CycleFrequency();
   foreground_budget_cycles_ =
-      CyclesFromMicroseconds(cycle_frequency_, options_.foreground_budget_us);
+      CyclesFromMicroseconds(cycle_frequency_, options_.foreground_budget_us_);
   background_budget_cycles_ =
-      CyclesFromMicroseconds(cycle_frequency_, options_.background_budget_us);
+      CyclesFromMicroseconds(cycle_frequency_, options_.background_budget_us_);
   busy_poll_cycles_ =
-      CyclesFromMicroseconds(cycle_frequency_, options_.busy_poll_us);
+      CyclesFromMicroseconds(cycle_frequency_, options_.busy_poll_us_);
   runtime_window_cycles_ = CyclesFromMicroseconds(cycle_frequency_, 10'000);
-  scheduler_stats_.cycles_per_second = cycle_frequency_;
+  scheduler_stats_.cycles_per_second_ = cycle_frequency_;
 
   IoBackendOptions backend_options;
-  backend_options.ring_entries = options.ring_entries;
-  backend_options.recv_buffer_count = options.recv_buffer_count;
+  backend_options.ring_entries_ = options.ring_entries_;
+  backend_options.recv_buffer_count_ = options.recv_buffer_count_;
   // Runtime pre-created the eventfd; the backend reuses it (does not own it).
   auto status =
-      backend_.Init(backend_options, this, cross_core_->mailbox(id_).wake_fd);
+      backend_.Init(backend_options, this, cross_core_->mailbox(id_).wake_fd_);
   if (!status.ok()) {
     return status;
   }
 
   // Advertise our ring so other workers can wake us via MSG_RING.
-  cross_core_->mailbox(id_).ring_fd = backend_.WakeHandle();
+  cross_core_->mailbox(id_).ring_fd_ = backend_.WakeHandle();
   initialized_ = true;
   return absl::OkStatus();
 }
@@ -210,9 +211,9 @@ void Worker::SpawnBackground(Task<absl::Status> task) {
 
 void SpawnOnCurrentWorker(Task<absl::Status> task) {
   if (CurrentTaskClass() == TaskClass::kBackground) {
-    ThisWorker().self->SpawnBackground(std::move(task));
+    ThisWorker().self_->SpawnBackground(std::move(task));
   } else {
-    ThisWorker().self->Spawn(std::move(task));
+    ThisWorker().self_->Spawn(std::move(task));
   }
 }
 
@@ -229,15 +230,15 @@ bool Worker::NotifyWake() noexcept {
 }
 
 Connection *Worker::AddConnection(Connection connection) {
-  const int fd = connection.file.fd;
+  const int fd = connection.file_.fd_;
   if (fd < 0) {
     return nullptr;
   }
   auto owned = std::make_unique<Connection>(std::move(connection));
   Connection *raw = owned.get();
-  raw->id = next_connection_id_++;
-  raw->last_active_ms = NowMs();
-  connections_[raw->id] = std::move(owned);
+  raw->id_ = next_connection_id_++;
+  raw->last_active_ms_ = NowMs();
+  connections_[raw->id_] = std::move(owned);
   return raw;
 }
 
@@ -246,36 +247,36 @@ void Worker::BeginClose(Connection *connection, absl::Status reason,
   if (connection == nullptr) {
     return;
   }
-  if (connection->state == ConnectionState::kRetired) {
+  if (connection->state_ == ConnectionState::kRetired) {
     return;
   }
 
-  if (!reason.ok() || connection->last_error.ok()) {
-    connection->last_error = std::move(reason);
+  if (!reason.ok() || connection->last_error_.ok()) {
+    connection->last_error_ = std::move(reason);
   }
 
-  connection->closing = true;
-  connection->state = ConnectionState::kClosing;
+  connection->closing_ = true;
+  connection->state_ = ConnectionState::kClosing;
 
-  if (connection->file.fd >= 0) {
-    const int fd = connection->file.fd;
-    connection->file.fd = -1;
-    connection->closed = true;
+  if (connection->file_.fd_ >= 0) {
+    const int fd = connection->file_.fd_;
+    connection->file_.fd_ = -1;
+    connection->closed_ = true;
     ::close(fd);
   } else {
-    connection->closed = true;
+    connection->closed_ = true;
   }
 
   if (mode != CloseMode::kPeerClosed) {
-    connection->recv_eof = false;
+    connection->recv_eof_ = false;
   }
 
   // Resume any reader waiting on this connection (deferred via the ready
   // queue).
-  if (connection->read_waiter) {
-    auto waiter = connection->read_waiter;
-    connection->read_waiter = {};
-    connection->read_inflight = false;
+  if (connection->read_waiter_) {
+    auto waiter = connection->read_waiter_;
+    connection->read_waiter_ = {};
+    connection->read_inflight_ = false;
     Enqueue(waiter);
   }
   RetireConnection(connection);
@@ -285,27 +286,27 @@ void Worker::RetireConnection(Connection *connection) {
   if (connection == nullptr) {
     return;
   }
-  if (connection->retired) {
+  if (connection->retired_) {
     return;
   }
-  connection->retired = true;
-  connection->closing = true;
-  connection->state = connection->recv_armed || connection->inflight_ops != 0 ||
-                              connection->read_waiter ||
-                              connection->read_inflight ||
-                              connection->write_inflight ||
-                              !connection->received_buffers.empty()
-                          ? ConnectionState::kDraining
-                          : ConnectionState::kRetired;
+  connection->retired_ = true;
+  connection->closing_ = true;
+  connection->state_ =
+      connection->recv_armed_ || connection->inflight_ops_ != 0 ||
+              connection->read_waiter_ || connection->read_inflight_ ||
+              connection->write_inflight_ ||
+              !connection->received_buffers_.empty()
+          ? ConnectionState::kDraining
+          : ConnectionState::kRetired;
   DiscardReceivedBuffers(connection);
-  retired_connection_ids_.push_back(connection->id);
+  retired_connection_ids_.push_back(connection->id_);
 }
 
 void Worker::Enqueue(std::coroutine_handle<> handle, bool destroy_when_done) {
   if (!handle) {
     return;
   }
-  ReadyTask ready{.handle = handle, .destroy_when_done = destroy_when_done};
+  ReadyTask ready{.handle_ = handle, .destroy_when_done_ = destroy_when_done};
   if (IsBackground(handle)) {
     background_ready_.push_back(ready);
   } else {
@@ -318,9 +319,9 @@ void Worker::EnqueueNext(std::coroutine_handle<> handle) {
     return;
   }
   if (IsBackground(handle)) {
-    next_background_ready_.push_back(ReadyTask{.handle = handle});
+    next_background_ready_.push_back(ReadyTask{.handle_ = handle});
   } else {
-    next_ready_.push_back(ReadyTask{.handle = handle});
+    next_ready_.push_back(ReadyTask{.handle_ = handle});
   }
 }
 
@@ -401,9 +402,9 @@ bool Worker::BackgroundBudgetExpired() const noexcept {
 }
 
 void Worker::ResumeReady(ReadyTask ready, TaskClass task_class) {
-  auto handle = ready.handle;
+  auto handle = ready.handle_;
   if (handle.done()) {
-    if (ready.destroy_when_done) {
+    if (ready.destroy_when_done_) {
       ForgetScheduling(handle);
       ForgetDetached(handle);
       handle.destroy();
@@ -489,7 +490,7 @@ bool Worker::ShouldRunBackground() const noexcept {
   const std::uint64_t total =
       foreground_runtime_cycles_ + background_runtime_cycles_;
   const std::uint64_t warrant =
-      total * options_.background_warrant_percent / 100;
+      total * options_.background_warrant_percent_ / 100;
   return background_runtime_cycles_ <= warrant;
 }
 
@@ -507,24 +508,24 @@ void Worker::MaybeResetRuntimeWindow() noexcept {
 void Worker::RecordRound(std::int64_t start_cycles) noexcept {
   const std::uint64_t elapsed =
       static_cast<std::uint64_t>(CycleNow() - start_cycles);
-  ++scheduler_stats_.rounds;
-  scheduler_stats_.round_cycles += elapsed;
-  scheduler_stats_.max_round_cycles =
-      std::max(scheduler_stats_.max_round_cycles, elapsed);
+  ++scheduler_stats_.rounds_;
+  scheduler_stats_.round_cycles_ += elapsed;
+  scheduler_stats_.max_round_cycles_ =
+      std::max(scheduler_stats_.max_round_cycles_, elapsed);
 }
 
 Worker::SchedulerStats Worker::TakeSchedulerStats() noexcept {
   SchedulerStats result = std::exchange(scheduler_stats_, SchedulerStats{});
-  result.cycles_per_second = cycle_frequency_;
-  scheduler_stats_.cycles_per_second = cycle_frequency_;
+  result.cycles_per_second_ = cycle_frequency_;
+  scheduler_stats_.cycles_per_second_ = cycle_frequency_;
   return result;
 }
 
 bool Worker::CanReclaim(const Connection &connection) const noexcept {
-  return connection.state != ConnectionState::kActive &&
-         connection.inflight_ops == 0 && !connection.read_waiter &&
-         !connection.read_inflight && !connection.write_inflight &&
-         !connection.recv_armed && connection.received_buffers.empty();
+  return connection.state_ != ConnectionState::kActive &&
+         connection.inflight_ops_ == 0 && !connection.read_waiter_ &&
+         !connection.read_inflight_ && !connection.write_inflight_ &&
+         !connection.recv_armed_ && connection.received_buffers_.empty();
 }
 
 void Worker::ReclaimConnections() {
@@ -543,12 +544,12 @@ void Worker::ReclaimConnections() {
 
     Connection *connection = it->second.get();
     if (!CanReclaim(*connection)) {
-      connection->state = ConnectionState::kDraining;
+      connection->state_ = ConnectionState::kDraining;
       still_retired.push_back(connection_id);
       continue;
     }
 
-    connection->state = ConnectionState::kRetired;
+    connection->state_ = ConnectionState::kRetired;
     connections_.erase(it);
   }
 
@@ -559,15 +560,15 @@ void Worker::DiscardReceivedBuffers(Connection *connection) {
   if (connection == nullptr) {
     return;
   }
-  while (!connection->received_buffers.empty()) {
-    auto received = connection->received_buffers.front();
-    connection->received_buffers.pop_front();
-    backend_.ReleaseRecvBuffer(connection, received.buffer_id);
+  while (!connection->received_buffers_.empty()) {
+    auto received = connection->received_buffers_.front();
+    connection->received_buffers_.pop_front();
+    backend_.ReleaseRecvBuffer(connection, received.buffer_id_);
   }
 }
 
 void Worker::CheckIdleConnections() {
-  if (options_.idle_timeout_ms <= 0) {
+  if (options_.idle_timeout_ms_ <= 0) {
     return;
   }
 
@@ -575,24 +576,24 @@ void Worker::CheckIdleConnections() {
   for (auto &[connection_id, owned] : connections_) {
     (void)connection_id;
     Connection *connection = owned.get();
-    if (connection->retired || connection->closed ||
-        connection->last_active_ms <= 0) {
+    if (connection->retired_ || connection->closed_ ||
+        connection->last_active_ms_ <= 0) {
       continue;
     }
-    if (now_ms - connection->last_active_ms < options_.idle_timeout_ms) {
+    if (now_ms - connection->last_active_ms_ < options_.idle_timeout_ms_) {
       continue;
     }
 
-    connection->last_error = absl::Status(absl::StatusCode::kDeadlineExceeded,
-                                          "connection idle timeout");
-    BeginClose(connection, connection->last_error, CloseMode::kIdleTimeout);
+    connection->last_error_ = absl::Status(absl::StatusCode::kDeadlineExceeded,
+                                           "connection idle timeout");
+    BeginClose(connection, connection->last_error_, CloseMode::kIdleTimeout);
   }
 }
 
 void Worker::RunRemoteWork(RemoteWork *work) {
-  work->run_fn(work);
-  if (!work->reply_deferred) {
-    PostReply(cross_core_, work->origin, work);
+  work->run_fn_(work);
+  if (!work->reply_deferred_) {
+    PostReply(cross_core_, work->origin_, work);
   }
 }
 
@@ -604,7 +605,7 @@ bool Worker::DrainCrossCore() {
   std::size_t nrep = 0;
   std::size_t nnotifications = 0;
   const auto schedule_request = [this](RemoteWork *work) {
-    if (work->task_class == TaskClass::kBackground) {
+    if (work->task_class_ == TaskClass::kBackground) {
       background_remote_work_.push_back(work);
     } else {
       foreground_remote_work_.push_back(work);
@@ -613,31 +614,32 @@ bool Worker::DrainCrossCore() {
 
   // The bounded SPSC lane is the normal path. Only touch the old MPSC queues
   // when a producer reported a full lane.
-  if (mb.overflow_pending.exchange(false, std::memory_order_acq_rel)) {
+  if (mb.overflow_pending_.exchange(false, std::memory_order_acq_rel)) {
     const std::size_t overflow_requests =
-        mb.requests.try_dequeue_bulk(batch, 64);
+        mb.requests_.try_dequeue_bulk(batch, 64);
     for (std::size_t i = 0; i < overflow_requests; ++i) {
       schedule_request(batch[i]);
     }
     nreq += overflow_requests;
 
-    const std::size_t overflow_replies = mb.replies.try_dequeue_bulk(batch, 64);
+    const std::size_t overflow_replies =
+        mb.replies_.try_dequeue_bulk(batch, 64);
     for (std::size_t i = 0; i < overflow_replies; ++i) {
-      Enqueue(batch[i]->waiter);
+      Enqueue(batch[i]->waiter_);
     }
     nrep += overflow_replies;
 
     const std::size_t overflow_notifications =
-        mb.notifications.try_dequeue_bulk(notifications, 64);
+        mb.notifications_.try_dequeue_bulk(notifications, 64);
     for (std::size_t i = 0; i < overflow_notifications; ++i) {
       RemoteNotification &notification = notifications[i];
-      notification.run_fn(notification.context, notification.value);
+      notification.run_fn_(notification.context_, notification.value_);
     }
     nnotifications += overflow_notifications;
 
     if (overflow_requests == 64 || overflow_replies == 64 ||
         overflow_notifications == 64) {
-      mb.overflow_pending.store(true, std::memory_order_release);
+      mb.overflow_pending_.store(true, std::memory_order_release);
     }
   }
 
@@ -646,14 +648,14 @@ bool Worker::DrainCrossCore() {
   // One bounded batch per message kind across all lanes keeps io fair.
   for (unsigned sender = 0; sender < cross_core_->size(); ++sender) {
     CrossCoreLane &lane = cross_core_->lane(id_, sender);
-    if (!lane.pending.load(std::memory_order_acquire) ||
-        !lane.pending.exchange(false, std::memory_order_acq_rel)) {
+    if (!lane.pending_.load(std::memory_order_acquire) ||
+        !lane.pending_.exchange(false, std::memory_order_acq_rel)) {
       continue;
     }
 
     if (nreq < 64) {
       const std::size_t count =
-          lane.requests.try_dequeue_bulk(batch, 64 - nreq);
+          lane.requests_.try_dequeue_bulk(batch, 64 - nreq);
       for (std::size_t i = 0; i < count; ++i) {
         schedule_request(batch[i]);
       }
@@ -661,19 +663,20 @@ bool Worker::DrainCrossCore() {
     }
 
     if (nrep < 64) {
-      const std::size_t count = lane.replies.try_dequeue_bulk(batch, 64 - nrep);
+      const std::size_t count =
+          lane.replies_.try_dequeue_bulk(batch, 64 - nrep);
       for (std::size_t i = 0; i < count; ++i) {
-        Enqueue(batch[i]->waiter);
+        Enqueue(batch[i]->waiter_);
       }
       nrep += count;
     }
 
     if (nnotifications < 64) {
-      const std::size_t count = lane.notifications.try_dequeue_bulk(
+      const std::size_t count = lane.notifications_.try_dequeue_bulk(
           notifications, 64 - nnotifications);
       for (std::size_t i = 0; i < count; ++i) {
         RemoteNotification &notification = notifications[i];
-        notification.run_fn(notification.context, notification.value);
+        notification.run_fn_(notification.context_, notification.value_);
       }
       nnotifications += count;
     }
@@ -684,23 +687,24 @@ bool Worker::DrainCrossCore() {
 
 void Worker::FlushWakes() {
   CurrentWorker &w = MutableThisWorker();
-  if (w.wake_list.empty()) {
+  if (w.wake_list_.empty()) {
     return;
   }
-  for (unsigned target : w.wake_list) {
-    w.wake_pending[target] = 0;
+  for (unsigned target : w.wake_list_) {
+    w.wake_pending_[target] = 0;
     WorkerMailbox &mb = cross_core_->mailbox(target);
     ++wake_checks_;
-    if (mb.wake_seq.fetch_add(1, std::memory_order_acq_rel) == kWakeSeqParked) {
+    if (mb.wake_seq_.fetch_add(1, std::memory_order_acq_rel) ==
+        kWakeSeqParked) {
       ++wake_sent_;
-      backend_.WakeRemote(mb.ring_fd);
+      backend_.WakeRemote(mb.ring_fd_);
     }
   }
-  w.wake_list.clear();
+  w.wake_list_.clear();
 }
 
 bool Worker::BusyPoll() {
-  if (options_.busy_poll_us == 0) {
+  if (options_.busy_poll_us_ == 0) {
     return false;
   }
   const std::int64_t deadline =
@@ -719,11 +723,11 @@ bool Worker::BusyPoll() {
           static_cast<std::uint64_t>(CycleNow() - foreground_start);
       if (foreground_resumes != 0) {
         foreground_runtime_cycles_ += foreground_cycles;
-        scheduler_stats_.foreground_resumes += foreground_resumes;
-        scheduler_stats_.foreground_cycles += foreground_cycles;
-        scheduler_stats_.max_foreground_cycles =
-            std::max(scheduler_stats_.max_foreground_cycles, foreground_cycles);
-        scheduler_stats_.foreground_overruns +=
+        scheduler_stats_.foreground_resumes_ += foreground_resumes;
+        scheduler_stats_.foreground_cycles_ += foreground_cycles;
+        scheduler_stats_.max_foreground_cycles_ = std::max(
+            scheduler_stats_.max_foreground_cycles_, foreground_cycles);
+        scheduler_stats_.foreground_overruns_ +=
             foreground_cycles > foreground_budget_cycles_;
       }
       Flush();
@@ -775,11 +779,11 @@ bool Worker::RunOnce(bool wait_for_completion) {
   if (foreground_resumes != 0) {
     did_work = true;
     foreground_runtime_cycles_ += foreground_cycles;
-    scheduler_stats_.foreground_resumes += foreground_resumes;
-    scheduler_stats_.foreground_cycles += foreground_cycles;
-    scheduler_stats_.max_foreground_cycles =
-        std::max(scheduler_stats_.max_foreground_cycles, foreground_cycles);
-    scheduler_stats_.foreground_overruns +=
+    scheduler_stats_.foreground_resumes_ += foreground_resumes;
+    scheduler_stats_.foreground_cycles_ += foreground_cycles;
+    scheduler_stats_.max_foreground_cycles_ =
+        std::max(scheduler_stats_.max_foreground_cycles_, foreground_cycles);
+    scheduler_stats_.foreground_overruns_ +=
         foreground_cycles > foreground_budget_cycles_;
   }
 
@@ -796,11 +800,11 @@ bool Worker::RunOnce(bool wait_for_completion) {
     if (background_resumes != 0) {
       did_work = true;
       background_runtime_cycles_ += background_cycles;
-      scheduler_stats_.background_resumes += background_resumes;
-      scheduler_stats_.background_cycles += background_cycles;
-      scheduler_stats_.max_background_cycles =
-          std::max(scheduler_stats_.max_background_cycles, background_cycles);
-      scheduler_stats_.background_overruns +=
+      scheduler_stats_.background_resumes_ += background_resumes;
+      scheduler_stats_.background_cycles_ += background_cycles;
+      scheduler_stats_.max_background_cycles_ =
+          std::max(scheduler_stats_.max_background_cycles_, background_cycles);
+      scheduler_stats_.background_overruns_ +=
           background_cycles > background_budget_cycles_;
     }
   }
@@ -834,20 +838,20 @@ bool Worker::RunOnce(bool wait_for_completion) {
   //    instead of park).
   CheckIdleConnections();
   WorkerMailbox &mb = cross_core_->mailbox(id_);
-  const std::uint32_t seq = mb.wake_seq.load(std::memory_order_acquire);
+  const std::uint32_t seq = mb.wake_seq_.load(std::memory_order_acquire);
   if (DrainCrossCore()) {
     return true;  // raced: work arrived; next iteration drains + submits it
   }
   std::uint32_t expected = seq;
-  if (!mb.wake_seq.compare_exchange_strong(expected, kWakeSeqParked,
-                                           std::memory_order_acq_rel,
-                                           std::memory_order_relaxed)) {
+  if (!mb.wake_seq_.compare_exchange_strong(expected, kWakeSeqParked,
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_relaxed)) {
     return true;  // a producer published work; loop again instead of parking
   }
 
-  const int timeout_ms = options_.idle_timeout_ms > 0 ? 100 : -1;
+  const int timeout_ms = options_.idle_timeout_ms_ > 0 ? 100 : -1;
   const bool ok = backend_.Wait(timeout_ms);  // blocks; dispatches on wake
-  mb.wake_seq.store(0, std::memory_order_release);  // leave the parked state
+  mb.wake_seq_.store(0, std::memory_order_release);  // leave the parked state
   return ok;  // next iteration drains what Wait dispatched
 }
 
