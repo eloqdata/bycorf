@@ -23,7 +23,6 @@
 #include <optional>
 #include <utility>
 
-#include "celer/base/status.h"
 #include "celer/runtime/coroutine_frame_pool.h"
 
 namespace celer {
@@ -53,6 +52,8 @@ class Task {
   struct promise_type {
     using completion_fn =
         void (*)(void*, std::coroutine_handle<>) noexcept;
+
+    promise_type() = default;
 
     std::optional<T> value_;
     std::coroutine_handle<> continuation_{};

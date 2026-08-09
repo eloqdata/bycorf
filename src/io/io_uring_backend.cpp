@@ -63,9 +63,9 @@ IoUringBackend::~IoUringBackend() {
   Shutdown();
 }
 
-Status IoUringBackend::Init(const IoBackendOptions& options, Worker* worker, int wake_fd) {
+absl::Status IoUringBackend::Init(const IoBackendOptions& options, Worker* worker, int wake_fd) {
   if (initialized_) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
   worker_ = worker;
   options_ = options;
@@ -76,17 +76,17 @@ Status IoUringBackend::Init(const IoBackendOptions& options, Worker* worker, int
   const int rc = io_uring_queue_init_params(options.ring_entries, &ring_, &params);
   if (rc < 0) {
     if (rc == -ENOMEM) {
-      return Status(StatusCode::kResourceExhausted,
+      return absl::Status(absl::StatusCode::kResourceExhausted,
                     "io_uring setup exhausted locked memory; raise memlock");
     }
-    return Status(StatusCode::kInternal,
+    return absl::Status(absl::StatusCode::kInternal,
                   "io_uring_queue_init_params failed");
   }
   // We rely on IORING_FEAT_NODROP: the kernel queues overflowed completions
   // instead of dropping them (and makes submit return -EBUSY as backpressure).
   if ((params.features & IORING_FEAT_NODROP) == 0) {
     io_uring_queue_exit(&ring_);
-    return Status(StatusCode::kFailedPrecondition,
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
                   "io_uring lacks IORING_FEAT_NODROP (kernel >= 5.5 required)");
   }
 
@@ -98,7 +98,7 @@ Status IoUringBackend::Init(const IoBackendOptions& options, Worker* worker, int
     owns_wake_fd_ = true;
     if (wake_event_fd_ < 0) {
       io_uring_queue_exit(&ring_);
-      return Status(StatusCode::kInternal, "eventfd failed");
+      return absl::Status(absl::StatusCode::kInternal, "eventfd failed");
     }
   }
 
@@ -113,7 +113,7 @@ Status IoUringBackend::Init(const IoBackendOptions& options, Worker* worker, int
     }
     wake_event_fd_ = -1;
     io_uring_queue_exit(&ring_);
-    return Status(StatusCode::kInternal, "multishot recv setup failed");
+    return absl::Status(absl::StatusCode::kInternal, "multishot recv setup failed");
   }
   if (!ArmWakePoll()) {
     if (multishot_ring_.ring != nullptr) {
@@ -129,9 +129,9 @@ Status IoUringBackend::Init(const IoBackendOptions& options, Worker* worker, int
     io_uring_queue_exit(&ring_);
     multishot_ring_ = {};
     recv_multishot_enabled_ = false;
-    return Status(StatusCode::kInternal, "worker wake poll setup failed");
+    return absl::Status(absl::StatusCode::kInternal, "worker wake poll setup failed");
   }
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 void IoUringBackend::Shutdown() {
@@ -156,33 +156,33 @@ void IoUringBackend::Shutdown() {
   initialized_ = false;
 }
 
-Status IoUringBackend::RegisterFixedFiles(unsigned count) {
+absl::Status IoUringBackend::RegisterFixedFiles(unsigned count) {
   if (!initialized_ || count == 0 || fixed_files_registered_) {
-    return Status(StatusCode::kFailedPrecondition,
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
                   "invalid fixed-file table registration");
   }
   const int rc = io_uring_register_files_sparse(&ring_, count);
   if (rc < 0) {
-    return Status(StatusCode::kResourceExhausted,
+    return absl::Status(absl::StatusCode::kResourceExhausted,
                   "io_uring_register_files_sparse failed");
   }
   fixed_files_registered_ = true;
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::RegisterBuffers(std::span<const iovec> buffers) {
+absl::Status IoUringBackend::RegisterBuffers(std::span<const iovec> buffers) {
   if (!initialized_ || buffers.empty() || buffers_registered_) {
-    return Status(StatusCode::kFailedPrecondition,
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
                   "invalid registered-buffer setup");
   }
   const int rc = io_uring_register_buffers(&ring_, buffers.data(),
                                            static_cast<unsigned>(buffers.size()));
   if (rc < 0) {
-    return Status(StatusCode::kResourceExhausted,
+    return absl::Status(absl::StatusCode::kResourceExhausted,
                   "io_uring_register_buffers failed; raise memlock");
   }
   buffers_registered_ = true;
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 void IoUringBackend::UnregisterStorageResources() {
@@ -196,111 +196,111 @@ void IoUringBackend::UnregisterStorageResources() {
   }
 }
 
-Status IoUringBackend::SubmitOpenDirect(std::string_view path, int flags,
+absl::Status IoUringBackend::SubmitOpenDirect(std::string_view path, int flags,
                                         mode_t mode, FixedFile file,
                                         IoCompletion* tag) {
   if (!fixed_files_registered_ || path.empty()) {
-    return Status(StatusCode::kFailedPrecondition,
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
                   "fixed-file table is not registered");
   }
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire open sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire open sqe");
   }
   io_uring_prep_openat_direct(sqe, AT_FDCWD, path.data(), flags, mode,
                               file.index);
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
+absl::Status IoUringBackend::SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire close sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire close sqe");
   }
   io_uring_prep_close_direct(sqe, file.index);
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+absl::Status IoUringBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                                        std::uint64_t offset,
                                        IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire read sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire read sqe");
   }
   io_uring_prep_read_fixed(sqe, static_cast<int>(file.index), buffer.data,
                            static_cast<unsigned>(buffer.size), offset,
                            buffer.index);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitRead(FixedFile file,
+absl::Status IoUringBackend::SubmitRead(FixedFile file,
                                   std::span<std::byte> buffer,
                                   std::uint64_t offset, IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire read sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire read sqe");
   }
   io_uring_prep_read(sqe, static_cast<int>(file.index), buffer.data(),
                      static_cast<unsigned>(buffer.size()), offset);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
+absl::Status IoUringBackend::SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                                    std::uint64_t offset, IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire write sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire write sqe");
   }
   io_uring_prep_write(sqe, static_cast<int>(file.index), buffer.data(),
                       static_cast<unsigned>(buffer.size()), offset);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+absl::Status IoUringBackend::SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                                         std::uint64_t offset,
                                         IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire write sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire write sqe");
   }
   io_uring_prep_write_fixed(sqe, static_cast<int>(file.index), buffer.data,
                             static_cast<unsigned>(buffer.size), offset,
                             buffer.index);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitFdatasync(FixedFile file, IoCompletion* tag) {
+absl::Status IoUringBackend::SubmitFdatasync(FixedFile file, IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire fsync sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire fsync sqe");
   }
   io_uring_prep_fsync(sqe, static_cast<int>(file.index),
                       IORING_FSYNC_DATASYNC);
   sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitTimeout(const __kernel_timespec& timeout,
+absl::Status IoUringBackend::SubmitTimeout(const __kernel_timespec& timeout,
                                      IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire timeout sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire timeout sqe");
   }
   io_uring_prep_timeout(sqe, const_cast<__kernel_timespec*>(&timeout), 0, 0);
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 io_uring_sqe* IoUringBackend::AcquireSqe() {
@@ -325,19 +325,19 @@ io_uring_sqe* IoUringBackend::AcquireSqe() {
   }
 }
 
-Status IoUringBackend::Submit() {
+absl::Status IoUringBackend::Submit() {
   if (!initialized_) {
-    return Status(StatusCode::kFailedPrecondition, "backend is not initialized");
+    return absl::Status(absl::StatusCode::kFailedPrecondition, "backend is not initialized");
   }
   const int rc = io_uring_submit_and_get_events(&ring_);
   if (rc == -EBUSY) {
-    return Status(StatusCode::kUnavailable, "io_uring completion ring busy");
+    return absl::Status(absl::StatusCode::kUnavailable, "io_uring completion ring busy");
   }
   if (rc < 0) {
-    return Status(StatusCode::kInternal,
+    return absl::Status(absl::StatusCode::kInternal,
                   "io_uring_submit_and_get_events failed");
   }
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 bool IoUringBackend::InitMultishotRecv() {
@@ -407,11 +407,11 @@ void IoUringBackend::HandleWakePoll() {
   }
 }
 
-Status IoUringBackend::SubmitSend(const RegisteredFile& file,
+absl::Status IoUringBackend::SubmitSend(const RegisteredFile& file,
                                   std::span<const std::byte> buffer, IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire send sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire send sqe");
   }
   io_uring_prep_send(sqe, file.is_fixed ? static_cast<int>(file.fixed_index) : file.fd,
                      buffer.data(), static_cast<unsigned>(buffer.size()), 0);
@@ -419,33 +419,33 @@ Status IoUringBackend::SubmitSend(const RegisteredFile& file,
     sqe->flags |= IOSQE_FIXED_FILE;
   }
   io_uring_sqe_set_data(sqe, tag);
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
+absl::Status IoUringBackend::SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire accept sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire accept sqe");
   }
   io_uring_prep_multishot_accept(sqe, listen_fd, nullptr, nullptr,
                                  SOCK_NONBLOCK | SOCK_CLOEXEC);
   io_uring_sqe_set_data(sqe, tag);  // plain IoCompletion* — same path as send
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Status IoUringBackend::StartRecvMultishot(Connection* connection) {
+absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
   if (connection == nullptr) {
-    return Status(StatusCode::kInvalidArgument, "connection must not be null");
+    return absl::Status(absl::StatusCode::kInvalidArgument, "connection must not be null");
   }
   if (connection->recv_armed || connection->closed || connection->closing) {
-    return Status::Ok();  // already armed / not arm-able (idempotent)
+    return absl::OkStatus();  // already armed / not arm-able (idempotent)
   }
   if (!recv_multishot_enabled_ && !connection->received_buffers.empty()) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
   auto* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return Status(StatusCode::kUnavailable, "failed to acquire recv multishot sqe");
+    return absl::Status(absl::StatusCode::kUnavailable, "failed to acquire recv multishot sqe");
   }
   const int fd = connection->file.is_fixed
                      ? static_cast<int>(connection->file.fixed_index)
@@ -469,7 +469,7 @@ Status IoUringBackend::StartRecvMultishot(Connection* connection) {
 
   connection->recv_armed = true;
   connection->inflight_ops += 1;
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 void IoUringBackend::RecycleMultishotBuffer(std::uint16_t buffer_id) {
@@ -532,11 +532,11 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection, io_uring_cqe* c
     connection->recv_eof = true;
     notify_reader = true;
   } else if (cqe->res < 0 && cqe->res != -ECANCELED && cqe->res != -ENOBUFS) {
-    connection->last_error = Status(StatusCode::kUnknown, "recv multishot failed");
+    connection->last_error = absl::Status(absl::StatusCode::kUnknown, "recv multishot failed");
     notify_reader = true;
   } else if (cqe->res > 0) {
     connection->last_error =
-        Status(StatusCode::kInternal, "recv completion missing selected buffer");
+        absl::Status(absl::StatusCode::kInternal, "recv completion missing selected buffer");
     notify_reader = true;
   }
   // -ENOBUFS is transient: retain the waiting reader and let the

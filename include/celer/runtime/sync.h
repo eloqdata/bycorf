@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/runtime/cross_core.h"
 #include "celer/runtime/worker.h"
 
@@ -136,7 +136,7 @@ class CoroutineBarrier {
     bool await_suspend(std::coroutine_handle<> awaiting) {
       return barrier_->Arrive(worker_, awaiting);
     }
-    Status await_resume() { return barrier_->status(); }
+    absl::Status await_resume() { return barrier_->status(); }
 
    private:
     CoroutineBarrier* barrier_;
@@ -145,7 +145,7 @@ class CoroutineBarrier {
 
   Awaiter Wait(Worker& worker) { return Awaiter(this, &worker); }
 
-  void Abort(Status status) {
+  void Abort(absl::Status status) {
     std::vector<Waiter> wake;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -208,7 +208,7 @@ class CoroutineBarrier {
     }
   }
 
-  Status status() {
+  absl::Status status() {
     std::lock_guard<std::mutex> lock(mutex_);
     return status_;
   }
@@ -216,7 +216,7 @@ class CoroutineBarrier {
   unsigned participants_ = 0;
   unsigned arrived_ = 0;
   bool completed_ = false;
-  Status status_ = Status::Ok();
+  absl::Status status_ = absl::OkStatus();
   std::mutex mutex_;
   std::vector<Waiter> waiters_;
 };

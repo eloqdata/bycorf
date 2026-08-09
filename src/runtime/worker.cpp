@@ -78,21 +78,21 @@ void ForgetTaskScheduling(std::coroutine_handle<> handle) noexcept {
 
 Worker::~Worker() { Shutdown(); }
 
-Status Worker::Init(const WorkerOptions &options) {
+absl::Status Worker::Init(const WorkerOptions &options) {
   if (initialized_) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
   // The Runtime binds a CrossCore (and its wake eventfds) for every worker
   // before Run(); a worker only ever runs through it, so cross_core_ is an
   // invariant.
   if (cross_core_ == nullptr) {
-    return Status(StatusCode::kFailedPrecondition,
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
                   "worker requires BindCrossCore before Init");
   }
   if (options.foreground_budget_us == 0 ||
       options.background_budget_us == 0 ||
       options.background_warrant_percent > 100) {
-    return Status(StatusCode::kInvalidArgument,
+    return absl::Status(absl::StatusCode::kInvalidArgument,
                   "worker scheduler budgets must be positive and background "
                   "warrant must be <= 100%");
   }
@@ -120,7 +120,7 @@ Status Worker::Init(const WorkerOptions &options) {
   // Advertise our ring so other workers can wake us via MSG_RING.
   cross_core_->mailbox(id_).ring_fd = backend_.WakeHandle();
   initialized_ = true;
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 void Worker::Shutdown() {
@@ -131,7 +131,7 @@ void Worker::Shutdown() {
   initialized_ = false;
 }
 
-void Worker::Spawn(Task<Status> task) {
+void Worker::Spawn(Task<absl::Status> task) {
   task.SetCompletionCallback(
       this, [](void* context, std::coroutine_handle<> completed) noexcept {
         static_cast<Worker*>(context)->Enqueue(completed, true);
@@ -149,7 +149,7 @@ void Worker::Spawn(Task<Status> task) {
   }
 }
 
-void Worker::SpawnRoot(Task<Status> task) {
+void Worker::SpawnRoot(Task<absl::Status> task) {
   task.SetCompletionCallback(
       this, [](void* context, std::coroutine_handle<> completed) noexcept {
         static_cast<Worker*>(context)->Enqueue(completed, true);
@@ -167,7 +167,7 @@ void Worker::SpawnRoot(Task<Status> task) {
   Enqueue(handle);
 }
 
-void Worker::SpawnBackground(Task<Status> task) {
+void Worker::SpawnBackground(Task<absl::Status> task) {
   task.SetCompletionCallback(
       this, [](void* context, std::coroutine_handle<> completed) noexcept {
         static_cast<Worker*>(context)->Enqueue(completed, true);
@@ -186,7 +186,7 @@ void Worker::SpawnBackground(Task<Status> task) {
   Enqueue(handle);
 }
 
-void SpawnOnCurrentWorker(Task<Status> task) {
+void SpawnOnCurrentWorker(Task<absl::Status> task) {
   if (CurrentTaskClass() == TaskClass::kBackground) {
     ThisWorker().self->SpawnBackground(std::move(task));
   } else {
@@ -219,7 +219,7 @@ Connection *Worker::AddConnection(Connection connection) {
   return raw;
 }
 
-void Worker::BeginClose(Connection *connection, Status reason,
+void Worker::BeginClose(Connection *connection, absl::Status reason,
                         CloseMode mode) noexcept {
   if (connection == nullptr) {
     return;
@@ -325,7 +325,7 @@ void Worker::ForgetScheduling(std::coroutine_handle<> handle) noexcept {
 
 namespace {
 
-using SpawnPromise = Task<Status>::promise_type;
+using SpawnPromise = Task<absl::Status>::promise_type;
 
 SpawnPromise& PromiseOf(void* address) noexcept {
   return std::coroutine_handle<SpawnPromise>::from_address(address).promise();
@@ -565,7 +565,7 @@ void Worker::CheckIdleConnections() {
     }
 
     connection->last_error =
-        Status(StatusCode::kDeadlineExceeded, "connection idle timeout");
+        absl::Status(absl::StatusCode::kDeadlineExceeded, "connection idle timeout");
     BeginClose(connection, connection->last_error, CloseMode::kIdleTimeout);
   }
 }
@@ -852,7 +852,7 @@ void Worker::Run() {
 
   for (auto &[connection_id, owned] : connections_) {
     (void)connection_id;
-    BeginClose(owned.get(), Status(StatusCode::kCancelled, "worker shutdown"),
+    BeginClose(owned.get(), absl::Status(absl::StatusCode::kCancelled, "worker shutdown"),
                CloseMode::kWorkerShutdown);
   }
   while (!connections_.empty() && RunOnce(false)) {

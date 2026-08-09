@@ -33,39 +33,39 @@ namespace celer {
 
 namespace {
 
-Status ErrnoToStatus(int err, const char* operation) {
+absl::Status ErrnoToStatus(int err, const char* operation) {
   std::string message = std::string(operation) + ": " + std::strerror(err) +
                         " (errno=" + std::to_string(err) + ")";
   switch (err) {
     case EAGAIN:
-      return Status(StatusCode::kUnavailable, std::move(message));
+      return absl::Status(absl::StatusCode::kUnavailable, std::move(message));
     case ETIMEDOUT:
-      return Status(StatusCode::kDeadlineExceeded, std::move(message));
+      return absl::Status(absl::StatusCode::kDeadlineExceeded, std::move(message));
     case ECANCELED:
-      return Status(StatusCode::kCancelled, std::move(message));
+      return absl::Status(absl::StatusCode::kCancelled, std::move(message));
     case EINVAL:
-      return Status(StatusCode::kInvalidArgument, std::move(message));
+      return absl::Status(absl::StatusCode::kInvalidArgument, std::move(message));
     case EBADF:
-      return Status(StatusCode::kFailedPrecondition, std::move(message));
+      return absl::Status(absl::StatusCode::kFailedPrecondition, std::move(message));
     case EMFILE:
     case ENFILE:
-      return Status(StatusCode::kResourceExhausted, std::move(message));
+      return absl::Status(absl::StatusCode::kResourceExhausted, std::move(message));
     default:
-      return Status(StatusCode::kUnknown, std::move(message));
+      return absl::Status(absl::StatusCode::kUnknown, std::move(message));
   }
 }
 
 }  // namespace
 
-Status ListenerAcceptState::Arm() {
+absl::Status ListenerAcceptState::Arm() {
   if (armed_) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
   if (listener_ == nullptr || listener_->fd_ < 0) {
-    return Status(StatusCode::kFailedPrecondition, "listener is closed");
+    return absl::Status(absl::StatusCode::kFailedPrecondition, "listener is closed");
   }
   if (listener_->worker_ == nullptr) {
-    return Status(StatusCode::kInvalidArgument, "listener is not bound");
+    return absl::Status(absl::StatusCode::kInvalidArgument, "listener is not bound");
   }
 
   auto status = listener_->worker_->SubmitAcceptMultishot(listener_->fd_, this);
@@ -73,10 +73,10 @@ Status ListenerAcceptState::Arm() {
     return status;
   }
   armed_ = true;
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-StatusOr<int> ListenerAcceptState::ConsumeAcceptedFd() {
+absl::StatusOr<int> ListenerAcceptState::ConsumeAcceptedFd() {
   if (!accepted_fds_.empty()) {
     const int fd = accepted_fds_.front();
     accepted_fds_.pop_front();
@@ -84,12 +84,12 @@ StatusOr<int> ListenerAcceptState::ConsumeAcceptedFd() {
   }
 
   if (!last_error_.ok()) {
-    Status status = last_error_;
-    last_error_ = Status::Ok();
+    absl::Status status = last_error_;
+    last_error_ = absl::OkStatus();
     return status;
   }
 
-  return Status(StatusCode::kUnavailable, "no accepted connection available");
+  return absl::Status(absl::StatusCode::kUnavailable, "no accepted connection available");
 }
 
 void ListenerAcceptState::Complete(Worker& worker, int result, unsigned flags) {
@@ -98,7 +98,7 @@ void ListenerAcceptState::Complete(Worker& worker, int result, unsigned flags) {
   } else if (result != -ECANCELED && result != -EBADF) {
     last_error_ = ErrnoToStatus(-result, "accept failed");
   } else if (listener_ != nullptr && listener_->closed_) {
-    last_error_ = Status(StatusCode::kFailedPrecondition, "listener is closed");
+    last_error_ = absl::Status(absl::StatusCode::kFailedPrecondition, "listener is closed");
   }
 
   if ((flags & kCompletionMore) == 0) {
@@ -133,15 +133,15 @@ class AcceptAwaitable final {
 
   bool await_suspend(std::coroutine_handle<> awaiting) {
     if (listener_ == nullptr) {
-      immediate_status_ = Status(StatusCode::kInvalidArgument, "listener is not bound");
+      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument, "listener is not bound");
       return false;
     }
     if (listener_->fd_ < 0 || listener_->closed_) {
-      immediate_status_ = Status(StatusCode::kFailedPrecondition, "listener is closed");
+      immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition, "listener is closed");
       return false;
     }
     if (listener_->worker_ == nullptr) {
-      immediate_status_ = Status(StatusCode::kInvalidArgument, "listener is not bound");
+      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument, "listener is not bound");
       return false;
     }
 
@@ -151,7 +151,7 @@ class AcceptAwaitable final {
     }
     if (state.HasWaiter()) {
       immediate_status_ =
-          Status(StatusCode::kFailedPrecondition, "concurrent accept is not allowed");
+          absl::Status(absl::StatusCode::kFailedPrecondition, "concurrent accept is not allowed");
       return false;
     }
 
@@ -165,7 +165,7 @@ class AcceptAwaitable final {
     return true;
   }
 
-  StatusOr<int> await_resume() {
+  absl::StatusOr<int> await_resume() {
     if (immediate_status_.has_value()) {
       return *immediate_status_;
     }
@@ -174,7 +174,7 @@ class AcceptAwaitable final {
 
  private:
   TcpListener* listener_ = nullptr;
-  std::optional<Status> immediate_status_;
+  std::optional<absl::Status> immediate_status_;
 };
 
 bool TcpListener::IsOpen() const noexcept {
@@ -185,13 +185,13 @@ int TcpListener::NativeFd() const noexcept {
   return fd_;
 }
 
-Status TcpListener::Bind(Worker* worker, std::string_view ip, std::uint16_t port, int backlog,
+absl::Status TcpListener::Bind(Worker* worker, std::string_view ip, std::uint16_t port, int backlog,
                          bool reuse_port) {
   if (IsOpen()) {
-    return Status(StatusCode::kFailedPrecondition, "listener is already open");
+    return absl::Status(absl::StatusCode::kFailedPrecondition, "listener is already open");
   }
   if (worker == nullptr) {
-    return Status(StatusCode::kInvalidArgument, "worker must not be null");
+    return absl::Status(absl::StatusCode::kInvalidArgument, "worker must not be null");
   }
 
   const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -217,7 +217,7 @@ Status TcpListener::Bind(Worker* worker, std::string_view ip, std::uint16_t port
   addr.sin_port = htons(port);
   if (::inet_pton(AF_INET, std::string(ip).c_str(), &addr.sin_addr) != 1) {
     ::close(fd);
-    return Status(StatusCode::kInvalidArgument, "invalid IPv4 address");
+    return absl::Status(absl::StatusCode::kInvalidArgument, "invalid IPv4 address");
   }
 
   if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -242,10 +242,10 @@ Status TcpListener::Bind(Worker* worker, std::string_view ip, std::uint16_t port
   worker_ = worker;
   fd_ = fd;
   closed_ = false;
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
-Task<StatusOr<Connection>> TcpListener::AcceptUnregistered() {
+Task<absl::StatusOr<Connection>> TcpListener::AcceptUnregistered() {
   auto accepted = co_await AcceptAwaitable(this);
   if (!accepted.ok()) {
     co_return accepted.status();
@@ -258,7 +258,7 @@ Task<StatusOr<Connection>> TcpListener::AcceptUnregistered() {
   co_return connection;
 }
 
-Task<StatusOr<Connection*>> TcpListener::Accept() {
+Task<absl::StatusOr<Connection*>> TcpListener::Accept() {
   auto accepted = co_await AcceptUnregistered();
   if (!accepted.ok()) {
     co_return accepted.status();
@@ -270,14 +270,14 @@ Task<StatusOr<Connection*>> TcpListener::Accept() {
   Connection* registered = worker_->AddConnection(std::move(connection));
   if (registered == nullptr) {
     ::close(fd);
-    co_return Status(StatusCode::kInternal, "failed to register accepted connection");
+    co_return absl::Status(absl::StatusCode::kInternal, "failed to register accepted connection");
   }
   co_return registered;
 }
 
-Status TcpListener::Close() noexcept {
+absl::Status TcpListener::Close() noexcept {
   if (closed_) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
 
   closed_ = true;
@@ -287,7 +287,7 @@ Status TcpListener::Close() noexcept {
   if (fd >= 0 && ::close(fd) != 0) {
     return ErrnoToStatus(errno, "close listener failed");
   }
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 }  // namespace celer

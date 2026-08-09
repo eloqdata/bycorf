@@ -34,15 +34,15 @@ void TcpService::Prepare(unsigned thread_count) {
   }
 }
 
-Status TcpService::StartSession(Worker& worker, Connection connection) {
+absl::Status TcpService::StartSession(Worker& worker, Connection connection) {
   const int fd = connection.file.fd;
   if (fd < 0) {
-    return Status(StatusCode::kInvalidArgument,
+    return absl::Status(absl::StatusCode::kInvalidArgument,
                   "accepted connection has an invalid fd");
   }
   if (worker.stop_requested()) {
     ::close(fd);
-    return Status(StatusCode::kCancelled,
+    return absl::Status(absl::StatusCode::kCancelled,
                   "target worker is stopping");
   }
 
@@ -50,11 +50,11 @@ Status TcpService::StartSession(Worker& worker, Connection connection) {
   Connection* registered = worker.AddConnection(std::move(connection));
   if (registered == nullptr) {
     ::close(fd);
-    return Status(StatusCode::kInternal,
+    return absl::Status(absl::StatusCode::kInternal,
                   "failed to register accepted connection");
   }
   worker.Spawn(RunSession(worker, registered));
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 void TcpService::Stop() noexcept {
@@ -62,12 +62,12 @@ void TcpService::Stop() noexcept {
   // the accept loops (their multishot accept completes with -ECANCELED).
   for (auto& listener : listeners_) {
     if (listener) {
-      listener->Close();
+      listener->Close().IgnoreError();
     }
   }
 }
 
-Task<Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
+Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
   TcpListener& listener = *listeners_[worker.id()];
   auto bind_status =
       listener.Bind(&worker, ctx.bind_ip, port_, backlog_, ctx.reuse_port);
@@ -82,11 +82,11 @@ Task<Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
     auto accepted = co_await listener.AcceptUnregistered();
     if (!accepted.ok()) [[unlikely]] {
       const auto code = accepted.status().code();
-      if (worker.stop_requested() || code == StatusCode::kCancelled ||
-          code == StatusCode::kFailedPrecondition) [[unlikely]] {
+      if (worker.stop_requested() || code == absl::StatusCode::kCancelled ||
+          code == absl::StatusCode::kFailedPrecondition) [[unlikely]] {
         break;
       }
-      if (code != StatusCode::kUnavailable) {
+      if (code != absl::StatusCode::kUnavailable) {
         spdlog::warn("accept failed: {}", accepted.status().message());
       }
       continue;
@@ -95,24 +95,24 @@ Task<Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
     const unsigned target = static_cast<unsigned>(
         next_connection_worker_.fetch_add(1, std::memory_order_relaxed) %
         thread_count_);
-    Status started = co_await SubmitTo(
+    absl::Status started = co_await SubmitTo(
         target,
-        [this, connection = std::move(*accepted)]() mutable -> Status {
+        [this, connection = std::move(*accepted)]() mutable -> absl::Status {
           return StartSession(*ThisWorker().self, std::move(connection));
         });
     if (!started.ok() &&
-        started.code() != StatusCode::kCancelled) [[unlikely]] {
+        started.code() != absl::StatusCode::kCancelled) [[unlikely]] {
       spdlog::warn("failed to start accepted connection on worker[{}]: {}",
                    target, started.message());
     }
   }
 
-  co_return Status::Ok();
+  co_return absl::OkStatus();
 }
 
-Task<Status> TcpService::RunSession(Worker& worker, Connection* connection) {
+Task<absl::Status> TcpService::RunSession(Worker& worker, Connection* connection) {
   TcpStream stream(connection);
-  Status status = co_await Serve(std::move(stream));
+  absl::Status status = co_await Serve(std::move(stream));
 
   if (connection != nullptr &&
       connection->state == ConnectionState::kActive &&
@@ -120,7 +120,7 @@ Task<Status> TcpService::RunSession(Worker& worker, Connection* connection) {
     if (status.ok()) {
       const CloseMode mode =
           connection->recv_eof ? CloseMode::kPeerClosed : CloseMode::kLocalClose;
-      worker.BeginClose(connection, Status::Ok(), mode);
+      worker.BeginClose(connection, absl::OkStatus(), mode);
     } else {
       worker.BeginClose(connection, status, CloseMode::kLocalError);
     }

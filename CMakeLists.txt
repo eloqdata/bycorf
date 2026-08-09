@@ -114,7 +114,12 @@ target_include_directories(celer SYSTEM PUBLIC
 )
 
 target_compile_features(celer PUBLIC cxx_std_23)
-target_link_libraries(celer PUBLIC celer_liburing absl::base)
+target_link_libraries(celer PUBLIC
+  celer_liburing
+  absl::base
+  absl::status
+  absl::statusor
+)
 
 if (CELER_WITH_DPDK)
   target_compile_definitions(celer PUBLIC CELER_WITH_DPDK)

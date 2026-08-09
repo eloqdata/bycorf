@@ -20,7 +20,7 @@
 #include <cstddef>
 #include <span>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/net/connection.h"
 #include "celer/runtime/task.h"
 
@@ -40,11 +40,11 @@ class TcpStream {
   bool IsOpen() const noexcept;
   int NativeFd() const noexcept;
 
-  Task<StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
-  Task<StatusOr<std::size_t>> WriteSome(std::span<const std::byte> buffer);
-  Task<Status> WriteAll(std::span<const std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> WriteSome(std::span<const std::byte> buffer);
+  Task<absl::Status> WriteAll(std::span<const std::byte> buffer);
 
-  Status Close() noexcept;
+  absl::Status Close() noexcept;
 
  private:
   Connection* connection_ = nullptr;

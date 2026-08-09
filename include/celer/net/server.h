@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/net/service.h"
 #include "celer/runtime/runtime.h"
 #include "celer/runtime/worker.h"
@@ -58,7 +58,7 @@ class Server {
   // Register a service before Start(). Not owned; must outlive the Server.
   void AddService(Service* service);
 
-  Status Start(const ServerOptions& options);
+  absl::Status Start(const ServerOptions& options);
   void StopAccepting() noexcept;
   void RequestStop() noexcept;
   void WaitUntilStopped();

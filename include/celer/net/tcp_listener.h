@@ -22,7 +22,7 @@
 #include <deque>
 #include <string_view>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/net/connection.h"
 #include "celer/io/completion.h"
 #include "celer/runtime/task.h"
@@ -39,8 +39,8 @@ class ListenerAcceptState final : public IoCompletion {
   explicit ListenerAcceptState(TcpListener* listener) : listener_(listener) {}
 
   void Bind(TcpListener* listener) noexcept { listener_ = listener; }
-  Status Arm();
-  StatusOr<int> ConsumeAcceptedFd();
+  absl::Status Arm();
+  absl::StatusOr<int> ConsumeAcceptedFd();
   void Complete(Worker& worker, int result, unsigned flags) override;
   void SetWaiter(std::coroutine_handle<> awaiting) { waiter_ = awaiting; }
   bool HasWaiter() const noexcept { return static_cast<bool>(waiter_); }
@@ -52,7 +52,7 @@ class ListenerAcceptState final : public IoCompletion {
   TcpListener* listener_ = nullptr;
   std::deque<int> accepted_fds_;
   std::coroutine_handle<> waiter_{};
-  Status last_error_ = Status::Ok();
+  absl::Status last_error_ = absl::OkStatus();
   bool armed_ = false;
 };
 
@@ -70,14 +70,14 @@ class TcpListener {
   bool IsOpen() const noexcept;
   int NativeFd() const noexcept;
 
-  Status Bind(Worker* worker, std::string_view ip, std::uint16_t port, int backlog = 128,
+  absl::Status Bind(Worker* worker, std::string_view ip, std::uint16_t port, int backlog = 128,
               bool reuse_port = false);
   // Accept a socket without registering it with the accepting worker. This is
   // used by TcpService to hand a fresh socket to its selected owner before any
   // recv operation is armed.
-  Task<StatusOr<Connection>> AcceptUnregistered();
-  Task<StatusOr<Connection*>> Accept();
-  Status Close() noexcept;
+  Task<absl::StatusOr<Connection>> AcceptUnregistered();
+  Task<absl::StatusOr<Connection*>> Accept();
+  absl::Status Close() noexcept;
 
  private:
   friend class ListenerAcceptState;

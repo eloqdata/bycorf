@@ -26,7 +26,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/net/tcp_service.h"
 #include "celer/net/tcp_stream.h"
 #include "celer/runtime/task.h"
@@ -67,7 +67,7 @@ class RpcServer : public TcpService {
                    AsyncHandler handler);  // call before Start
 
  protected:
-  Task<Status> Serve(TcpStream stream) override;
+  Task<absl::Status> Serve(TcpStream stream) override;
 
  private:
   std::unordered_map<std::uint16_t, Handler> handlers_;
@@ -85,25 +85,25 @@ class RpcClient {
 
   // Connect to (ip, port) on the current worker and start the response reader.
   // Uses a blocking connect() at setup (cold path); the data path is async.
-  Task<Status> Connect(std::string_view ip, std::uint16_t port);
+  Task<absl::Status> Connect(std::string_view ip, std::uint16_t port);
 
   // Send (verb, payload); suspend until the matching response arrives.
-  Task<StatusOr<Bytes>> Call(std::uint16_t verb, BytesView payload);
+  Task<absl::StatusOr<Bytes>> Call(std::uint16_t verb, BytesView payload);
 
   bool connected() const noexcept { return stream_.IsOpen(); }
-  void Close() noexcept { stream_.Close(); }
+  void Close() noexcept { stream_.Close().IgnoreError(); }
 
  private:
   struct Pending {
     std::coroutine_handle<> waiter{};
     Bytes result;
-    Status status = Status::Ok();
+    absl::Status status = absl::OkStatus();
     bool done = false;
   };
 
   void SendFrame(const WireHeader& header, BytesView payload);  // enqueue + kick
-  Task<Status> WriteLoop();   // single writer: serializes concurrent requests
-  Task<Status> ReadLoop();    // reads responses, resumes pending by req_id
+  Task<absl::Status> WriteLoop();   // single writer: serializes concurrent requests
+  Task<absl::Status> ReadLoop();    // reads responses, resumes pending by req_id
 
   TcpStream stream_;
   std::deque<Bytes> out_;

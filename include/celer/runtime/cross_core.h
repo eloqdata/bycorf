@@ -35,6 +35,7 @@
 #ifdef BLOCK_SIZE
 #undef BLOCK_SIZE
 #endif
+#include "absl/status/status.h"
 #include "celer/runtime/concurrentqueue.h"
 #include "celer/runtime/task.h"
 
@@ -250,11 +251,11 @@ inline void PostNotification(CrossCore* cc, unsigned target,
 
 // Defined in worker.cpp, where Worker is complete. This keeps the generic
 // cross-core awaiter independent of Worker's concrete scheduler layout.
-void SpawnOnCurrentWorker(Task<Status> task);
+void SpawnOnCurrentWorker(Task<absl::Status> task);
 
 // Awaiter returned by SubmitTo. Runs fn on the target worker's thread and
 // resumes the caller on the caller's (origin) worker. R must be default-
-// constructible (true for all Redis return types: optional, Status, bool, ...).
+// constructible (true for all Redis return types: optional, absl::Status, bool, ...).
 template <typename Fn>
 class SubmitAwaiter : public RemoteWork {
  public:
@@ -349,7 +350,7 @@ class SubmitTaskAwaiter : public RemoteWork {
     SpawnOnCurrentWorker(self->Run());
   }
 
-  Task<Status> Run() {
+  Task<absl::Status> Run() {
     // A coroutine lambda's frame retains a pointer to its closure object; it
     // does not copy the captures into the coroutine frame. Move the closure
     // into this Run coroutine's frame before invoking it, so it remains alive
@@ -358,7 +359,7 @@ class SubmitTaskAwaiter : public RemoteWork {
     Fn target_fn = std::move(fn_);
     result_.emplace(co_await std::invoke(target_fn));
     PostReply(ThisWorker().cross_core, origin, this);
-    co_return Status::Ok();
+    co_return absl::OkStatus();
   }
 
   unsigned target_;

@@ -26,7 +26,7 @@
 
 #include <liburing.h>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/io/completion.h"
 #include "celer/io/storage.h"
 #include "celer/net/connection.h"
@@ -57,7 +57,7 @@ class IoUringBackend {
   ~IoUringBackend();
 
   // wake_fd: a pre-created eventfd (from the cross-core mailbox), or -1 to own one.
-  Status Init(const IoBackendOptions& options, Worker* worker, int wake_fd);
+  absl::Status Init(const IoBackendOptions& options, Worker* worker, int wake_fd);
   void Shutdown();
 
   int WakeHandle() const noexcept { return ring_.ring_fd; }  // peers' MSG_RING target
@@ -66,35 +66,35 @@ class IoUringBackend {
   // result, flags) — send (one-shot) and accept (multishot) both go through this
   // path; the backend is agnostic to which. recv does NOT use Complete: the
   // backend updates the Connection directly and resumes its reader.
-  Status SubmitSend(const RegisteredFile& file, std::span<const std::byte> buffer,
+  absl::Status SubmitSend(const RegisteredFile& file, std::span<const std::byte> buffer,
                     IoCompletion* tag);
-  Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag);  // multishot
-  Status StartRecvMultishot(Connection* connection);              // multishot, idempotent
+  absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag);  // multishot
+  absl::Status StartRecvMultishot(Connection* connection);              // multishot, idempotent
 
   std::span<const std::byte> ViewRecvBuffer(
       const Connection* connection, std::uint16_t buffer_id,
       std::size_t offset, std::size_t length) const;
   void ReleaseRecvBuffer(Connection* connection, std::uint16_t buffer_id);
 
-  Status RegisterFixedFiles(unsigned count);
-  Status RegisterBuffers(std::span<const iovec> buffers);
+  absl::Status RegisterFixedFiles(unsigned count);
+  absl::Status RegisterBuffers(std::span<const iovec> buffers);
   void UnregisterStorageResources();
-  Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
+  absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                           FixedFile file, IoCompletion* tag);
-  Status SubmitCloseDirect(FixedFile file, IoCompletion* tag);
-  Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+  absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag);
+  absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                          std::uint64_t offset, IoCompletion* tag);
-  Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
+  absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                     std::uint64_t offset, IoCompletion* tag);
-  Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
+  absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                      std::uint64_t offset, IoCompletion* tag);
-  Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                           std::uint64_t offset, IoCompletion* tag);
-  Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
-  Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag);
+  absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
+  absl::Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag);
 
   // Event loop.
-  Status Submit();
+  absl::Status Submit();
   bool Poll();                // reap completions, dispatch, then re-arm recvs
   bool Wait(int timeout_ms);  // block for a completion, dispatch, drain
 

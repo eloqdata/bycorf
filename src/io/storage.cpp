@@ -27,35 +27,35 @@
 namespace celer {
 namespace {
 
-Status StorageError(int error, const char* operation) {
+absl::Status StorageError(int error, const char* operation) {
   std::string message = std::string(operation) + ": " + std::strerror(error) +
                         " (errno=" + std::to_string(error) + ")";
   switch (error) {
     case EAGAIN:
     case EBUSY:
-      return Status(StatusCode::kUnavailable, std::move(message));
+      return absl::Status(absl::StatusCode::kUnavailable, std::move(message));
     case ECANCELED:
-      return Status(StatusCode::kCancelled, std::move(message));
+      return absl::Status(absl::StatusCode::kCancelled, std::move(message));
     case EINVAL:
-      return Status(StatusCode::kInvalidArgument, std::move(message));
+      return absl::Status(absl::StatusCode::kInvalidArgument, std::move(message));
     case EBADF:
-      return Status(StatusCode::kFailedPrecondition, std::move(message));
+      return absl::Status(absl::StatusCode::kFailedPrecondition, std::move(message));
     case ENOSPC:
     case EMFILE:
     case ENFILE:
     case ENOMEM:
-      return Status(StatusCode::kResourceExhausted, std::move(message));
+      return absl::Status(absl::StatusCode::kResourceExhausted, std::move(message));
     case ENOENT:
-      return Status(StatusCode::kNotFound, std::move(message));
+      return absl::Status(absl::StatusCode::kNotFound, std::move(message));
     default:
-      return Status(StatusCode::kUnknown, std::move(message));
+      return absl::Status(absl::StatusCode::kUnknown, std::move(message));
   }
 }
 
 }  // namespace
 
 bool OneShotIoAwaitable::Suspend(std::coroutine_handle<> awaiting,
-                                 Status status) {
+                                 absl::Status status) {
   awaiting_ = awaiting;
   if (!status.ok()) {
     immediate_status_.emplace(std::move(status));
@@ -64,7 +64,7 @@ bool OneShotIoAwaitable::Suspend(std::coroutine_handle<> awaiting,
   return true;
 }
 
-StatusOr<int> OneShotIoAwaitable::Resume(const char* operation) {
+absl::StatusOr<int> OneShotIoAwaitable::Resume(const char* operation) {
   if (immediate_status_.has_value()) {
     return std::move(*immediate_status_);
   }
@@ -91,7 +91,7 @@ SizeIoAwaitable::SizeIoAwaitable(Worker& worker, FixedFile file,
       operation_(operation) {}
 
 bool SizeIoAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
-  Status status;
+  absl::Status status;
   switch (operation_) {
     case Operation::kRead:
       status = worker_->SubmitRead(
@@ -113,7 +113,7 @@ bool SizeIoAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
   return Suspend(awaiting, std::move(status));
 }
 
-StatusOr<std::size_t> SizeIoAwaitable::await_resume() {
+absl::StatusOr<std::size_t> SizeIoAwaitable::await_resume() {
   const char* operation = nullptr;
   switch (operation_) {
     case Operation::kRead:
@@ -150,9 +150,9 @@ bool OpenFixedFileAwaitable::await_suspend(
                                path_, flags_, mode_, file_, this));
 }
 
-Status OpenFixedFileAwaitable::await_resume() {
+absl::Status OpenFixedFileAwaitable::await_resume() {
   auto result = Resume("open fixed O_DIRECT file failed");
-  return result.ok() ? Status::Ok() : result.status();
+  return result.ok() ? absl::OkStatus() : result.status();
 }
 
 FileStatusAwaitable::FileStatusAwaitable(Worker& worker, FixedFile file,
@@ -160,17 +160,17 @@ FileStatusAwaitable::FileStatusAwaitable(Worker& worker, FixedFile file,
     : worker_(&worker), file_(file), operation_(operation) {}
 
 bool FileStatusAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
-  Status status = operation_ == Operation::kClose
+  absl::Status status = operation_ == Operation::kClose
                       ? worker_->SubmitCloseDirect(file_, this)
                       : worker_->SubmitFdatasync(file_, this);
   return Suspend(awaiting, std::move(status));
 }
 
-Status FileStatusAwaitable::await_resume() {
+absl::Status FileStatusAwaitable::await_resume() {
   auto result = Resume(operation_ == Operation::kClose
                            ? "close fixed file failed"
                            : "fixed-file fdatasync failed");
-  return result.ok() ? Status::Ok() : result.status();
+  return result.ok() ? absl::OkStatus() : result.status();
 }
 
 TimeoutAwaitable::TimeoutAwaitable(
@@ -187,18 +187,18 @@ TimeoutAwaitable::TimeoutAwaitable(
 bool TimeoutAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
   if (duration_.count() <= 0) {
     return Suspend(awaiting,
-                   Status(StatusCode::kInvalidArgument,
+                   absl::Status(absl::StatusCode::kInvalidArgument,
                           "sleep duration must be positive"));
   }
   return Suspend(awaiting, worker_->SubmitTimeout(timeout_, this));
 }
 
-Status TimeoutAwaitable::await_resume() {
+absl::Status TimeoutAwaitable::await_resume() {
   if (has_immediate_status()) {
     return TakeImmediateStatus();
   }
   if (result() == -ETIME || result() == 0) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
   return StorageError(-result(), "io_uring timeout failed");
 }

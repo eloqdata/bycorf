@@ -22,7 +22,7 @@
 #include <deque>
 #include <vector>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 
 namespace celer {
 
@@ -70,7 +70,7 @@ struct Connection {
   bool write_inflight = false;
 
   std::uint32_t inflight_ops = 0;
-  Status last_error = Status::Ok();
+  absl::Status last_error = absl::OkStatus();
 
   std::vector<std::byte> read_buffer;
   std::deque<ReceivedBuffer> received_buffers;

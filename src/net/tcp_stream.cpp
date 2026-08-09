@@ -29,22 +29,22 @@ namespace celer {
 
 namespace {
 
-Status ErrnoToStatus(int err, const char* operation) {
+absl::Status ErrnoToStatus(int err, const char* operation) {
   switch (err) {
     case EAGAIN:
-      return Status(StatusCode::kUnavailable, operation);
+      return absl::Status(absl::StatusCode::kUnavailable, operation);
     case ETIMEDOUT:
-      return Status(StatusCode::kDeadlineExceeded, operation);
+      return absl::Status(absl::StatusCode::kDeadlineExceeded, operation);
     case ECANCELED:
-      return Status(StatusCode::kCancelled, operation);
+      return absl::Status(absl::StatusCode::kCancelled, operation);
     case EINVAL:
-      return Status(StatusCode::kInvalidArgument, operation);
+      return absl::Status(absl::StatusCode::kInvalidArgument, operation);
     case EBADF:
-      return Status(StatusCode::kFailedPrecondition, operation);
+      return absl::Status(absl::StatusCode::kFailedPrecondition, operation);
     case ENOSYS:
-      return Status(StatusCode::kUnimplemented, operation);
+      return absl::Status(absl::StatusCode::kUnimplemented, operation);
     default:
-      return Status(StatusCode::kUnknown, operation);
+      return absl::Status(absl::StatusCode::kUnknown, operation);
   }
 }
 
@@ -63,13 +63,13 @@ class ReadOperation final : public IoCompletion {
       return false;
     }
     if (connection_ == nullptr || connection_->worker == nullptr) {
-      immediate_status_ = Status(StatusCode::kInvalidArgument, "stream is not bound");
+      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument, "stream is not bound");
       return false;
     }
     if (connection_->state != ConnectionState::kActive ||
         connection_->closed || connection_->closing) {
       immediate_status_ =
-          Status(StatusCode::kFailedPrecondition, "read on closed stream");
+          absl::Status(absl::StatusCode::kFailedPrecondition, "read on closed stream");
       return false;
     }
 
@@ -80,7 +80,7 @@ class ReadOperation final : public IoCompletion {
 
     if (connection_->read_inflight || connection_->read_waiter) {
       immediate_status_ =
-          Status(StatusCode::kFailedPrecondition, "concurrent read is not allowed");
+          absl::Status(absl::StatusCode::kFailedPrecondition, "concurrent read is not allowed");
       return false;
     }
 
@@ -95,7 +95,7 @@ class ReadOperation final : public IoCompletion {
     return true;
   }
 
-  StatusOr<std::size_t> await_resume() noexcept {
+  absl::StatusOr<std::size_t> await_resume() noexcept {
     if (immediate_status_.has_value()) {
       return *immediate_status_;
     }
@@ -104,12 +104,12 @@ class ReadOperation final : public IoCompletion {
     }
 
     if (connection_ == nullptr) {
-      return Status(StatusCode::kInvalidArgument, "stream is not bound");
+      return absl::Status(absl::StatusCode::kInvalidArgument, "stream is not bound");
     }
 
     if (!connection_->last_error.ok()) {
-      Status status = connection_->last_error;
-      connection_->last_error = Status::Ok();
+      absl::Status status = connection_->last_error;
+      connection_->last_error = absl::OkStatus();
       return status;
     }
 
@@ -118,7 +118,7 @@ class ReadOperation final : public IoCompletion {
     }
 
     if (connection_->received_buffers.empty()) {
-      return Status(StatusCode::kUnavailable, "no received data available");
+      return absl::Status(absl::StatusCode::kUnavailable, "no received data available");
     }
 
     auto& received = connection_->received_buffers.front();
@@ -128,7 +128,7 @@ class ReadOperation final : public IoCompletion {
     auto chunk = connection_->worker->ViewMultishotBuffer(
         connection_, received.buffer_id, received.offset, to_copy);
     if (chunk.size() != to_copy) {
-      return Status(StatusCode::kInternal, "invalid multishot buffer view");
+      return absl::Status(absl::StatusCode::kInternal, "invalid multishot buffer view");
     }
 
     std::memcpy(buffer_.data(), chunk.data(), chunk.size());
@@ -150,7 +150,7 @@ class ReadOperation final : public IoCompletion {
  private:
   Connection* connection_ = nullptr;
   std::span<std::byte> buffer_;
-  std::optional<Status> immediate_status_;
+  std::optional<absl::Status> immediate_status_;
   std::optional<std::size_t> immediate_result_;
 };
 
@@ -190,7 +190,7 @@ class WriteOperation final : public IoCompletion {
     return true;
   }
 
-  StatusOr<std::size_t> await_resume() noexcept {
+  absl::StatusOr<std::size_t> await_resume() noexcept {
     if (!submitted_) {
       if (result_ >= 0) {
         return static_cast<std::size_t>(result_);
@@ -233,15 +233,15 @@ int TcpStream::NativeFd() const noexcept {
   return connection_ == nullptr ? -1 : connection_->file.fd;
 }
 
-Task<StatusOr<std::size_t>> TcpStream::ReadSome(std::span<std::byte> buffer) {
+Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(std::span<std::byte> buffer) {
   co_return co_await ReadOperation(connection_, buffer);
 }
 
-Task<StatusOr<std::size_t>> TcpStream::WriteSome(std::span<const std::byte> buffer) {
+Task<absl::StatusOr<std::size_t>> TcpStream::WriteSome(std::span<const std::byte> buffer) {
   co_return co_await WriteOperation(connection_, buffer);
 }
 
-Task<Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
+Task<absl::Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
   std::size_t written = 0;
   while (written < buffer.size()) {
     auto result = co_await WriteSome(buffer.subspan(written));
@@ -249,22 +249,22 @@ Task<Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
       co_return result.status();
     }
     if (*result == 0) {
-      co_return Status(StatusCode::kInternal, "WriteSome returned 0");
+      co_return absl::Status(absl::StatusCode::kInternal, "WriteSome returned 0");
     }
     written += *result;
   }
-  co_return Status::Ok();
+  co_return absl::OkStatus();
 }
 
-Status TcpStream::Close() noexcept {
+absl::Status TcpStream::Close() noexcept {
   if (connection_ == nullptr) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
   if (connection_->state != ConnectionState::kActive) {
-    return Status::Ok();
+    return absl::OkStatus();
   }
-  connection_->worker->BeginClose(connection_, Status::Ok(), CloseMode::kLocalClose);
-  return Status::Ok();
+  connection_->worker->BeginClose(connection_, absl::OkStatus(), CloseMode::kLocalClose);
+  return absl::OkStatus();
 }
 
 }  // namespace celer

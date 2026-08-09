@@ -19,7 +19,7 @@
 
 #include <string_view>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/runtime/task.h"
 
 namespace celer {
@@ -48,7 +48,7 @@ class Service {
 
   // Spawned once on each worker (runs on that worker's thread). Sets up its
   // sockets and serves until the worker stops, then returns.
-  virtual Task<Status> Run(Worker& worker, ServiceContext ctx) = 0;
+  virtual Task<absl::Status> Run(Worker& worker, ServiceContext ctx) = 0;
 
   // Called on the Server's thread at shutdown (before the workers are stopped) to
   // close the service's sockets so its Run loops unblock. Must be thread-safe.

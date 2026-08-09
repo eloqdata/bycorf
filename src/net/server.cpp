@@ -32,15 +32,15 @@ void Server::AddService(Service* service) {
   }
 }
 
-Status Server::Start(const ServerOptions& options) {
+absl::Status Server::Start(const ServerOptions& options) {
   if (started_) [[unlikely]] {
-    return Status(StatusCode::kFailedPrecondition, "server already started");
+    return absl::Status(absl::StatusCode::kFailedPrecondition, "server already started");
   }
   if (options.thread_count == 0) [[unlikely]] {
-    return Status(StatusCode::kInvalidArgument, "thread_count must be >= 1");
+    return absl::Status(absl::StatusCode::kInvalidArgument, "thread_count must be >= 1");
   }
   if (services_.empty()) [[unlikely]] {
-    return Status(StatusCode::kFailedPrecondition, "no services registered");
+    return absl::Status(absl::StatusCode::kFailedPrecondition, "no services registered");
   }
 
   options_ = options;
@@ -51,7 +51,7 @@ Status Server::Start(const ServerOptions& options) {
   started_ = true;
   auto fn = [this](unsigned i, Worker& worker) { return RunWorker(i, worker); };
   runtime_.Start(options_.thread_count, std::move(fn));
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 void Server::StopAccepting() noexcept {

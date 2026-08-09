@@ -28,7 +28,7 @@
 #include <span>
 #include <string>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/io/completion.h"
 
 namespace celer {
@@ -61,16 +61,16 @@ class OneShotIoAwaitable : public IoCompletion {
  protected:
   OneShotIoAwaitable() = default;
 
-  bool Suspend(std::coroutine_handle<> awaiting, Status status);
-  StatusOr<int> Resume(const char* operation);
+  bool Suspend(std::coroutine_handle<> awaiting, absl::Status status);
+  absl::StatusOr<int> Resume(const char* operation);
   bool has_immediate_status() const noexcept {
     return immediate_status_.has_value();
   }
-  Status TakeImmediateStatus() { return std::move(*immediate_status_); }
+  absl::Status TakeImmediateStatus() { return std::move(*immediate_status_); }
   int result() const noexcept { return result_; }
 
  private:
-  std::optional<Status> immediate_status_;
+  std::optional<absl::Status> immediate_status_;
   int result_ = 0;
 };
 
@@ -88,7 +88,7 @@ class SizeIoAwaitable final : public OneShotIoAwaitable {
 
   bool await_ready() const noexcept { return false; }
   bool await_suspend(std::coroutine_handle<> awaiting);
-  StatusOr<std::size_t> await_resume();
+  absl::StatusOr<std::size_t> await_resume();
 
  private:
   Worker* worker_ = nullptr;
@@ -105,7 +105,7 @@ class OpenFixedFileAwaitable final : public OneShotIoAwaitable {
 
   bool await_ready() const noexcept { return false; }
   bool await_suspend(std::coroutine_handle<> awaiting);
-  Status await_resume();
+  absl::Status await_resume();
 
  private:
   Worker* worker_ = nullptr;
@@ -127,7 +127,7 @@ class FileStatusAwaitable final : public OneShotIoAwaitable {
 
   bool await_ready() const noexcept { return false; }
   bool await_suspend(std::coroutine_handle<> awaiting);
-  Status await_resume();
+  absl::Status await_resume();
 
  private:
   Worker* worker_ = nullptr;
@@ -142,7 +142,7 @@ class TimeoutAwaitable final : public OneShotIoAwaitable {
 
   bool await_ready() const noexcept { return false; }
   bool await_suspend(std::coroutine_handle<> awaiting);
-  Status await_resume();
+  absl::Status await_resume();
 
  private:
   Worker* worker_ = nullptr;

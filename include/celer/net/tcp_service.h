@@ -22,7 +22,7 @@
 #include <memory>
 #include <vector>
 
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/net/connection.h"
 #include "celer/net/service.h"
 #include "celer/net/tcp_listener.h"
@@ -45,17 +45,17 @@ class TcpService : public Service {
   std::uint16_t port() const noexcept { return port_; }
 
   void Prepare(unsigned thread_count) override;
-  Task<Status> Run(Worker& worker, ServiceContext ctx) override;
+  Task<absl::Status> Run(Worker& worker, ServiceContext ctx) override;
   void Stop() noexcept override;
 
  protected:
   // Handles one accepted connection. The framework closes the connection after
   // this returns (unless already closed by the protocol).
-  virtual Task<Status> Serve(TcpStream stream) = 0;
+  virtual Task<absl::Status> Serve(TcpStream stream) = 0;
 
  private:
-  Status StartSession(Worker& worker, Connection connection);
-  Task<Status> RunSession(Worker& worker, Connection* connection);
+  absl::Status StartSession(Worker& worker, Connection connection);
+  Task<absl::Status> RunSession(Worker& worker, Connection* connection);
 
   std::uint16_t port_;
   int backlog_;

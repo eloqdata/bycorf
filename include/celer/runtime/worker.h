@@ -31,7 +31,7 @@
 #include "celer/io/net_backend.h"
 #include "celer/io/storage.h"
 #include "celer/net/connection.h"
-#include "celer/base/status.h"
+#include "absl/status/statusor.h"
 #include "celer/runtime/cross_core.h"
 #include "celer/runtime/task.h"
 
@@ -89,7 +89,7 @@ class Worker {
 
   ~Worker();
 
-  Status Init(const WorkerOptions& options = {});
+  absl::Status Init(const WorkerOptions& options = {});
   void Shutdown();
 
   // Wire this worker into the cross-core mailbox set before Run(). Called by the
@@ -135,14 +135,14 @@ class Worker {
   // Typed io submissions, forwarded to the backend (keeps io_uring out of the
   // net layer). recv multishot is driven by EnsureRecvArmed; its completions are
   // handled inside the backend, which calls back into Enqueue to resume readers.
-  Status SubmitSend(const RegisteredFile& file, std::span<const std::byte> buffer,
+  absl::Status SubmitSend(const RegisteredFile& file, std::span<const std::byte> buffer,
                     IoCompletion* tag) {
     return backend_.SubmitSend(file, buffer, tag);
   }
-  Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
+  absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
     return backend_.SubmitAcceptMultishot(listen_fd, tag);
   }
-  Status EnsureRecvArmed(Connection* connection) {
+  absl::Status EnsureRecvArmed(Connection* connection) {
     return backend_.StartRecvMultishot(connection);
   }
   std::span<const std::byte> ViewMultishotBuffer(
@@ -154,56 +154,56 @@ class Worker {
     backend_.ReleaseRecvBuffer(connection, buffer_id);
   }
 
-  Status RegisterFixedFiles(unsigned count) {
+  absl::Status RegisterFixedFiles(unsigned count) {
     return backend_.RegisterFixedFiles(count);
   }
-  Status RegisterBuffers(std::span<const iovec> buffers) {
+  absl::Status RegisterBuffers(std::span<const iovec> buffers) {
     return backend_.RegisterBuffers(buffers);
   }
-  Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
+  absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                           FixedFile file, IoCompletion* tag) {
     return backend_.SubmitOpenDirect(path, flags, mode, file, tag);
   }
-  Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
+  absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
     return backend_.SubmitCloseDirect(file, tag);
   }
-  Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+  absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                          std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitReadFixed(file, buffer, offset, tag);
   }
-  Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
+  absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                     std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitRead(file, buffer, offset, tag);
   }
-  Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
+  absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                      std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitWrite(file, buffer, offset, tag);
   }
-  Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                           std::uint64_t offset, IoCompletion* tag) {
     return backend_.SubmitWriteFixed(file, buffer, offset, tag);
   }
-  Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
+  absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
     return backend_.SubmitFdatasync(file, tag);
   }
-  Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag) {
+  absl::Status SubmitTimeout(const __kernel_timespec& timeout, IoCompletion* tag) {
     return backend_.SubmitTimeout(timeout, tag);
   }
 
   Connection* AddConnection(Connection connection);
-  void BeginClose(Connection* connection, Status reason, CloseMode mode) noexcept;
+  void BeginClose(Connection* connection, absl::Status reason, CloseMode mode) noexcept;
   void RetireConnection(Connection* connection);
 
   // Schedule a fire-and-forget session coroutine on this worker (e.g. a service's
   // accept loop or a per-connection session). The frame is destroyed on completion.
-  void Spawn(Task<Status> task);
+  void Spawn(Task<absl::Status> task);
   // Spawn a long-lived root (service loop). Tracked so the worker can destroy
   // its frame at shutdown if it never completes (e.g. suspended in accept).
-  void SpawnRoot(Task<Status> task);
+  void SpawnRoot(Task<absl::Status> task);
 
   // Schedule cooperative background work. Membership follows nested Task frames
   // and all subsequent resume paths.
-  void SpawnBackground(Task<Status> task);
+  void SpawnBackground(Task<absl::Status> task);
 
  private:
   std::size_t DrainReadyUntil(std::int64_t deadline_cycles);
