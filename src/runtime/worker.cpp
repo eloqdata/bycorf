@@ -430,8 +430,14 @@ void Worker::DestroyDetachedTasks() noexcept {
   std::vector<void *> tasks = std::move(detached_tasks_);
   detached_tasks_.clear();
   for (void *address : tasks) {
-    std::coroutine_handle<>::from_address(address).destroy();
+    const std::coroutine_handle<> handle =
+        std::coroutine_handle<>::from_address(address);
+    ForgetScheduling(handle);
+    handle.destroy();
   }
+  // Destroying a root cascades through its owned child Task frames. Clear any
+  // scheduling-only entries that belonged to frames already reclaimed above.
+  background_tasks_.clear();
 }
 
 bool Worker::IsBackground(std::coroutine_handle<> handle) const noexcept {

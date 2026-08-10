@@ -214,8 +214,10 @@ class Worker {
   // its frame at shutdown if it never completes (e.g. suspended in accept).
   void SpawnRoot(Task<absl::Status> task);
 
-  // Schedule cooperative background work. Membership follows nested Task frames
-  // and all subsequent resume paths.
+  // Schedule cooperative background work. Membership follows nested Task
+  // frames and all subsequent resume paths. If still suspended at shutdown,
+  // the coroutine frame is reclaimed after all workers and io_uring have
+  // quiesced.
   void SpawnBackground(Task<absl::Status> task);
 
  private:
