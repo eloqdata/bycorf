@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
@@ -279,6 +280,7 @@ Connection *Worker::AddConnection(Connection connection) {
   raw->id_ = next_connection_id_++;
   raw->last_active_ms_ = NowMs();
   connections_[raw->id_] = std::move(owned);
+  ++active_connection_count_;
   return raw;
 }
 
@@ -291,6 +293,10 @@ void Worker::BeginClose(Connection *connection, absl::Status reason,
     return;
   }
 
+  if (connection->state_ == ConnectionState::kActive) {
+    assert(active_connection_count_ != 0);
+    --active_connection_count_;
+  }
   if (!reason.ok() || connection->last_error_.ok()) {
     connection->last_error_ = std::move(reason);
   }

@@ -20,6 +20,7 @@
 #include <atomic>
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <span>
@@ -198,6 +199,9 @@ class Worker {
   }
 
   Connection* AddConnection(Connection connection);
+  std::uint64_t ActiveConnectionCount() const noexcept {
+    return active_connection_count_;
+  }
   void BeginClose(Connection* connection, absl::Status reason,
                   CloseMode mode) noexcept;
   void RetireConnection(Connection* connection);
@@ -254,6 +258,7 @@ class Worker {
   std::unordered_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
   std::vector<std::uint64_t> retired_connection_ids_;
   std::uint64_t next_connection_id_ = 1;
+  std::uint64_t active_connection_count_ = 0;
   WorkerId id_ = 0;
   CrossCore* cross_core_ = nullptr;
   std::uint64_t wake_checks_ = 0;
