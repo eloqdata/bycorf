@@ -121,6 +121,7 @@ add_library(celer
   src/io/storage.cpp
   src/io/io_uring_backend.cpp
   src/net/server.cpp
+  src/net/http_service.cpp
   src/net/tcp_service.cpp
   src/runtime/worker.cpp
   src/runtime/runtime.cpp
