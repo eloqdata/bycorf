@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "absl/base/internal/cycleclock.h"
+#include "celer/runtime/cycle_clock.h"
 #if defined(__x86_64__)
 #include "absl/base/internal/sysinfo.h"
 #endif
@@ -117,6 +118,12 @@ class TaskClassGuard {
 };
 
 }  // namespace
+
+std::uint64_t ReadCycleCounter() noexcept {
+  return static_cast<std::uint64_t>(CycleNow());
+}
+
+double CycleCounterFrequency() noexcept { return CycleFrequency(); }
 
 void RegisterBackgroundTask(std::coroutine_handle<> handle) noexcept {
   if (ThisWorker().self_ != nullptr) {
