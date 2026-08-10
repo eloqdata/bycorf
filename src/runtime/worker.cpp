@@ -168,6 +168,8 @@ absl::Status Worker::Init(const WorkerOptions &options) {
       CyclesFromMicroseconds(cycle_frequency_, options_.background_budget_us_);
   busy_poll_cycles_ =
       CyclesFromMicroseconds(cycle_frequency_, options_.busy_poll_us_);
+  spdk_foreground_pre_poll_cycles_ = CyclesFromMicroseconds(
+      cycle_frequency_, options_.spdk_foreground_pre_poll_us_);
   runtime_window_cycles_ = CyclesFromMicroseconds(cycle_frequency_, 10'000);
   scheduler_stats_.cycles_per_second_ = cycle_frequency_;
 
@@ -775,7 +777,7 @@ bool Worker::BusyPoll() {
     bool did_work = DrainCrossCore();
     did_work |= backend_.Poll();
 #ifdef CELER_WITH_SPDK_STORAGE
-    did_work |= storage_backend_.Poll();
+    did_work |= PollStorage();
 #endif
     if (did_work) {
       const std::int64_t round_start = CycleNow();
@@ -810,6 +812,26 @@ bool Worker::BusyPoll() {
   return false;
 }
 
+#ifdef CELER_WITH_SPDK_STORAGE
+bool Worker::PollStorage() {
+  const std::int64_t start = CycleNow();
+  const SpdkPollResult result = storage_backend_.Poll(
+      options_.spdk_max_completions_per_poll_);
+  const std::uint64_t elapsed =
+      static_cast<std::uint64_t>(CycleNow() - start);
+  ++scheduler_stats_.storage_poll_calls_;
+  scheduler_stats_.storage_poll_empty_ += result.completions_ == 0;
+  scheduler_stats_.storage_completions_ += result.completions_;
+  scheduler_stats_.storage_max_completions_ =
+      std::max<std::uint64_t>(scheduler_stats_.storage_max_completions_,
+                              result.completions_);
+  scheduler_stats_.storage_poll_cycles_ += elapsed;
+  scheduler_stats_.storage_max_poll_cycles_ =
+      std::max(scheduler_stats_.storage_max_poll_cycles_, elapsed);
+  return result.did_work_;
+}
+#endif
+
 void Worker::Flush() {
   FlushWakes();
   const auto status = backend_.Submit();
@@ -835,7 +857,28 @@ bool Worker::RunOnce(bool wait_for_completion) {
   did_work |= DrainCrossCore();
   did_work |= backend_.Poll();
 #ifdef CELER_WITH_SPDK_STORAGE
-  did_work |= storage_backend_.Poll();
+  if (options_.spdk_foreground_pre_poll_us_ != 0 &&
+      (!ready_.empty() || !next_ready_.empty() ||
+       !foreground_remote_work_.empty())) {
+    MergeDeferred();
+    const std::int64_t pre_poll_start = CycleNow();
+    const std::size_t pre_poll_resumes = DrainReadyUntil(
+        pre_poll_start +
+        static_cast<std::int64_t>(spdk_foreground_pre_poll_cycles_));
+    if (pre_poll_resumes != 0) {
+      did_work = true;
+      const std::uint64_t pre_poll_cycles =
+          static_cast<std::uint64_t>(CycleNow() - pre_poll_start);
+      foreground_runtime_cycles_ += pre_poll_cycles;
+      scheduler_stats_.foreground_resumes_ += pre_poll_resumes;
+      scheduler_stats_.foreground_cycles_ += pre_poll_cycles;
+      scheduler_stats_.max_foreground_cycles_ =
+          std::max(scheduler_stats_.max_foreground_cycles_, pre_poll_cycles);
+      scheduler_stats_.foreground_overruns_ +=
+          pre_poll_cycles > spdk_foreground_pre_poll_cycles_;
+    }
+  }
+  did_work |= PollStorage();
 #endif
   MergeDeferred();
 

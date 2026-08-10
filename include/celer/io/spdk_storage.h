@@ -32,6 +32,7 @@
 #include "celer/io/storage.h"
 
 struct spdk_nvme_qpair;
+struct spdk_nvme_cpl;
 
 namespace celer {
 
@@ -40,6 +41,11 @@ class Worker;
 struct SpdkStorageDeviceInfo {
   std::size_t io_alignment_ = 0;
   std::uint64_t size_bytes_ = 0;
+};
+
+struct SpdkPollResult {
+  bool did_work_ = false;
+  std::uint32_t completions_ = 0;
 };
 
 // SPDK paths use spdk://<PCI-domain>:<bus>:<device>.<function>/<nsid>, for
@@ -87,13 +93,20 @@ class SpdkStorageBackend {
                                 std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
 
-  bool Poll();
+  SpdkPollResult Poll(unsigned max_completions = 0);
   bool HasOutstanding() const noexcept {
     return outstanding_ != 0 || !pending_completions_.empty();
   }
   void CompleteRequest(IoCompletion* tag, int result);
 
  private:
+  struct AsyncRequest {
+    SpdkStorageBackend* backend_ = nullptr;
+    IoCompletion* tag_ = nullptr;
+    int success_result_ = 0;
+    AsyncRequest* next_ = nullptr;
+  };
+
   struct OpenFile {
     void* device_ = nullptr;
     spdk_nvme_qpair* qpair_ = nullptr;
@@ -102,10 +115,17 @@ class SpdkStorageBackend {
   absl::Status SubmitIo(FixedFile file, void* buffer, std::size_t bytes,
                         std::uint64_t offset, bool write, IoCompletion* tag);
   OpenFile* Lookup(FixedFile file);
+  AsyncRequest* AcquireRequest() noexcept;
+  void ReleaseRequest(AsyncRequest* request) noexcept;
+  static void CompleteAsync(void* context,
+                            const spdk_nvme_cpl* completion);
 
   Worker* worker_ = nullptr;
   std::vector<OpenFile> files_;
   std::vector<std::pair<IoCompletion*, int>> pending_completions_;
+  std::vector<AsyncRequest> request_pool_;
+  AsyncRequest* free_requests_ = nullptr;
+  std::size_t next_poll_file_ = 0;
   std::size_t outstanding_ = 0;
   bool initialized_ = false;
 };

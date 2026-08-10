@@ -54,7 +54,7 @@ absl::Status Server::Start(const ServerOptions& options) {
 
   started_ = true;
   auto fn = [this](unsigned i, Worker& worker) { return RunWorker(i, worker); };
-  runtime_.Start(options_.thread_count_, std::move(fn));
+  runtime_.Start(options_.thread_count_, std::move(fn), options_.pin_workers_);
   return absl::OkStatus();
 }
 
@@ -97,6 +97,10 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   worker_options.background_budget_us_ = options_.background_budget_us_;
   worker_options.background_warrant_percent_ =
       options_.background_warrant_percent_;
+  worker_options.spdk_max_completions_per_poll_ =
+      options_.spdk_max_completions_per_poll_;
+  worker_options.spdk_foreground_pre_poll_us_ =
+      options_.spdk_foreground_pre_poll_us_;
 
   auto init_status = worker.Init(worker_options);
   if (!init_status.ok()) [[unlikely]] {

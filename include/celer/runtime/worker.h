@@ -53,6 +53,12 @@ struct WorkerOptions {
   unsigned foreground_budget_us_ = 1000;
   unsigned background_budget_us_ = 50;
   unsigned background_warrant_percent_ = 10;
+  // Zero preserves SPDK's process-all-ready-completions behavior. A non-zero
+  // value bounds each worker-loop poll so foreground work gets another turn.
+  unsigned spdk_max_completions_per_poll_ = 0;
+  // Run a small foreground slice after cross-core/network polling but before
+  // polling SPDK. Zero preserves the original ordering.
+  unsigned spdk_foreground_pre_poll_us_ = 0;
 };
 
 // The per-core scheduler: ready queue, connection table, cross-core mailbox and
@@ -77,6 +83,12 @@ class Worker {
     std::uint64_t max_background_cycles_ = 0;
     std::uint64_t foreground_overruns_ = 0;
     std::uint64_t background_overruns_ = 0;
+    std::uint64_t storage_poll_calls_ = 0;
+    std::uint64_t storage_poll_empty_ = 0;
+    std::uint64_t storage_completions_ = 0;
+    std::uint64_t storage_max_completions_ = 0;
+    std::uint64_t storage_poll_cycles_ = 0;
+    std::uint64_t storage_max_poll_cycles_ = 0;
     double cycles_per_second_ = 0.0;
   };
 
@@ -270,6 +282,9 @@ class Worker {
   void FlushWakes();  // wake every marked, parked target once
   void CheckIdleConnections();
   bool BusyPoll();
+#ifdef CELER_WITH_SPDK_STORAGE
+  bool PollStorage();
+#endif
   bool CanReclaim(const Connection& connection) const noexcept;
   void ReclaimConnections();
   void DiscardReceivedBuffers(Connection* connection);
@@ -310,6 +325,7 @@ class Worker {
   std::uint64_t foreground_budget_cycles_ = 0;
   std::uint64_t background_budget_cycles_ = 0;
   std::uint64_t busy_poll_cycles_ = 0;
+  std::uint64_t spdk_foreground_pre_poll_cycles_ = 0;
   std::uint64_t runtime_window_cycles_ = 0;
   std::int64_t background_deadline_cycles_ = 0;
   double cycle_frequency_ = 0.0;

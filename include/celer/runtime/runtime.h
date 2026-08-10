@@ -36,7 +36,8 @@ class Runtime {
   Runtime& operator=(Runtime&&) noexcept;
   ~Runtime();
 
-  void Start(unsigned thread_count, WorkerMain main_fn);
+  void Start(unsigned thread_count, WorkerMain main_fn,
+             bool pin_workers = true);
   void RequestStop() noexcept;
   void WaitUntilStopped();
 

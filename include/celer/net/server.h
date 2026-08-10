@@ -31,6 +31,8 @@ namespace celer {
 struct ServerOptions {
   std::string bind_ip_ = "0.0.0.0";
   unsigned thread_count_ = 1;
+  // Pin worker i to the i-th CPU in the process's inherited affinity mask.
+  bool pin_workers_ = true;
   bool reuse_port_ = true;
   int idle_timeout_ms_ = -1;
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
@@ -40,6 +42,8 @@ struct ServerOptions {
   unsigned foreground_budget_us_ = 1000;
   unsigned background_budget_us_ = 50;
   unsigned background_warrant_percent_ = 10;
+  unsigned spdk_max_completions_per_poll_ = 0;
+  unsigned spdk_foreground_pre_poll_us_ = 0;
 };
 
 // Hosts one or more Services on a pool of thread-per-core workers. The Runtime

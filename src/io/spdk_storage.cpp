@@ -370,18 +370,16 @@ void FreeStorageBuffer(void* buffer, std::size_t) noexcept {
   spdk_dma_free(buffer);
 }
 
-struct AsyncRequest {
-  SpdkStorageBackend* backend_ = nullptr;
-  IoCompletion* tag_ = nullptr;
-  int success_result_ = 0;
-};
-
-void CompleteAsync(void* context, const spdk_nvme_cpl* completion) {
-  std::unique_ptr<AsyncRequest> request(static_cast<AsyncRequest*>(context));
+void SpdkStorageBackend::CompleteAsync(void* context,
+                                       const spdk_nvme_cpl* completion) {
+  auto* request = static_cast<AsyncRequest*>(context);
   const int result = spdk_nvme_cpl_is_error(completion)
                          ? -EIO
                          : request->success_result_;
-  request->backend_->CompleteRequest(request->tag_, result);
+  SpdkStorageBackend* backend = request->backend_;
+  IoCompletion* tag = request->tag_;
+  backend->CompleteRequest(tag, result);
+  backend->ReleaseRequest(request);
 }
 
 SpdkStorageBackend::~SpdkStorageBackend() { Shutdown(); }
@@ -397,6 +395,14 @@ absl::Status SpdkStorageBackend::Init(Worker* worker) {
                         "SPDK storage backend requires a worker");
   }
   worker_ = worker;
+  // This is deliberately much larger than the registered read-buffer count.
+  // It covers foreground reads plus writes/flushes without a hot-path malloc.
+  request_pool_.resize(4096);
+  free_requests_ = nullptr;
+  for (AsyncRequest& request : request_pool_) {
+    request.next_ = free_requests_;
+    free_requests_ = &request;
+  }
   initialized_ = true;
   return absl::OkStatus();
 }
@@ -416,6 +422,9 @@ void SpdkStorageBackend::Shutdown() {
   }
   files_.clear();
   pending_completions_.clear();
+  request_pool_.clear();
+  free_requests_ = nullptr;
+  next_poll_file_ = 0;
   worker_ = nullptr;
   initialized_ = false;
 }
@@ -449,6 +458,23 @@ SpdkStorageBackend::OpenFile* SpdkStorageBackend::Lookup(FixedFile file) {
   return file.index_ < files_.size() && files_[file.index_].qpair_ != nullptr
              ? &files_[file.index_]
              : nullptr;
+}
+
+SpdkStorageBackend::AsyncRequest* SpdkStorageBackend::AcquireRequest() noexcept {
+  AsyncRequest* request = free_requests_;
+  if (request != nullptr) {
+    free_requests_ = request->next_;
+    request->next_ = nullptr;
+  }
+  return request;
+}
+
+void SpdkStorageBackend::ReleaseRequest(AsyncRequest* request) noexcept {
+  request->backend_ = nullptr;
+  request->tag_ = nullptr;
+  request->success_result_ = 0;
+  request->next_ = free_requests_;
+  free_requests_ = request;
 }
 
 absl::Status SpdkStorageBackend::SubmitOpenDirect(
@@ -511,7 +537,11 @@ absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "unaligned SPDK I/O request");
   }
-  auto request = std::make_unique<AsyncRequest>();
+  AsyncRequest* request = AcquireRequest();
+  if (request == nullptr) {
+    return absl::Status(absl::StatusCode::kResourceExhausted,
+                        "SPDK request pool exhausted");
+  }
   request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = static_cast<int>(bytes);
@@ -519,16 +549,16 @@ absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
   const std::uint32_t count = static_cast<std::uint32_t>(bytes / sector);
   int rc = write ? spdk_nvme_ns_cmd_write(device->ns_, opened->qpair_,
                                            buffer, lba, count, CompleteAsync,
-                                           request.get(), 0)
+                                           request, 0)
                  : spdk_nvme_ns_cmd_read(device->ns_, opened->qpair_,
                                           buffer, lba, count, CompleteAsync,
-                                          request.get(), 0);
+                                          request, 0);
   if (rc != 0) {
+    ReleaseRequest(request);
     return absl::Status(absl::StatusCode::kUnavailable,
                         "SPDK I/O submission failed");
   }
   ++outstanding_;
-  request.release();
   return absl::OkStatus();
 }
 
@@ -567,40 +597,62 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid SPDK flush request");
   }
-  auto request = std::make_unique<AsyncRequest>();
+  AsyncRequest* request = AcquireRequest();
+  if (request == nullptr) {
+    return absl::Status(absl::StatusCode::kResourceExhausted,
+                        "SPDK request pool exhausted");
+  }
   request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = 0;
   auto* device = static_cast<SpdkDevice*>(opened->device_);
   if (spdk_nvme_ns_cmd_flush(device->ns_, opened->qpair_,
-                             CompleteAsync, request.get()) != 0) {
+                             CompleteAsync, request) != 0) {
+    ReleaseRequest(request);
     return absl::Status(absl::StatusCode::kUnavailable,
                         "SPDK flush submission failed");
   }
   ++outstanding_;
-  request.release();
   return absl::OkStatus();
 }
 
-bool SpdkStorageBackend::Poll() {
-  bool did_work = false;
+SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
+  SpdkPollResult result;
   if (!pending_completions_.empty()) {
     std::vector<std::pair<IoCompletion*, int>> completions;
     completions.swap(pending_completions_);
     for (const auto& [tag, result] : completions) {
       tag->Complete(*worker_, result, 0);
     }
-    did_work = true;
+    result.did_work_ = true;
+    result.completions_ = static_cast<std::uint32_t>(completions.size());
   }
-  for (OpenFile& file : files_) {
+  const std::size_t file_count = files_.size();
+  for (std::size_t visited = 0; visited < file_count; ++visited) {
+    const std::size_t index = (next_poll_file_ + visited) % file_count;
+    OpenFile& file = files_[index];
     if (file.qpair_ == nullptr) {
       continue;
     }
+    const unsigned remaining =
+        max_completions == 0
+            ? 0
+            : (result.completions_ >= max_completions
+                   ? 0
+                   : max_completions - result.completions_);
+    if (max_completions != 0 && remaining == 0) {
+      next_poll_file_ = index;
+      break;
+    }
     const int32_t completed =
-        spdk_nvme_qpair_process_completions(file.qpair_, 0);
-    did_work |= completed > 0;
+        spdk_nvme_qpair_process_completions(file.qpair_, remaining);
+    if (completed > 0) {
+      result.did_work_ = true;
+      result.completions_ += static_cast<std::uint32_t>(completed);
+    }
+    next_poll_file_ = (index + 1) % file_count;
   }
-  return did_work;
+  return result;
 }
 
 }  // namespace celer

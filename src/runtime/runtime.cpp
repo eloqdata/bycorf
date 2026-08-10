@@ -19,6 +19,9 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include <pthread.h>
+#include <sched.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -60,7 +63,7 @@ class Runtime::Impl {
     std::thread thread_;
   };
 
-  void Start(unsigned thread_count, WorkerMain main_fn) {
+  void Start(unsigned thread_count, WorkerMain main_fn, bool pin_workers) {
     if (started_) {
       throw std::logic_error("runtime already started");
     }
@@ -69,6 +72,25 @@ class Runtime::Impl {
     }
     if (thread_count > std::numeric_limits<WorkerId>::max()) {
       throw std::invalid_argument("thread_count exceeds WorkerId capacity");
+    }
+
+    std::vector<unsigned> worker_cpus;
+    if (pin_workers) {
+      cpu_set_t allowed;
+      CPU_ZERO(&allowed);
+      if (pthread_getaffinity_np(pthread_self(), sizeof(allowed), &allowed) !=
+          0) {
+        throw std::runtime_error("failed to read process CPU affinity");
+      }
+      for (unsigned cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (CPU_ISSET(cpu, &allowed)) {
+          worker_cpus.push_back(cpu);
+        }
+      }
+      if (worker_cpus.size() < thread_count) {
+        throw std::invalid_argument(
+            "worker pinning requires at least one allowed CPU per worker");
+      }
     }
 
     started_ = true;
@@ -90,8 +112,20 @@ class Runtime::Impl {
       auto state = std::make_unique<State>();
       State* raw = state.get();
       raw->worker_.BindCrossCore(static_cast<WorkerId>(i), &cross_core_);
-      raw->thread_ = std::thread([this, i, raw, main_fn] {
-        int local_exit_code = main_fn(i, raw->worker_);
+      raw->thread_ = std::thread([this, i, raw, main_fn, worker_cpus] {
+        int local_exit_code = 0;
+        if (!worker_cpus.empty()) {
+          cpu_set_t affinity;
+          CPU_ZERO(&affinity);
+          CPU_SET(worker_cpus[i], &affinity);
+          if (pthread_setaffinity_np(pthread_self(), sizeof(affinity),
+                                     &affinity) != 0) {
+            local_exit_code = 1;
+          }
+        }
+        if (local_exit_code == 0) {
+          local_exit_code = main_fn(i, raw->worker_);
+        }
 
         if (local_exit_code != 0) {
           int expected = 0;
@@ -188,8 +222,9 @@ Runtime::~Runtime() {
   }
 }
 
-void Runtime::Start(unsigned thread_count, WorkerMain main_fn) {
-  impl_->Start(thread_count, std::move(main_fn));
+void Runtime::Start(unsigned thread_count, WorkerMain main_fn,
+                    bool pin_workers) {
+  impl_->Start(thread_count, std::move(main_fn), pin_workers);
 }
 
 void Runtime::RequestStop() noexcept { impl_->RequestStop(); }
