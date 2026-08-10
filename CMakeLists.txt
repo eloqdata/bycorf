@@ -26,6 +26,8 @@ option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
 # Selects the network backend at compile time (see io/net_backend.h). Default OFF
 # = io_uring. DPDK is not implemented yet; turning this on is reserved for it.
 option(CELER_WITH_DPDK "Build with the DPDK net backend instead of io_uring" OFF)
+option(CELER_WITH_SPDK_STORAGE
+  "Use SPDK for storage while retaining the io_uring network backend" OFF)
 
 find_program(CELER_CLANG_FORMAT NAMES clang-format-18 clang-format)
 file(GLOB_RECURSE CELER_FORMAT_FILES CONFIGURE_DEPENDS
@@ -128,6 +130,84 @@ add_library(celer
   src/net/tcp_listener.cpp
   src/net/tcp_stream.cpp
 )
+
+if (CELER_WITH_SPDK_STORAGE)
+  set(CELER_SPDK_SOURCE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/spdk")
+  if (NOT EXISTS "${CELER_SPDK_SOURCE_DIR}/configure" OR
+      NOT EXISTS "${CELER_SPDK_SOURCE_DIR}/dpdk/meson.build")
+    message(FATAL_ERROR
+      "SPDK submodules are missing; run git submodule update --init --recursive")
+  endif()
+  find_program(CELER_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
+  find_package(OpenSSL REQUIRED)
+  # Running SPDK's configure script recreates its DPDK Meson tree.  Configure
+  # only on the first build; make still performs normal dependency checks on
+  # every CMake configure after that.
+  if (NOT EXISTS "${CELER_SPDK_SOURCE_DIR}/mk/config.mk")
+    execute_process(
+      COMMAND "${CELER_SPDK_SOURCE_DIR}/configure"
+        --disable-tests --disable-unit-tests --disable-examples --disable-apps
+        --without-crypto --without-vhost --without-virtio --without-nvme-cuse
+        --without-fsdev --without-shared --max-lcores=16
+      WORKING_DIRECTORY "${CELER_SPDK_SOURCE_DIR}"
+      RESULT_VARIABLE CELER_SPDK_CONFIGURE_RESULT
+    )
+    if (NOT CELER_SPDK_CONFIGURE_RESULT EQUAL 0)
+      message(FATAL_ERROR "SPDK configure failed")
+    endif()
+  endif()
+  execute_process(
+    COMMAND "${CELER_MAKE_EXECUTABLE}" -j8
+    WORKING_DIRECTORY "${CELER_SPDK_SOURCE_DIR}"
+    RESULT_VARIABLE CELER_SPDK_BUILD_RESULT
+  )
+  if (NOT CELER_SPDK_BUILD_RESULT EQUAL 0)
+    message(FATAL_ERROR
+      "SPDK build failed; run third_party/spdk/scripts/pkgdep.sh or install its documented dependencies")
+  endif()
+  set(CELER_SPDK_PKG_CONFIG_PATH
+    "${CELER_SPDK_SOURCE_DIR}/build/lib/pkgconfig:${CELER_SPDK_SOURCE_DIR}/dpdk/build/lib/pkgconfig")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
+      "${CELER_PKG_CONFIG_EXECUTABLE}" --libs --static
+      spdk_nvme spdk_env_dpdk
+    OUTPUT_VARIABLE CELER_SPDK_LINK_FLAGS_RAW
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE CELER_SPDK_PKG_CONFIG_RESULT
+  )
+  if (NOT CELER_SPDK_PKG_CONFIG_RESULT EQUAL 0)
+    message(FATAL_ERROR "pkg-config could not resolve static SPDK libraries")
+  endif()
+  separate_arguments(CELER_SPDK_LINK_FLAGS NATIVE_COMMAND
+    "${CELER_SPDK_LINK_FLAGS_RAW}")
+  list(FILTER CELER_SPDK_LINK_FLAGS EXCLUDE REGEX
+    "^(-pthread|-lm|-ldl|-lnuma)$")
+  target_sources(celer PRIVATE src/io/spdk_storage.cpp)
+  target_compile_definitions(celer PUBLIC CELER_WITH_SPDK_STORAGE=1)
+  target_include_directories(celer SYSTEM PUBLIC
+    "${CELER_SPDK_SOURCE_DIR}/include"
+    "${CELER_SPDK_SOURCE_DIR}/build/include"
+    "${CELER_SPDK_SOURCE_DIR}/dpdk/build/include"
+  )
+  target_link_libraries(celer PUBLIC
+    # SPDK and DPDK discover transports and bus drivers through static
+    # constructors.  Keep every object from these archives; otherwise the
+    # linker drops the PCIe transport because no ordinary symbol references it.
+    "-Wl,--whole-archive"
+    "-Wl,-Bstatic"
+    ${CELER_SPDK_LINK_FLAGS}
+    "-Wl,--no-whole-archive"
+    "-Wl,-Bdynamic"
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    uuid
+    numa
+    dl
+    m
+  )
+endif()
 
 add_library(celer::celer ALIAS celer)
 add_library(celer::core ALIAS celer)

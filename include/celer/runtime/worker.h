@@ -31,6 +31,7 @@
 #include "absl/status/statusor.h"
 #include "celer/io/completion.h"
 #include "celer/io/net_backend.h"
+#include "celer/io/spdk_storage.h"
 #include "celer/io/storage.h"
 #include "celer/net/connection.h"
 #include "celer/runtime/cross_core.h"
@@ -162,36 +163,72 @@ class Worker {
   }
 
   absl::Status RegisterFixedFiles(unsigned count) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.RegisterFixedFiles(count);
+#else
     return backend_.RegisterFixedFiles(count);
+#endif
   }
   absl::Status RegisterBuffers(std::span<const iovec> buffers) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.RegisterBuffers(buffers);
+#else
     return backend_.RegisterBuffers(buffers);
+#endif
   }
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                                 FixedFile file, IoCompletion* tag) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.SubmitOpenDirect(path, flags, mode, file, tag);
+#else
     return backend_.SubmitOpenDirect(path, flags, mode, file, tag);
+#endif
   }
   absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.SubmitCloseDirect(file, tag);
+#else
     return backend_.SubmitCloseDirect(file, tag);
+#endif
   }
   absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                                std::uint64_t offset, IoCompletion* tag) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.SubmitReadFixed(file, buffer, offset, tag);
+#else
     return backend_.SubmitReadFixed(file, buffer, offset, tag);
+#endif
   }
   absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                           std::uint64_t offset, IoCompletion* tag) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.SubmitRead(file, buffer, offset, tag);
+#else
     return backend_.SubmitRead(file, buffer, offset, tag);
+#endif
   }
   absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                            std::uint64_t offset, IoCompletion* tag) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.SubmitWrite(file, buffer, offset, tag);
+#else
     return backend_.SubmitWrite(file, buffer, offset, tag);
+#endif
   }
   absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                                 std::uint64_t offset, IoCompletion* tag) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.SubmitWriteFixed(file, buffer, offset, tag);
+#else
     return backend_.SubmitWriteFixed(file, buffer, offset, tag);
+#endif
   }
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
+#ifdef CELER_WITH_SPDK_STORAGE
+    return storage_backend_.SubmitFdatasync(file, tag);
+#else
     return backend_.SubmitFdatasync(file, tag);
+#endif
   }
   absl::Status SubmitTimeout(const __kernel_timespec& timeout,
                              IoCompletion* tag) {
@@ -239,6 +276,9 @@ class Worker {
   bool DrainCrossCore();
 
   NetBackend backend_{};
+#ifdef CELER_WITH_SPDK_STORAGE
+  SpdkStorageBackend storage_backend_{};
+#endif
   bool initialized_ = false;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> stopping_{false};

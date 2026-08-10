@@ -137,7 +137,7 @@ class FileStatusAwaitable final : public OneShotIoAwaitable {
 
 class TimeoutAwaitable final : public OneShotIoAwaitable {
  public:
-  TimeoutAwaitable(Worker& worker, std::chrono::milliseconds duration) noexcept;
+  TimeoutAwaitable(Worker& worker, std::chrono::nanoseconds duration) noexcept;
 
   bool await_ready() const noexcept { return false; }
   bool await_suspend(std::coroutine_handle<> awaiting);
@@ -145,7 +145,7 @@ class TimeoutAwaitable final : public OneShotIoAwaitable {
 
  private:
   Worker* worker_ = nullptr;
-  std::chrono::milliseconds duration_{};
+  std::chrono::nanoseconds duration_{};
   __kernel_timespec timeout_{};
 };
 
@@ -161,7 +161,7 @@ SizeIoAwaitable Write(Worker& worker, FixedFile file,
 SizeIoAwaitable WriteFixed(Worker& worker, FixedFile file, FixedBuffer buffer,
                            std::uint64_t offset);
 FileStatusAwaitable Fdatasync(Worker& worker, FixedFile file);
-TimeoutAwaitable SleepFor(Worker& worker, std::chrono::milliseconds duration);
+TimeoutAwaitable SleepFor(Worker& worker, std::chrono::nanoseconds duration);
 
 }  // namespace celer
 

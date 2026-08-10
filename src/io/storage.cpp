@@ -19,12 +19,51 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <new>
 #include <string>
 #include <utility>
 
+#include "celer/io/spdk_storage.h"
 #include "celer/runtime/worker.h"
 
 namespace celer {
+#ifndef CELER_WITH_SPDK_STORAGE
+
+bool IsSpdkStoragePath(std::string_view path) noexcept {
+  return path.starts_with("spdk://");
+}
+
+absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(
+    std::string_view path) {
+  return absl::Status(absl::StatusCode::kUnimplemented,
+                      "SPDK storage path requires CELER_WITH_SPDK_STORAGE: " +
+                          std::string(path));
+}
+
+absl::Status ReadSpdkStorage(std::string_view, std::span<std::byte>,
+                             std::uint64_t) {
+  return absl::Status(absl::StatusCode::kUnimplemented,
+                      "SPDK storage is not compiled in");
+}
+
+absl::Status WriteSpdkStorage(std::string_view,
+                              std::span<const std::byte>, std::uint64_t,
+                              bool) {
+  return absl::Status(absl::StatusCode::kUnimplemented,
+                      "SPDK storage is not compiled in");
+}
+
+void* AllocateStorageBuffer(std::size_t bytes,
+                            std::size_t alignment) noexcept {
+  return ::operator new[](bytes, std::align_val_t(alignment), std::nothrow);
+}
+
+void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept {
+  ::operator delete[](buffer, std::align_val_t(alignment));
+}
+
+#endif  // CELER_WITH_SPDK_STORAGE
+
 namespace {
 
 absl::Status StorageError(int error, const char* operation) {
@@ -176,7 +215,7 @@ absl::Status FileStatusAwaitable::await_resume() {
 }
 
 TimeoutAwaitable::TimeoutAwaitable(Worker& worker,
-                                   std::chrono::milliseconds duration) noexcept
+                                   std::chrono::nanoseconds duration) noexcept
     : worker_(&worker), duration_(duration) {
   const auto seconds =
       std::chrono::duration_cast<std::chrono::seconds>(duration);
@@ -249,7 +288,7 @@ FileStatusAwaitable Fdatasync(Worker& worker, FixedFile file) {
                              FileStatusAwaitable::Operation::kFdatasync);
 }
 
-TimeoutAwaitable SleepFor(Worker& worker, std::chrono::milliseconds duration) {
+TimeoutAwaitable SleepFor(Worker& worker, std::chrono::nanoseconds duration) {
   return TimeoutAwaitable(worker, duration);
 }
 

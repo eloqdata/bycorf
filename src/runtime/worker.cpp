@@ -180,6 +180,13 @@ absl::Status Worker::Init(const WorkerOptions &options) {
   if (!status.ok()) {
     return status;
   }
+#ifdef CELER_WITH_SPDK_STORAGE
+  status = storage_backend_.Init(this);
+  if (!status.ok()) {
+    backend_.Shutdown();
+    return status;
+  }
+#endif
 
   // Advertise our ring so other workers can wake us via MSG_RING.
   cross_core_->mailbox(id_).ring_fd_ = backend_.WakeHandle();
@@ -191,6 +198,9 @@ void Worker::Shutdown() {
   if (!initialized_) {
     return;
   }
+#ifdef CELER_WITH_SPDK_STORAGE
+  storage_backend_.Shutdown();
+#endif
   backend_.Shutdown();
   initialized_ = false;
 }
@@ -764,6 +774,9 @@ bool Worker::BusyPoll() {
   do {
     bool did_work = DrainCrossCore();
     did_work |= backend_.Poll();
+#ifdef CELER_WITH_SPDK_STORAGE
+    did_work |= storage_backend_.Poll();
+#endif
     if (did_work) {
       const std::int64_t round_start = CycleNow();
       MergeDeferred();
@@ -821,6 +834,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
       !next_background_ready_.empty() || !background_remote_work_.empty();
   did_work |= DrainCrossCore();
   did_work |= backend_.Poll();
+#ifdef CELER_WITH_SPDK_STORAGE
+  did_work |= storage_backend_.Poll();
+#endif
   MergeDeferred();
 
   const std::int64_t foreground_start = CycleNow();
@@ -880,6 +896,14 @@ bool Worker::RunOnce(bool wait_for_completion) {
   if (BusyPoll()) {
     return true;
   }
+
+#ifdef CELER_WITH_SPDK_STORAGE
+  // SPDK is a polled-mode driver and has no fd that can wake io_uring. Keep
+  // driving its completion queues while device I/O is outstanding.
+  if (storage_backend_.HasOutstanding()) {
+    return true;
+  }
+#endif
 
   // 4. Idle — park. Check idle timeouts only here, off the hot path. The
   // wake_seq
