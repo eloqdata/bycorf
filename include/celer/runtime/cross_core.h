@@ -122,11 +122,20 @@ struct alignas(64) CrossCoreLane {
   SpscRing<RemoteWork*> requests_;
   SpscRing<RemoteWork*> replies_;
   SpscRing<RemoteNotification> notifications_;
-  std::atomic<bool> pending_{false};
+  // True while the receiver owns or is scheduled to drain this lane. A
+  // producer that changes false -> true publishes its sender id in the
+  // receiver's active-sender bitmap.
+  std::atomic<bool> active_{false};
 
   bool empty() const noexcept {
     return requests_.empty() && replies_.empty() && notifications_.empty();
   }
+};
+
+// Keep each receiver bitmap word on its own cache line. Producers targeting
+// different receivers (or different 64-sender groups) must not false-share.
+struct alignas(64) ActiveSenderWord {
+  std::atomic<std::uint64_t> bits_{0};
 };
 
 // One mailbox per worker, cache-line aligned so neighbours in the contiguous
@@ -153,20 +162,42 @@ class CrossCore {
   CrossCore() = default;  // empty until the Runtime knows the worker count
   explicit CrossCore(unsigned n)
       : size_(n),
+        active_sender_word_count_((n + 63U) / 64U),
         mailboxes_(std::make_unique<WorkerMailbox[]>(n)),
-        lanes_(std::make_unique<CrossCoreLane[]>(static_cast<std::size_t>(n) *
-                                                 n)) {}
+        lanes_(
+            std::make_unique<CrossCoreLane[]>(static_cast<std::size_t>(n) * n)),
+        active_senders_(std::make_unique<ActiveSenderWord[]>(
+            static_cast<std::size_t>(n) * active_sender_word_count_)) {}
 
   unsigned size() const noexcept { return size_; }
+  unsigned active_sender_word_count() const noexcept {
+    return active_sender_word_count_;
+  }
   WorkerMailbox& mailbox(unsigned i) noexcept { return mailboxes_[i]; }
   CrossCoreLane& lane(unsigned receiver, unsigned sender) noexcept {
     return lanes_[static_cast<std::size_t>(receiver) * size_ + sender];
   }
+  void ActivateSender(unsigned receiver, unsigned sender) noexcept {
+    ActiveSenderWord& word =
+        active_senders_[static_cast<std::size_t>(receiver) *
+                            active_sender_word_count_ +
+                        sender / 64U];
+    word.bits_.fetch_or(std::uint64_t{1} << (sender % 64U),
+                        std::memory_order_release);
+  }
+  std::uint64_t TakeActiveSenders(unsigned receiver, unsigned word) noexcept {
+    return active_senders_[static_cast<std::size_t>(receiver) *
+                               active_sender_word_count_ +
+                           word]
+        .bits_.exchange(0, std::memory_order_acq_rel);
+  }
 
  private:
   unsigned size_ = 0;
+  unsigned active_sender_word_count_ = 0;
   std::unique_ptr<WorkerMailbox[]> mailboxes_;
   std::unique_ptr<CrossCoreLane[]> lanes_;
+  std::unique_ptr<ActiveSenderWord[]> active_senders_;
 };
 
 // "Which worker is this thread", plus its per-round wake batch. Set at the top
@@ -212,12 +243,20 @@ inline void MarkWakeWorker(unsigned target) noexcept {
   }
 }
 
+inline void ActivateCrossCoreLane(CrossCore* cc, unsigned receiver,
+                                  unsigned sender,
+                                  CrossCoreLane& lane) noexcept {
+  if (!lane.active_.exchange(true, std::memory_order_acq_rel)) {
+    cc->ActivateSender(receiver, sender);
+  }
+}
+
 inline void PostRequest(CrossCore* cc, unsigned target,
                         RemoteWork* work) noexcept {
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(target, sender);
   if (lane.requests_.try_enqueue(work)) {
-    lane.pending_.store(true, std::memory_order_release);
+    ActivateCrossCoreLane(cc, target, sender, lane);
   } else {
     WorkerMailbox& mailbox = cc->mailbox(target);
     mailbox.requests_.enqueue(work);
@@ -231,7 +270,7 @@ inline void PostReply(CrossCore* cc, WorkerId origin,
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(origin, sender);
   if (lane.replies_.try_enqueue(work)) {
-    lane.pending_.store(true, std::memory_order_release);
+    ActivateCrossCoreLane(cc, origin, sender, lane);
   } else {
     WorkerMailbox& mailbox = cc->mailbox(origin);
     mailbox.replies_.enqueue(work);
@@ -245,7 +284,7 @@ inline void PostNotification(CrossCore* cc, unsigned target,
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(target, sender);
   if (lane.notifications_.try_enqueue(notification)) {
-    lane.pending_.store(true, std::memory_order_release);
+    ActivateCrossCoreLane(cc, target, sender, lane);
   } else {
     WorkerMailbox& mailbox = cc->mailbox(target);
     mailbox.notifications_.enqueue(notification);

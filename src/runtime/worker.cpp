@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -707,52 +708,57 @@ bool Worker::DrainCrossCore() {
     }
   }
 
-  // Scan one independent pending flag per sender lane. Producers never contend
-  // with each other, and empty lanes avoid touching all three ring indices.
-  // One bounded batch per message kind across all lanes keeps io fair.
-  for (unsigned sender = 0; sender < cross_core_->size(); ++sender) {
-    CrossCoreLane &lane = cross_core_->lane(id_, sender);
-    if (!lane.pending_.load(std::memory_order_acquire) ||
-        !lane.pending_.exchange(false, std::memory_order_acq_rel)) {
-      continue;
-    }
-
-    if (nreq < 64) {
-      const std::size_t count =
-          lane.requests_.try_dequeue_bulk(batch, 64 - nreq);
-      for (std::size_t i = 0; i < count; ++i) {
-        schedule_request(batch[i]);
+  // Producers publish only inactive -> active lane transitions. At 64 workers
+  // the receiver checks one bitmap word instead of 64 distant lane flags.
+  for (unsigned word = 0; word < cross_core_->active_sender_word_count();
+       ++word) {
+    std::uint64_t active = cross_core_->TakeActiveSenders(id_, word);
+    while (active != 0) {
+      const unsigned bit = std::countr_zero(active);
+      active &= active - 1;
+      const unsigned sender = word * 64U + bit;
+      if (sender >= cross_core_->size()) {
+        continue;
       }
-      nreq += count;
-    }
 
-    if (nrep < 64) {
-      const std::size_t count =
-          lane.replies_.try_dequeue_bulk(batch, 64 - nrep);
-      for (std::size_t i = 0; i < count; ++i) {
-        Enqueue(batch[i]->waiter_);
+      CrossCoreLane &lane = cross_core_->lane(id_, sender);
+      // Keep active=true while draining. A producer that races with the drain
+      // may therefore coalesce into this visit. Clearing followed by an empty
+      // check closes the case where it arrived after that message kind's tail
+      // snapshot and did not publish another active bit.
+      if (nreq < 64) {
+        const std::size_t count =
+            lane.requests_.try_dequeue_bulk(batch, 64 - nreq);
+        for (std::size_t i = 0; i < count; ++i) {
+          schedule_request(batch[i]);
+        }
+        nreq += count;
       }
-      nrep += count;
-    }
 
-    if (nnotifications < 64) {
-      const std::size_t count = lane.notifications_.try_dequeue_bulk(
-          notifications, 64 - nnotifications);
-      for (std::size_t i = 0; i < count; ++i) {
-        RemoteNotification &notification = notifications[i];
-        notification.run_fn_(notification.context_, notification.value_);
+      if (nrep < 64) {
+        const std::size_t count =
+            lane.replies_.try_dequeue_bulk(batch, 64 - nrep);
+        for (std::size_t i = 0; i < count; ++i) {
+          Enqueue(batch[i]->waiter_);
+        }
+        nrep += count;
       }
-      nnotifications += count;
-    }
 
-    // Clearing pending before draining makes a concurrent producer safe: a
-    // later enqueue publishes true again.  We must also re-arm the lane when
-    // this bounded pass leaves anything behind, including when an earlier
-    // sender already consumed the whole per-round batch and this lane was not
-    // drained at all.  Otherwise a non-empty lane can remain permanently
-    // hidden behind pending=false.
-    if (!lane.empty()) {
-      lane.pending_.store(true, std::memory_order_release);
+      if (nnotifications < 64) {
+        const std::size_t count = lane.notifications_.try_dequeue_bulk(
+            notifications, 64 - nnotifications);
+        for (std::size_t i = 0; i < count; ++i) {
+          RemoteNotification &notification = notifications[i];
+          notification.run_fn_(notification.context_, notification.value_);
+        }
+        nnotifications += count;
+      }
+
+      lane.active_.store(false, std::memory_order_release);
+      if (!lane.empty() &&
+          !lane.active_.exchange(true, std::memory_order_acq_rel)) {
+        cross_core_->ActivateSender(id_, sender);
+      }
     }
   }
 
