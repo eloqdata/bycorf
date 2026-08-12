@@ -744,6 +744,16 @@ bool Worker::DrainCrossCore() {
       }
       nnotifications += count;
     }
+
+    // Clearing pending before draining makes a concurrent producer safe: a
+    // later enqueue publishes true again.  We must also re-arm the lane when
+    // this bounded pass leaves anything behind, including when an earlier
+    // sender already consumed the whole per-round batch and this lane was not
+    // drained at all.  Otherwise a non-empty lane can remain permanently
+    // hidden behind pending=false.
+    if (!lane.empty()) {
+      lane.pending_.store(true, std::memory_order_release);
+    }
   }
 
   return nreq > 0 || nrep > 0 || nnotifications > 0;
