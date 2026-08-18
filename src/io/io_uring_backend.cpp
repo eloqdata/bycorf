@@ -454,6 +454,24 @@ absl::Status IoUringBackend::SubmitSend(const RegisteredFile& file,
   return absl::OkStatus();
 }
 
+absl::Status IoUringBackend::SubmitSendMsg(const RegisteredFile& file,
+                                           const msghdr* message,
+                                           IoCompletion* tag) {
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return absl::Status(absl::StatusCode::kUnavailable,
+                        "failed to acquire sendmsg sqe");
+  }
+  io_uring_prep_sendmsg(
+      sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
+      message, 0);
+  if (file.is_fixed_) {
+    sqe->flags |= IOSQE_FIXED_FILE;
+  }
+  io_uring_sqe_set_data(sqe, tag);
+  return absl::OkStatus();
+}
+
 absl::Status IoUringBackend::SubmitAcceptMultishot(int listen_fd,
                                                    IoCompletion* tag) {
   io_uring_sqe* sqe = AcquireSqe();
@@ -472,7 +490,8 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "connection must not be null");
   }
-  if (connection->recv_armed_ || connection->closed_ || connection->closing_) {
+  if (connection->recv_armed_ || connection->closed_ || connection->closing_ ||
+      connection->recv_paused_) {
     return absl::OkStatus();  // already armed / not arm-able (idempotent)
   }
   if (!recv_multishot_enabled_ && !connection->received_buffers_.empty()) {
@@ -506,6 +525,22 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
 
   connection->recv_armed_ = true;
   connection->inflight_ops_ += 1;
+  return absl::OkStatus();
+}
+
+absl::Status IoUringBackend::SubmitCancelRecv(Connection* connection,
+                                              IoCompletion* tag) {
+  if (connection == nullptr || tag == nullptr) {
+    return absl::Status(absl::StatusCode::kInvalidArgument,
+                        "invalid recv cancel request");
+  }
+  auto* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return absl::Status(absl::StatusCode::kUnavailable,
+                        "failed to acquire recv cancel sqe");
+  }
+  io_uring_prep_cancel(sqe, EncodeMultishotData(connection), 0);
+  io_uring_sqe_set_data(sqe, tag);
   return absl::OkStatus();
 }
 
@@ -595,7 +630,7 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
     if (connection->inflight_ops_ > 0) {
       connection->inflight_ops_ -= 1;
     }
-    if (recv_multishot_enabled_ &&
+    if (recv_multishot_enabled_ && !connection->recv_paused_ &&
         connection->state_ == ConnectionState::kActive &&
         !connection->closed_ && !connection->closing_ &&
         !connection->recv_eof_) {
@@ -665,7 +700,7 @@ void IoUringBackend::DrainRecvRearm() {
     connection->needs_recv_rearm_ = false;
     if (connection->state_ == ConnectionState::kActive &&
         !connection->closed_ && !connection->closing_ &&
-        !connection->recv_eof_) {
+        !connection->recv_eof_ && !connection->recv_paused_) {
       auto status = StartRecvMultishot(connection);
       if (!status.ok()) {
         connection->last_error_ = status;

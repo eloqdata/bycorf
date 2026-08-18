@@ -72,10 +72,13 @@ class IoUringBackend {
   // the backend updates the Connection directly and resumes its reader.
   absl::Status SubmitSend(const RegisteredFile& file,
                           std::span<const std::byte> buffer, IoCompletion* tag);
+  absl::Status SubmitSendMsg(const RegisteredFile& file,
+                             const msghdr* message, IoCompletion* tag);
   absl::Status SubmitAcceptMultishot(int listen_fd,
                                      IoCompletion* tag);  // multishot
   absl::Status StartRecvMultishot(
       Connection* connection);  // multishot, idempotent
+  absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag);
 
   std::span<const std::byte> ViewRecvBuffer(const Connection* connection,
                                             std::uint16_t buffer_id,

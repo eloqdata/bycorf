@@ -17,6 +17,8 @@
 #ifndef CELER_RUNTIME_WORKER_H_
 #define CELER_RUNTIME_WORKER_H_
 
+#include <sys/socket.h>
+
 #include <atomic>
 #include <coroutine>
 #include <cstddef>
@@ -158,11 +160,18 @@ class Worker {
                           IoCompletion* tag) {
     return backend_.SubmitSend(file, buffer, tag);
   }
+  absl::Status SubmitSendMsg(const RegisteredFile& file,
+                             const msghdr* message, IoCompletion* tag) {
+    return backend_.SubmitSendMsg(file, message, tag);
+  }
   absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
     return backend_.SubmitAcceptMultishot(listen_fd, tag);
   }
   absl::Status EnsureRecvArmed(Connection* connection) {
     return backend_.StartRecvMultishot(connection);
+  }
+  absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag) {
+    return backend_.SubmitCancelRecv(connection, tag);
   }
   std::span<const std::byte> ViewMultishotBuffer(const Connection* connection,
                                                  std::uint16_t buffer_id,

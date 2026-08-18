@@ -68,6 +68,10 @@ struct Connection {
   bool retired_ = false;
   bool read_inflight_ = false;
   bool write_inflight_ = false;
+  // Live connection handoff pauses recv before the fd is duplicated onto a
+  // different worker.  In particular, an armed multishot recv must not keep
+  // consuming bytes from the shared socket after the handoff.
+  bool recv_paused_ = false;
 
   std::uint32_t inflight_ops_ = 0;
   absl::Status last_error_ = absl::OkStatus();
