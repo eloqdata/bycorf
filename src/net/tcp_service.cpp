@@ -18,23 +18,30 @@
 
 #include <unistd.h>
 
+#include <unordered_set>
+
 #include "celer/runtime/cross_core.h"
 #include "celer/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
 namespace celer {
 
+void TcpService::AddTlsEndpoint(std::uint16_t port,
+                                std::shared_ptr<TlsContext> context) {
+  if (port != 0 && context != nullptr) {
+    endpoints_.push_back(Endpoint{port, std::move(context)});
+  }
+}
+
 void TcpService::Prepare(unsigned thread_count) {
   thread_count_ = thread_count;
   next_connection_worker_.store(0, std::memory_order_relaxed);
   listeners_.clear();
-  listeners_.reserve(thread_count);
-  for (unsigned i = 0; i < thread_count; ++i) {
-    listeners_.push_back(std::make_unique<TcpListener>());
-  }
+  listeners_.resize(thread_count);
 }
 
-absl::Status TcpService::StartSession(Worker& worker, Connection connection) {
+absl::Status TcpService::StartSession(Worker& worker, Connection connection,
+                                      std::shared_ptr<TlsContext> tls) {
   const int fd = connection.file_.fd_;
   if (fd < 0) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
@@ -53,31 +60,69 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection) {
     return absl::Status(absl::StatusCode::kInternal,
                         "failed to register accepted connection");
   }
-  worker.Spawn(RunSession(worker, registered));
+  worker.Spawn(RunSession(worker, registered, std::move(tls)));
   return absl::OkStatus();
 }
 
 void TcpService::Stop() noexcept {
   // Called from the Server's thread at shutdown; closing the listeners unblocks
   // the accept loops (their multishot accept completes with -ECANCELED).
-  for (auto& listener : listeners_) {
-    if (listener) {
-      listener->Close().IgnoreError();
+  for (auto& worker : listeners_) {
+    for (auto& bound : worker.values_) {
+      if (bound.listener_) {
+        bound.listener_->Close().IgnoreError();
+      }
     }
   }
 }
 
 Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
-  TcpListener& listener = *listeners_[worker.id()];
-  auto bind_status =
-      listener.Bind(&worker, ctx.bind_ip_, port_, backlog_, ctx.reuse_port_);
-  if (!bind_status.ok()) [[unlikely]] {
-    spdlog::error("worker[{}] bind :{} failed: {}", worker.id(), port_,
-                  bind_status.message());
-    worker.RequestStop();
-    co_return bind_status;
+  WorkerListeners& owned = listeners_[worker.id()];
+  std::unordered_set<std::string> seen;
+  for (const Endpoint& endpoint : endpoints_) {
+    for (const std::string& host : ctx.bind_addresses_) {
+      auto addresses = ResolveTcpAddresses(host, endpoint.port_);
+      if (!addresses.ok()) {
+        spdlog::error("worker[{}] resolve {}:{} failed: {}", worker.id(),
+                      host, endpoint.port_, addresses.status().message());
+        worker.RequestStop();
+        co_return addresses.status();
+      }
+      for (const ResolvedTcpAddress& address : *addresses) {
+        const std::string key =
+            address.display_ + (endpoint.tls_ == nullptr ? "/plain" : "/tls");
+        if (!seen.insert(key).second) continue;
+        auto listener = std::make_unique<TcpListener>();
+        absl::Status bound = listener->Bind(
+            &worker, address, backlog_, ctx.reuse_port_);
+        if (!bound.ok()) {
+          spdlog::error("worker[{}] bind {} failed: {}", worker.id(),
+                        address.display_, bound.message());
+          worker.RequestStop();
+          co_return bound;
+        }
+        owned.values_.push_back(BoundListener{
+            .listener_ = std::move(listener),
+            .tls_ = endpoint.tls_,
+            .display_ = address.display_,
+        });
+      }
+    }
   }
+  if (owned.values_.empty()) {
+    worker.RequestStop();
+    co_return absl::FailedPreconditionError(
+        "TCP service has no configured endpoints");
+  }
+  for (std::size_t i = 1; i < owned.values_.size(); ++i) {
+    worker.Spawn(AcceptLoop(worker, &owned.values_[i]));
+  }
+  co_return co_await AcceptLoop(worker, &owned.values_.front());
+}
 
+Task<absl::Status> TcpService::AcceptLoop(Worker& worker,
+                                          BoundListener* bound) {
+  TcpListener& listener = *bound->listener_;
   while (!worker.stop_requested()) {
     auto accepted = co_await listener.AcceptUnregistered();
     if (!accepted.ok()) [[unlikely]] {
@@ -97,8 +142,10 @@ Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
         thread_count_);
     absl::Status started = co_await SubmitTo(
         target,
-        [this, connection = std::move(*accepted)]() mutable -> absl::Status {
-          return StartSession(*ThisWorker().self_, std::move(connection));
+        [this, connection = std::move(*accepted),
+         tls = bound->tls_]() mutable -> absl::Status {
+          return StartSession(*ThisWorker().self_, std::move(connection),
+                              std::move(tls));
         });
     if (!started.ok() && started.code() != absl::StatusCode::kCancelled)
         [[unlikely]] {
@@ -111,9 +158,24 @@ Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
 }
 
 Task<absl::Status> TcpService::RunSession(Worker& worker,
-                                          Connection* connection) {
+                                          Connection* connection,
+                                          std::shared_ptr<TlsContext> tls) {
   TcpStream stream(connection);
-  absl::Status status = co_await Serve(std::move(stream));
+  absl::Status status;
+  if (tls != nullptr) {
+    status = co_await stream.StartTls(tls, true);
+  }
+  if (status.ok()) {
+    status = co_await Serve(std::move(stream));
+  }
+
+  if (status.ok() && connection != nullptr &&
+      connection->state_ == ConnectionState::kActive &&
+      !connection->closing_) {
+    TcpStream closing_stream(connection);
+    absl::Status shutdown = co_await closing_stream.ShutdownTls();
+    if (!shutdown.ok()) status = shutdown;
+  }
 
   if (connection != nullptr && connection->state_ == ConnectionState::kActive &&
       !connection->closing_) [[unlikely]] {

@@ -21,9 +21,11 @@
 #include <cerrno>
 #include <cstring>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "celer/io/completion.h"
+#include "celer/net/tls.h"
 #include "celer/runtime/worker.h"
 
 namespace celer {
@@ -352,17 +354,62 @@ int TcpStream::NativeFd() const noexcept {
 
 Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(
     std::span<std::byte> buffer) {
+  if (tls_ != nullptr) {
+    co_return co_await tls_->ReadSome(*this, buffer);
+  }
+  co_return co_await ReadRawSome(buffer);
+}
+
+Task<absl::StatusOr<std::size_t>> TcpStream::ReadRawSome(
+    std::span<std::byte> buffer) {
   co_return co_await ReadOperation(connection_, buffer);
 }
 
 Task<absl::StatusOr<std::size_t>> TcpStream::WriteSome(
+    std::span<const std::byte> buffer) {
+  if (tls_ != nullptr) {
+    co_return co_await tls_->WriteSome(*this, buffer);
+  }
+  co_return co_await WriteRawSome(buffer);
+}
+
+Task<absl::StatusOr<std::size_t>> TcpStream::WriteRawSome(
     std::span<const std::byte> buffer) {
   co_return co_await WriteOperation(connection_, buffer);
 }
 
 Task<absl::StatusOr<std::size_t>> TcpStream::WriteSomeV(
     std::span<const iovec> buffers) {
+  if (tls_ != nullptr) {
+    for (const iovec& buffer : buffers) {
+      if (buffer.iov_len == 0) continue;
+      co_return co_await tls_->WriteSome(
+          *this, std::span<const std::byte>(
+                     static_cast<const std::byte*>(buffer.iov_base),
+                     buffer.iov_len));
+    }
+    co_return std::size_t{0};
+  }
+  co_return co_await WriteRawSomeV(buffers);
+}
+
+Task<absl::StatusOr<std::size_t>> TcpStream::WriteRawSomeV(
+    std::span<const iovec> buffers) {
   co_return co_await WriteVOperation(connection_, buffers);
+}
+
+Task<absl::Status> TcpStream::WriteRawAll(
+    std::span<const std::byte> buffer) {
+  std::size_t written = 0;
+  while (written < buffer.size()) {
+    auto result = co_await WriteRawSome(buffer.subspan(written));
+    if (!result.ok()) co_return result.status();
+    if (*result == 0) {
+      co_return absl::InternalError("raw WriteSome returned 0");
+    }
+    written += *result;
+  }
+  co_return absl::OkStatus();
 }
 
 Task<absl::Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
@@ -413,6 +460,54 @@ Task<absl::Status> TcpStream::WriteAllV(std::span<const iovec> buffers) {
     }
   }
   co_return absl::OkStatus();
+}
+
+Task<absl::Status> TcpStream::StartTls(
+    const std::shared_ptr<TlsContext>& context, bool server,
+    std::string_view peer_name) {
+  if (connection_ == nullptr || connection_->worker_ == nullptr ||
+      !IsOpen()) {
+    co_return absl::FailedPreconditionError(
+        "cannot start TLS on a closed stream");
+  }
+  if (tls_ != nullptr) {
+    co_return absl::FailedPreconditionError("TLS is already active");
+  }
+  if (connection_->recv_armed_ || connection_->read_inflight_ ||
+      !connection_->received_buffers_.empty()) {
+    co_return absl::FailedPreconditionError(
+        "TLS must start before socket reads are armed");
+  }
+  auto state = TlsState::Create(context, server, peer_name);
+  if (!state.ok()) co_return state.status();
+  connection_->recv_mode_ = RecvMode::kOneShot;
+  tls_ = std::move(*state);
+  connection_->tls_state_ = tls_;
+  absl::Status handshake = co_await tls_->Handshake(*this);
+  if (!handshake.ok()) {
+    connection_->tls_state_.reset();
+    tls_.reset();
+    co_return handshake;
+  }
+  co_return absl::OkStatus();
+}
+
+Task<absl::Status> TcpStream::ShutdownTls() {
+  if (tls_ == nullptr || !IsOpen()) co_return absl::OkStatus();
+  co_return co_await tls_->Shutdown(*this);
+}
+
+std::shared_ptr<TlsState> TcpStream::TakeTlsState() noexcept {
+  if (connection_ != nullptr) connection_->tls_state_.reset();
+  return std::exchange(tls_, nullptr);
+}
+
+void TcpStream::AttachTlsState(std::shared_ptr<TlsState> state) noexcept {
+  tls_ = std::move(state);
+  if (tls_ != nullptr && connection_ != nullptr) {
+    connection_->recv_mode_ = RecvMode::kOneShot;
+    connection_->tls_state_ = tls_;
+  }
 }
 
 Task<absl::Status> TcpStream::PauseRead() {

@@ -30,6 +30,9 @@ namespace celer {
 
 struct ServerOptions {
   std::string bind_ip_ = "0.0.0.0";
+  // When non-empty, bind every service endpoint on every listed address.
+  // Entries may be IPv4, IPv6, hostnames, or "*".
+  std::vector<std::string> bind_addresses_;
   unsigned thread_count_ = 1;
   // Pin worker i to the i-th CPU in the process's inherited affinity mask.
   bool pin_workers_ = true;

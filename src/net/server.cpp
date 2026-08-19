@@ -48,6 +48,9 @@ absl::Status Server::Start(const ServerOptions& options) {
   }
 
   options_ = options;
+  if (options_.bind_addresses_.empty()) {
+    options_.bind_addresses_.push_back(options_.bind_ip_);
+  }
   for (Service* service : services_) {
     service->Prepare(options_.thread_count_);
   }
@@ -109,7 +112,7 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   }
 
   ServiceContext ctx{
-      .bind_ip_ = options_.bind_ip_,
+      .bind_addresses_ = options_.bind_addresses_,
       .reuse_port_ = options_.reuse_port_ && options_.thread_count_ > 1,
   };
   for (Service* service : services_) {

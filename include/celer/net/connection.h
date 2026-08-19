@@ -20,6 +20,7 @@
 #include <coroutine>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -27,6 +28,7 @@
 namespace celer {
 
 class Worker;
+class TlsState;
 
 enum class ConnectionState : std::uint8_t {
   kActive,
@@ -41,6 +43,11 @@ enum class CloseMode : std::uint8_t {
   kLocalError,
   kIdleTimeout,
   kWorkerShutdown,
+};
+
+enum class RecvMode : std::uint8_t {
+  kMultishot,
+  kOneShot,
 };
 
 struct RegisteredFile {
@@ -83,6 +90,8 @@ struct Connection {
   bool needs_recv_rearm_ =
       false;  // re-arm deferred out of the completion handler
   bool recv_eof_ = false;
+  RecvMode recv_mode_ = RecvMode::kMultishot;
+  std::shared_ptr<TlsState> tls_state_;
   void* protocol_context_ = nullptr;
 };
 

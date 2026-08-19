@@ -494,7 +494,10 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
       connection->recv_paused_) {
     return absl::OkStatus();  // already armed / not arm-able (idempotent)
   }
-  if (!recv_multishot_enabled_ && !connection->received_buffers_.empty()) {
+  const bool use_multishot =
+      recv_multishot_enabled_ &&
+      connection->recv_mode_ == RecvMode::kMultishot;
+  if (!use_multishot && !connection->received_buffers_.empty()) {
     return absl::OkStatus();
   }
   auto* sqe = AcquireSqe();
@@ -505,7 +508,7 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
   const int fd = connection->file_.is_fixed_
                      ? static_cast<int>(connection->file_.fixed_index_)
                      : connection->file_.fd_;
-  if (recv_multishot_enabled_) {
+  if (use_multishot) {
     io_uring_prep_recv_multishot(sqe, fd, nullptr, 0, 0);
     sqe->flags |= IOSQE_BUFFER_SELECT;
     sqe->buf_group = MultishotBufferRing::kGroupId;
@@ -560,7 +563,8 @@ void IoUringBackend::RecycleMultishotBuffer(std::uint16_t buffer_id) {
 std::span<const std::byte> IoUringBackend::ViewRecvBuffer(
     const Connection* connection, std::uint16_t buffer_id, std::size_t offset,
     std::size_t length) const {
-  if (recv_multishot_enabled_) {
+  if (connection != nullptr && recv_multishot_enabled_ &&
+      connection->recv_mode_ == RecvMode::kMultishot) {
     if (buffer_id >= multishot_ring_.entries_ ||
         offset > multishot_ring_.buffer_size_ ||
         length > multishot_ring_.buffer_size_ - offset) {
@@ -581,8 +585,8 @@ std::span<const std::byte> IoUringBackend::ViewRecvBuffer(
 
 void IoUringBackend::ReleaseRecvBuffer(Connection* connection,
                                        std::uint16_t buffer_id) {
-  (void)connection;
-  if (recv_multishot_enabled_) {
+  if (connection != nullptr && recv_multishot_enabled_ &&
+      connection->recv_mode_ == RecvMode::kMultishot) {
     RecycleMultishotBuffer(buffer_id);
   }
 }
@@ -593,6 +597,9 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
     return;
   }
   const bool has_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
+  const bool use_multishot =
+      recv_multishot_enabled_ &&
+      connection->recv_mode_ == RecvMode::kMultishot;
   std::uint16_t buffer_id = 0;
   if (has_buffer) {
     buffer_id =
@@ -600,7 +607,7 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
   }
   bool notify_reader = false;
 
-  if (cqe->res > 0 && (has_buffer || !recv_multishot_enabled_)) {
+  if (cqe->res > 0 && (has_buffer || !use_multishot)) {
     connection->last_active_ms_ = NowMs();
     connection->received_buffers_.push_back(
         ReceivedBuffer{.buffer_id_ = buffer_id,
@@ -630,7 +637,7 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
     if (connection->inflight_ops_ > 0) {
       connection->inflight_ops_ -= 1;
     }
-    if (recv_multishot_enabled_ && !connection->recv_paused_ &&
+    if (use_multishot && !connection->recv_paused_ &&
         connection->state_ == ConnectionState::kActive &&
         !connection->closed_ && !connection->closing_ &&
         !connection->recv_eof_) {

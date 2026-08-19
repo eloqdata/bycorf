@@ -20,7 +20,9 @@
 #include <sys/uio.h>
 
 #include <cstddef>
+#include <memory>
 #include <span>
+#include <string_view>
 
 #include "absl/status/statusor.h"
 #include "celer/net/connection.h"
@@ -28,10 +30,15 @@
 
 namespace celer {
 
+class TlsContext;
+class TlsState;
+
 class TcpStream {
  public:
   TcpStream() = default;
-  explicit TcpStream(Connection* connection) : connection_(connection) {}
+  explicit TcpStream(Connection* connection)
+      : connection_(connection),
+        tls_(connection == nullptr ? nullptr : connection->tls_state_) {}
 
   TcpStream(TcpStream&&) noexcept = default;
   TcpStream& operator=(TcpStream&&) noexcept = default;
@@ -50,6 +57,17 @@ class TcpStream {
   Task<absl::Status> WriteAll(std::span<const std::byte> buffer);
   Task<absl::Status> WriteAllV(std::span<const iovec> buffers);
 
+  Task<absl::Status> StartTls(
+      const std::shared_ptr<TlsContext>& context, bool server,
+      std::string_view peer_name = {});
+  Task<absl::Status> ShutdownTls();
+  bool IsTls() const noexcept { return tls_ != nullptr; }
+
+  // A paused stream may transfer its TLS state alongside a duplicated fd.
+  // The caller must ensure no read/write coroutine is still in flight.
+  std::shared_ptr<TlsState> TakeTlsState() noexcept;
+  void AttachTlsState(std::shared_ptr<TlsState> state) noexcept;
+
   // Stop and drain the connection's recv operation without closing its fd.
   // This is required before moving a live socket to another worker because a
   // multishot recv otherwise remains attached to the old worker and can steal
@@ -59,7 +77,18 @@ class TcpStream {
   absl::Status Close() noexcept;
 
  private:
+  friend class TlsState;
+
+  Task<absl::StatusOr<std::size_t>> ReadRawSome(
+      std::span<std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> WriteRawSome(
+      std::span<const std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> WriteRawSomeV(
+      std::span<const iovec> buffers);
+  Task<absl::Status> WriteRawAll(std::span<const std::byte> buffer);
+
   Connection* connection_ = nullptr;
+  std::shared_ptr<TlsState> tls_;
 };
 
 }  // namespace celer

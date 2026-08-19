@@ -27,6 +27,7 @@
 #include "celer/net/service.h"
 #include "celer/net/tcp_listener.h"
 #include "celer/net/tcp_stream.h"
+#include "celer/net/tls.h"
 #include "celer/runtime/task.h"
 
 namespace celer {
@@ -40,9 +41,13 @@ class Worker;
 class TcpService : public Service {
  public:
   explicit TcpService(std::uint16_t port, int backlog = 128)
-      : port_(port), backlog_(backlog) {}
+      : port_(port), backlog_(backlog) {
+    if (port != 0) endpoints_.push_back(Endpoint{port, nullptr});
+  }
 
   std::uint16_t port() const noexcept { return port_; }
+  void AddTlsEndpoint(std::uint16_t port,
+                      std::shared_ptr<TlsContext> context);
 
   void Prepare(unsigned thread_count) override;
   Task<absl::Status> Run(Worker& worker, ServiceContext ctx) override;
@@ -54,13 +59,29 @@ class TcpService : public Service {
   virtual Task<absl::Status> Serve(TcpStream stream) = 0;
 
  private:
-  absl::Status StartSession(Worker& worker, Connection connection);
-  Task<absl::Status> RunSession(Worker& worker, Connection* connection);
+  struct Endpoint {
+    std::uint16_t port_ = 0;
+    std::shared_ptr<TlsContext> tls_;
+  };
+  struct BoundListener {
+    std::unique_ptr<TcpListener> listener_;
+    std::shared_ptr<TlsContext> tls_;
+    std::string display_;
+  };
+  struct WorkerListeners {
+    std::vector<BoundListener> values_;
+  };
+
+  absl::Status StartSession(Worker& worker, Connection connection,
+                            std::shared_ptr<TlsContext> tls);
+  Task<absl::Status> RunSession(Worker& worker, Connection* connection,
+                                std::shared_ptr<TlsContext> tls);
+  Task<absl::Status> AcceptLoop(Worker& worker, BoundListener* bound);
 
   std::uint16_t port_;
   int backlog_;
-  std::vector<std::unique_ptr<TcpListener>>
-      listeners_;  // one per worker, by id
+  std::vector<Endpoint> endpoints_;
+  std::vector<WorkerListeners> listeners_;  // one collection per worker
   unsigned thread_count_ = 0;
   std::atomic<std::uint64_t> next_connection_worker_{0};
 

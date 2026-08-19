@@ -19,12 +19,15 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 #include "celer/io/completion.h"
 #include "celer/runtime/worker.h"
@@ -60,6 +63,63 @@ absl::Status ErrnoToStatus(int err, const char* operation) {
 }
 
 }  // namespace
+
+absl::StatusOr<std::vector<ResolvedTcpAddress>> ResolveTcpAddresses(
+    std::string_view host, std::uint16_t port) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  hints.ai_flags = AI_PASSIVE;
+
+  const std::string host_text(host);
+  const char* node = host.empty() || host == "*" ? nullptr : host_text.c_str();
+  const std::string service = std::to_string(port);
+  addrinfo* addresses = nullptr;
+  const int result =
+      ::getaddrinfo(node, service.c_str(), &hints, &addresses);
+  if (result != 0) {
+    return absl::InvalidArgumentError(
+        std::string("cannot resolve bind address '") + host_text +
+        "': " + ::gai_strerror(result));
+  }
+
+  std::vector<ResolvedTcpAddress> resolved;
+  std::unordered_set<std::string> seen;
+  for (addrinfo* current = addresses; current != nullptr;
+       current = current->ai_next) {
+    if ((current->ai_family != AF_INET && current->ai_family != AF_INET6) ||
+        current->ai_addrlen > sizeof(sockaddr_storage)) {
+      continue;
+    }
+    char numeric_host[NI_MAXHOST]{};
+    char numeric_service[NI_MAXSERV]{};
+    if (::getnameinfo(current->ai_addr, current->ai_addrlen, numeric_host,
+                      sizeof(numeric_host), numeric_service,
+                      sizeof(numeric_service),
+                      NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+      continue;
+    }
+    const std::string key = std::to_string(current->ai_family) + ":" +
+                            numeric_host + ":" + numeric_service;
+    if (!seen.insert(key).second) continue;
+
+    ResolvedTcpAddress address;
+    std::memcpy(&address.address_, current->ai_addr, current->ai_addrlen);
+    address.length_ = static_cast<socklen_t>(current->ai_addrlen);
+    address.display_ = current->ai_family == AF_INET6
+                           ? std::string("[") + numeric_host + "]:" +
+                                 numeric_service
+                           : std::string(numeric_host) + ":" + numeric_service;
+    resolved.push_back(std::move(address));
+  }
+  ::freeaddrinfo(addresses);
+  if (resolved.empty()) {
+    return absl::InvalidArgumentError(
+        std::string("bind address has no IPv4 or IPv6 results: ") + host_text);
+  }
+  return resolved;
+}
 
 absl::Status ListenerAcceptState::Arm() {
   if (armed_) {
@@ -195,6 +255,14 @@ int TcpListener::NativeFd() const noexcept { return fd_; }
 absl::Status TcpListener::Bind(Worker* worker, std::string_view ip,
                                std::uint16_t port, int backlog,
                                bool reuse_port) {
+  auto addresses = ResolveTcpAddresses(ip, port);
+  if (!addresses.ok()) return addresses.status();
+  return Bind(worker, addresses->front(), backlog, reuse_port);
+}
+
+absl::Status TcpListener::Bind(Worker* worker,
+                               const ResolvedTcpAddress& address, int backlog,
+                               bool reuse_port) {
   if (IsOpen()) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "listener is already open");
@@ -204,7 +272,11 @@ absl::Status TcpListener::Bind(Worker* worker, std::string_view ip,
                         "worker must not be null");
   }
 
-  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  const int family = address.address_.ss_family;
+  if (family != AF_INET && family != AF_INET6) {
+    return absl::InvalidArgumentError("unsupported bind address family");
+  }
+  const int fd = ::socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
     return ErrnoToStatus(errno, "socket failed");
   }
@@ -222,16 +294,18 @@ absl::Status TcpListener::Bind(Worker* worker, std::string_view ip,
     return status;
   }
 
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  if (::inet_pton(AF_INET, std::string(ip).c_str(), &addr.sin_addr) != 1) {
-    ::close(fd);
-    return absl::Status(absl::StatusCode::kInvalidArgument,
-                        "invalid IPv4 address");
+  if (family == AF_INET6) {
+    int ipv6_only = 1;
+    if (::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only,
+                     sizeof(ipv6_only)) != 0) {
+      const auto status = ErrnoToStatus(errno, "setsockopt(IPV6_V6ONLY) failed");
+      ::close(fd);
+      return status;
+    }
   }
 
-  if (::bind(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+  if (::bind(fd, reinterpret_cast<const sockaddr*>(&address.address_),
+             address.length_) != 0) {
     const auto status = ErrnoToStatus(errno, "bind failed");
     ::close(fd);
     return status;

@@ -17,7 +17,8 @@
 #ifndef CELER_NET_SERVICE_H_
 #define CELER_NET_SERVICE_H_
 
-#include <string_view>
+#include <span>
+#include <string>
 
 #include "absl/status/statusor.h"
 #include "celer/runtime/task.h"
@@ -28,7 +29,7 @@ class Worker;
 
 // Host-level binding config handed to a service when it starts on a worker.
 struct ServiceContext {
-  std::string_view bind_ip_;
+  std::span<const std::string> bind_addresses_;
   bool reuse_port_ = false;
 };
 

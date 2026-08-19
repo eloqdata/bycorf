@@ -17,10 +17,14 @@
 #ifndef CELER_NET_TCP_LISTENER_H_
 #define CELER_NET_TCP_LISTENER_H_
 
+#include <sys/socket.h>
+
 #include <coroutine>
 #include <cstdint>
 #include <deque>
 #include <string_view>
+#include <string>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "celer/io/completion.h"
@@ -32,6 +36,15 @@ namespace celer {
 class Worker;
 class TcpListener;
 class AcceptAwaitable;
+
+struct ResolvedTcpAddress {
+  sockaddr_storage address_{};
+  socklen_t length_ = 0;
+  std::string display_;
+};
+
+absl::StatusOr<std::vector<ResolvedTcpAddress>> ResolveTcpAddresses(
+    std::string_view host, std::uint16_t port);
 
 class ListenerAcceptState final : public IoCompletion {
  public:
@@ -71,6 +84,8 @@ class TcpListener {
   int NativeFd() const noexcept;
 
   absl::Status Bind(Worker* worker, std::string_view ip, std::uint16_t port,
+                    int backlog = 128, bool reuse_port = false);
+  absl::Status Bind(Worker* worker, const ResolvedTcpAddress& address,
                     int backlog = 128, bool reuse_port = false);
   // Accept a socket without registering it with the accepting worker. This is
   // used by TcpService to hand a fresh socket to its selected owner before any

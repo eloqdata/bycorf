@@ -16,6 +16,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(celer VERSION 0.1.0 LANGUAGES C CXX)
 
+find_package(OpenSSL REQUIRED)
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -129,6 +131,7 @@ add_library(celer
   src/runtime/runtime.cpp
   src/net/tcp_listener.cpp
   src/net/tcp_stream.cpp
+  src/net/tls.cpp
 )
 
 if (CELER_WITH_SPDK_STORAGE)
@@ -229,6 +232,7 @@ target_link_libraries(celer PUBLIC
   absl::status
   absl::statusor
 )
+target_link_libraries(celer PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 if (CELER_WITH_DPDK)
   target_compile_definitions(celer PUBLIC CELER_WITH_DPDK)
