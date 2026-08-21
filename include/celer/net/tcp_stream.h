@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "absl/status/statusor.h"
@@ -48,18 +49,19 @@ class TcpStream {
 
   bool IsOpen() const noexcept;
   int NativeFd() const noexcept;
+  // Numeric peer endpoint. IPv6 uses [host]:port so callers can pass the
+  // result back as an unambiguous endpoint.
+  absl::StatusOr<std::string> PeerAddress() const;
 
   Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
   Task<absl::StatusOr<std::size_t>> WriteSome(
       std::span<const std::byte> buffer);
-  Task<absl::StatusOr<std::size_t>> WriteSomeV(
-      std::span<const iovec> buffers);
+  Task<absl::StatusOr<std::size_t>> WriteSomeV(std::span<const iovec> buffers);
   Task<absl::Status> WriteAll(std::span<const std::byte> buffer);
   Task<absl::Status> WriteAllV(std::span<const iovec> buffers);
 
-  Task<absl::Status> StartTls(
-      const std::shared_ptr<TlsContext>& context, bool server,
-      std::string_view peer_name = {});
+  Task<absl::Status> StartTls(const std::shared_ptr<TlsContext>& context,
+                              bool server, std::string_view peer_name = {});
   Task<absl::Status> ShutdownTls();
   bool IsTls() const noexcept { return tls_ != nullptr; }
 
@@ -79,8 +81,7 @@ class TcpStream {
  private:
   friend class TlsState;
 
-  Task<absl::StatusOr<std::size_t>> ReadRawSome(
-      std::span<std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> ReadRawSome(std::span<std::byte> buffer);
   Task<absl::StatusOr<std::size_t>> WriteRawSome(
       std::span<const std::byte> buffer);
   Task<absl::StatusOr<std::size_t>> WriteRawSomeV(

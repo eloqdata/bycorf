@@ -187,6 +187,25 @@ if (CELER_WITH_SPDK_STORAGE)
     "${CELER_SPDK_LINK_FLAGS_RAW}")
   list(FILTER CELER_SPDK_LINK_FLAGS EXCLUDE REGEX
     "^(-pthread|-lm|-ldl|-lnuma)$")
+  # spdk_nvme/spdk_env_dpdk do not propagate the ISA-L archives from
+  # spdk_syslibs.pc. They provide CRC/XOR symbols used by libspdk_util, so
+  # retain the non-`-l` archive entries without pulling OpenSSL and other
+  # system libraries into --whole-archive.
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
+      "${CELER_PKG_CONFIG_EXECUTABLE}" --libs-only-other --static
+      spdk_syslibs
+    OUTPUT_VARIABLE CELER_SPDK_SYSTEM_ARCHIVES_RAW
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE CELER_SPDK_SYSTEM_ARCHIVES_RESULT
+  )
+  if (NOT CELER_SPDK_SYSTEM_ARCHIVES_RESULT EQUAL 0)
+    message(FATAL_ERROR "pkg-config could not resolve SPDK system archives")
+  endif()
+  separate_arguments(CELER_SPDK_SYSTEM_ARCHIVES NATIVE_COMMAND
+    "${CELER_SPDK_SYSTEM_ARCHIVES_RAW}")
+  list(FILTER CELER_SPDK_SYSTEM_ARCHIVES EXCLUDE REGEX "^-pthread$")
   target_sources(celer PRIVATE src/io/spdk_storage.cpp)
   target_compile_definitions(celer PUBLIC CELER_WITH_SPDK_STORAGE=1)
   target_include_directories(celer SYSTEM PUBLIC
@@ -202,6 +221,10 @@ if (CELER_WITH_SPDK_STORAGE)
     "-Wl,-Bstatic"
     ${CELER_SPDK_LINK_FLAGS}
     "-Wl,--no-whole-archive"
+    # ISA-L exports a generic gf_mul symbol that OpenSSL also defines. Keep
+    # these archives outside --whole-archive so only SPDK's referenced CRC/XOR
+    # objects are selected.
+    ${CELER_SPDK_SYSTEM_ARCHIVES}
     "-Wl,-Bdynamic"
     OpenSSL::SSL
     OpenSSL::Crypto

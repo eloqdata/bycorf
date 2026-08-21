@@ -16,6 +16,8 @@
 
 #include "celer/net/tcp_stream.h"
 
+#include <netdb.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -49,6 +51,27 @@ absl::Status ErrnoToStatus(int err, const char* operation) {
     default:
       return absl::Status(absl::StatusCode::kUnknown, operation);
   }
+}
+
+absl::StatusOr<std::string> FormatPeerAddress(int fd) {
+  sockaddr_storage address{};
+  socklen_t address_size = sizeof(address);
+  if (::getpeername(fd, reinterpret_cast<sockaddr*>(&address), &address_size) !=
+      0) {
+    return ErrnoToStatus(errno, "getpeername failed");
+  }
+  char host[NI_MAXHOST];
+  char service[NI_MAXSERV];
+  const int result = ::getnameinfo(
+      reinterpret_cast<const sockaddr*>(&address), address_size, host,
+      sizeof(host), service, sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV);
+  if (result != 0) {
+    return absl::UnknownError(gai_strerror(result));
+  }
+  if (address.ss_family == AF_INET6) {
+    return std::string("[") + host + "]:" + service;
+  }
+  return std::string(host) + ":" + service;
 }
 
 class ReadOperation final : public IoCompletion {
@@ -256,7 +279,7 @@ class WriteVOperation final : public IoCompletion {
     message_.msg_iov = const_cast<iovec*>(buffers_.data());
     message_.msg_iovlen = buffers_.size();
     auto status = connection_->worker_->SubmitSendMsg(connection_->file_,
-                                                       &message_, this);
+                                                      &message_, this);
     if (!status.ok()) {
       result_ = -EAGAIN;
       return false;
@@ -352,6 +375,14 @@ int TcpStream::NativeFd() const noexcept {
   return connection_ == nullptr ? -1 : connection_->file_.fd_;
 }
 
+absl::StatusOr<std::string> TcpStream::PeerAddress() const {
+  if (!IsOpen()) {
+    return absl::FailedPreconditionError(
+        "cannot inspect the peer of a closed stream");
+  }
+  return FormatPeerAddress(NativeFd());
+}
+
 Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(
     std::span<std::byte> buffer) {
   if (tls_ != nullptr) {
@@ -384,9 +415,9 @@ Task<absl::StatusOr<std::size_t>> TcpStream::WriteSomeV(
     for (const iovec& buffer : buffers) {
       if (buffer.iov_len == 0) continue;
       co_return co_await tls_->WriteSome(
-          *this, std::span<const std::byte>(
-                     static_cast<const std::byte*>(buffer.iov_base),
-                     buffer.iov_len));
+          *this,
+          std::span<const std::byte>(
+              static_cast<const std::byte*>(buffer.iov_base), buffer.iov_len));
     }
     co_return std::size_t{0};
   }
@@ -398,8 +429,7 @@ Task<absl::StatusOr<std::size_t>> TcpStream::WriteRawSomeV(
   co_return co_await WriteVOperation(connection_, buffers);
 }
 
-Task<absl::Status> TcpStream::WriteRawAll(
-    std::span<const std::byte> buffer) {
+Task<absl::Status> TcpStream::WriteRawAll(std::span<const std::byte> buffer) {
   std::size_t written = 0;
   while (written < buffer.size()) {
     auto result = co_await WriteRawSome(buffer.subspan(written));
@@ -437,16 +467,15 @@ Task<absl::Status> TcpStream::WriteAllV(std::span<const iovec> buffers) {
 
   std::size_t first = 0;
   while (first < remaining.size()) {
-    auto result = co_await WriteSomeV(
-        std::span<const iovec>(remaining).subspan(first));
+    auto result =
+        co_await WriteSomeV(std::span<const iovec>(remaining).subspan(first));
     if (!result.ok()) co_return result.status();
     if (*result == 0) {
       co_return absl::Status(absl::StatusCode::kInternal,
                              "WriteSomeV returned 0");
     }
     std::size_t written = *result;
-    while (first < remaining.size() &&
-           written >= remaining[first].iov_len) {
+    while (first < remaining.size() && written >= remaining[first].iov_len) {
       written -= remaining[first].iov_len;
       ++first;
     }
@@ -465,8 +494,7 @@ Task<absl::Status> TcpStream::WriteAllV(std::span<const iovec> buffers) {
 Task<absl::Status> TcpStream::StartTls(
     const std::shared_ptr<TlsContext>& context, bool server,
     std::string_view peer_name) {
-  if (connection_ == nullptr || connection_->worker_ == nullptr ||
-      !IsOpen()) {
+  if (connection_ == nullptr || connection_->worker_ == nullptr || !IsOpen()) {
     co_return absl::FailedPreconditionError(
         "cannot start TLS on a closed stream");
   }
