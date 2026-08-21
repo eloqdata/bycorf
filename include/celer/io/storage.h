@@ -133,6 +133,7 @@ class FileStatusAwaitable final : public OneShotIoAwaitable {
   Worker* worker_ = nullptr;
   FixedFile file_{};
   Operation operation_ = Operation::kClose;
+  std::uint64_t durability_target_bytes_ = 0;
 };
 
 class TimeoutAwaitable final : public OneShotIoAwaitable {

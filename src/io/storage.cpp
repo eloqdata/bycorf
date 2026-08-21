@@ -174,7 +174,18 @@ absl::StatusOr<std::size_t> SizeIoAwaitable::await_resume() {
   if (!result.ok()) {
     return result.status();
   }
-  return static_cast<std::size_t>(*result);
+  const std::size_t bytes = static_cast<std::size_t>(*result);
+  switch (operation_) {
+    case Operation::kRead:
+    case Operation::kReadFixed:
+      worker_->RecordStorageReadCompletion(bytes);
+      break;
+    case Operation::kWrite:
+    case Operation::kWriteFixed:
+      worker_->RecordStorageWriteCompletion(bytes);
+      break;
+  }
+  return bytes;
 }
 
 OpenFixedFileAwaitable::OpenFixedFileAwaitable(Worker& worker, std::string path,
@@ -204,6 +215,9 @@ bool FileStatusAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
   absl::Status status = operation_ == Operation::kClose
                             ? worker_->SubmitCloseDirect(file_, this)
                             : worker_->SubmitFdatasync(file_, this);
+  if (status.ok() && operation_ == Operation::kFdatasync) {
+    durability_target_bytes_ = worker_->StorageWriteSubmissionBytes(file_);
+  }
   return Suspend(awaiting, std::move(status));
 }
 
@@ -211,6 +225,9 @@ absl::Status FileStatusAwaitable::await_resume() {
   auto result =
       Resume(operation_ == Operation::kClose ? "close fixed file failed"
                                              : "fixed-file fdatasync failed");
+  if (result.ok() && operation_ == Operation::kFdatasync) {
+    worker_->RecordFdatasyncCompletion(file_, durability_target_bytes_);
+  }
   return result.ok() ? absl::OkStatus() : result.status();
 }
 

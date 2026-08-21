@@ -466,6 +466,41 @@ bool Worker::BackgroundBudgetExpired() const noexcept {
          CycleNow() >= background_deadline_cycles_;
 }
 
+absl::Status Worker::SetForegroundBudgetUs(unsigned microseconds) noexcept {
+  if (microseconds == 0) {
+    return absl::InvalidArgumentError(
+        "foreground budget must be a positive number of microseconds");
+  }
+  options_.foreground_budget_us_ = microseconds;
+  foreground_budget_cycles_ =
+      CyclesFromMicroseconds(cycle_frequency_, microseconds);
+  return absl::OkStatus();
+}
+
+absl::Status Worker::SetBackgroundBudgetUs(unsigned microseconds) noexcept {
+  if (microseconds == 0) {
+    return absl::InvalidArgumentError(
+        "background budget must be a positive number of microseconds");
+  }
+  options_.background_budget_us_ = microseconds;
+  background_budget_cycles_ =
+      CyclesFromMicroseconds(cycle_frequency_, microseconds);
+  return absl::OkStatus();
+}
+
+absl::Status Worker::SetBackgroundWarrantPercent(unsigned percent) noexcept {
+  if (percent == 0 || percent > 100) {
+    return absl::InvalidArgumentError(
+        "background warrant percent must be between 1 and 100");
+  }
+  options_.background_warrant_percent_ = percent;
+  return absl::OkStatus();
+}
+
+void Worker::SetSpdkMaxCompletionsPerPoll(unsigned completions) noexcept {
+  options_.spdk_max_completions_per_poll_ = completions;
+}
+
 void Worker::ResumeReady(ReadyTask ready, TaskClass task_class) {
   auto handle = ready.handle_;
   if (handle.done()) {
@@ -584,6 +619,38 @@ Worker::SchedulerStats Worker::TakeSchedulerStats() noexcept {
   result.cycles_per_second_ = cycle_frequency_;
   scheduler_stats_.cycles_per_second_ = cycle_frequency_;
   return result;
+}
+
+void Worker::RecordStorageReadCompletion(std::size_t bytes) noexcept {
+  ++storage_io_stats_.read_operations_;
+  storage_io_stats_.read_bytes_ += bytes;
+}
+
+void Worker::RecordStorageWriteCompletion(std::size_t bytes) noexcept {
+  ++storage_io_stats_.write_operations_;
+  storage_io_stats_.write_bytes_ += bytes;
+}
+
+std::uint64_t Worker::StorageWriteSubmissionBytes(
+    FixedFile file) const noexcept {
+  if (file.index_ >= storage_file_io_stats_.size()) [[unlikely]] {
+    return 0;
+  }
+  return storage_file_io_stats_[file.index_].submitted_write_bytes_;
+}
+
+void Worker::RecordFdatasyncCompletion(FixedFile file,
+                                       std::uint64_t write_bytes) noexcept {
+  ++storage_io_stats_.fdatasync_operations_;
+  if (file.index_ >= storage_file_io_stats_.size()) [[unlikely]] {
+    return;
+  }
+  StorageFileIoStats &stats = storage_file_io_stats_[file.index_];
+  if (write_bytes > stats.durable_write_bytes_) {
+    storage_io_stats_.fdatasync_bytes_ +=
+        write_bytes - stats.durable_write_bytes_;
+    stats.durable_write_bytes_ = write_bytes;
+  }
 }
 
 bool Worker::CanReclaim(const Connection &connection) const noexcept {

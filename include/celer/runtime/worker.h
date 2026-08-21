@@ -94,6 +94,17 @@ class Worker {
     double cycles_per_second_ = 0.0;
   };
 
+  struct StorageIoStats {
+    std::uint64_t read_operations_ = 0;
+    std::uint64_t read_bytes_ = 0;
+    std::uint64_t write_operations_ = 0;
+    std::uint64_t write_bytes_ = 0;
+    std::uint64_t fdatasync_operations_ = 0;
+    // Bytes submitted before successful fdatasync barriers. This is logical
+    // durability throughput, not an NVMe-reported physical transfer count.
+    std::uint64_t fdatasync_bytes_ = 0;
+  };
+
   struct ReadyTask {
     std::coroutine_handle<> handle_{};
     bool destroy_when_done_ = false;
@@ -132,6 +143,26 @@ class Worker {
   bool IsBackground(std::coroutine_handle<> handle) const noexcept;
   bool BackgroundBudgetExpired() const noexcept;
 
+  // Scheduler knobs are changed on the owning worker through SubmitTaskTo.
+  // Updating both the reader-facing option and its precomputed cycle budget
+  // there keeps RunOnce lock-free while allowing CONFIG SET at runtime.
+  absl::Status SetForegroundBudgetUs(unsigned microseconds) noexcept;
+  absl::Status SetBackgroundBudgetUs(unsigned microseconds) noexcept;
+  absl::Status SetBackgroundWarrantPercent(unsigned percent) noexcept;
+  void SetSpdkMaxCompletionsPerPoll(unsigned completions) noexcept;
+  unsigned foreground_budget_us() const noexcept {
+    return options_.foreground_budget_us_;
+  }
+  unsigned background_budget_us() const noexcept {
+    return options_.background_budget_us_;
+  }
+  unsigned background_warrant_percent() const noexcept {
+    return options_.background_warrant_percent_;
+  }
+  unsigned spdk_max_completions_per_poll() const noexcept {
+    return options_.spdk_max_completions_per_poll_;
+  }
+
   bool RunOnce(bool wait_for_completion);
   void Run();
   void RequestStop() noexcept;
@@ -150,6 +181,16 @@ class Worker {
     return result;
   }
   SchedulerStats TakeSchedulerStats() noexcept;
+
+  // Storage completions run on the owning worker. These counters and the
+  // per-file durability watermarks therefore need no atomics; metrics
+  // collection copies them on that worker through SubmitTo.
+  StorageIoStats storage_io_stats() const noexcept { return storage_io_stats_; }
+  void RecordStorageReadCompletion(std::size_t bytes) noexcept;
+  void RecordStorageWriteCompletion(std::size_t bytes) noexcept;
+  std::uint64_t StorageWriteSubmissionBytes(FixedFile file) const noexcept;
+  void RecordFdatasyncCompletion(FixedFile file,
+                                 std::uint64_t write_bytes) noexcept;
 
   // Typed io submissions, forwarded to the backend (keeps io_uring out of the
   // net layer). recv multishot is driven by EnsureRecvArmed; its completions
@@ -185,10 +226,14 @@ class Worker {
 
   absl::Status RegisterFixedFiles(unsigned count) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.RegisterFixedFiles(count);
+    absl::Status status = storage_backend_.RegisterFixedFiles(count);
 #else
-    return backend_.RegisterFixedFiles(count);
+    absl::Status status = backend_.RegisterFixedFiles(count);
 #endif
+    if (status.ok()) {
+      storage_file_io_stats_.assign(count, StorageFileIoStats{});
+    }
+    return status;
   }
   absl::Status RegisterBuffers(std::span<const iovec> buffers) {
 #ifdef CELER_WITH_SPDK_STORAGE
@@ -231,18 +276,30 @@ class Worker {
   absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                            std::uint64_t offset, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.SubmitWrite(file, buffer, offset, tag);
+    absl::Status status =
+        storage_backend_.SubmitWrite(file, buffer, offset, tag);
 #else
-    return backend_.SubmitWrite(file, buffer, offset, tag);
+    absl::Status status = backend_.SubmitWrite(file, buffer, offset, tag);
 #endif
+    if (status.ok() && file.index_ < storage_file_io_stats_.size()) {
+      storage_file_io_stats_[file.index_].submitted_write_bytes_ +=
+          buffer.size();
+    }
+    return status;
   }
   absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                                 std::uint64_t offset, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.SubmitWriteFixed(file, buffer, offset, tag);
+    absl::Status status =
+        storage_backend_.SubmitWriteFixed(file, buffer, offset, tag);
 #else
-    return backend_.SubmitWriteFixed(file, buffer, offset, tag);
+    absl::Status status = backend_.SubmitWriteFixed(file, buffer, offset, tag);
 #endif
+    if (status.ok() && file.index_ < storage_file_io_stats_.size()) {
+      storage_file_io_stats_[file.index_].submitted_write_bytes_ +=
+          buffer.size_;
+    }
+    return status;
   }
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
@@ -279,6 +336,11 @@ class Worker {
   void SpawnBackground(Task<absl::Status> task);
 
  private:
+  struct StorageFileIoStats {
+    std::uint64_t submitted_write_bytes_ = 0;
+    std::uint64_t durable_write_bytes_ = 0;
+  };
+
   std::size_t DrainReadyUntil(std::int64_t deadline_cycles);
   std::size_t DrainBackgroundUntil(std::int64_t deadline_cycles);
   void RunRemoteWork(RemoteWork* work);
@@ -339,6 +401,8 @@ class Worker {
   std::int64_t background_deadline_cycles_ = 0;
   double cycle_frequency_ = 0.0;
   SchedulerStats scheduler_stats_{};
+  StorageIoStats storage_io_stats_{};
+  std::vector<StorageFileIoStats> storage_file_io_stats_;
 };
 
 class YieldAwaiter {
