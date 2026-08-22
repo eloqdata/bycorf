@@ -39,6 +39,10 @@
 #include "celer/runtime/concurrentqueue.h"
 #include "celer/runtime/task.h"
 
+#ifndef CELER_ENABLE_SUBMIT_TASK_COUNT
+#define CELER_ENABLE_SUBMIT_TASK_COUNT 0
+#endif
+
 namespace celer {
 
 class Worker;
@@ -219,6 +223,15 @@ inline CurrentWorker& MutableThisWorker() noexcept {
 inline const CurrentWorker& ThisWorker() noexcept {
   return MutableThisWorker();
 }
+
+#if CELER_ENABLE_SUBMIT_TASK_COUNT
+inline thread_local std::uint64_t g_local_submit_task_count = 0;
+
+inline std::uint64_t LocalSubmitTaskCount() noexcept {
+  return g_local_submit_task_count;
+}
+#endif
+
 inline void SetThisWorker(WorkerId id, CrossCore* cross_core,
                           Worker* self) noexcept {
   CurrentWorker& w = MutableThisWorker();
@@ -417,6 +430,11 @@ class SubmitTaskAwaiter : public RemoteWork {
 // and must return Task<R>; awaiting SubmitTaskTo yields R on the origin worker.
 template <typename Fn>
 auto SubmitTaskTo(unsigned target, Fn fn) {
+#if CELER_ENABLE_SUBMIT_TASK_COUNT
+  if (target != ThisWorker().id_) {
+    ++g_local_submit_task_count;
+  }
+#endif
   return SubmitTaskAwaiter<Fn>(target, std::move(fn));
 }
 
