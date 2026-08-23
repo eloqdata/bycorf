@@ -53,6 +53,8 @@ absl::Status WriteSpdkStorage(std::string_view,
                       "SPDK storage is not compiled in");
 }
 
+void ReleaseSpdkStorageMetadataQpairs() noexcept {}
+
 void* AllocateStorageBuffer(std::size_t bytes,
                             std::size_t alignment) noexcept {
   return ::operator new[](bytes, std::align_val_t(alignment), std::nothrow);

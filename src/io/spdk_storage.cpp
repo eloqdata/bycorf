@@ -48,28 +48,36 @@ struct ParsedPath {
   std::string canonical_;
 };
 
+struct SpdkController {
+  std::string traddr_;
+  spdk_nvme_ctrlr* ctrlr_ = nullptr;
+  spdk_nvme_qpair* sync_qpair_ = nullptr;
+  unsigned io_queue_count_ = 0;
+  std::mutex sync_mutex_;
+};
+
 struct SpdkDevice {
   std::string path_;
   std::string traddr_;
   std::uint32_t nsid_ = 1;
-  spdk_nvme_ctrlr* ctrlr_ = nullptr;
+  SpdkController* controller_ = nullptr;
   spdk_nvme_ns* ns_ = nullptr;
-  spdk_nvme_qpair* sync_qpair_ = nullptr;
   std::uint32_t sector_size_ = 0;
   std::uint64_t size_bytes_ = 0;
-  std::mutex sync_mutex_;
 };
 
 struct ProbeContext {
   std::string traddr_;
   std::uint32_t nsid_ = 1;
   spdk_nvme_ctrlr* ctrlr_ = nullptr;
+  unsigned io_queue_count_ = 0;
 };
 
 std::mutex g_spdk_mutex;
 bool g_spdk_initialized = false;
 std::unordered_map<std::string, std::unique_ptr<SpdkDevice>> g_spdk_devices;
-std::unordered_map<std::string, spdk_nvme_ctrlr*> g_spdk_controllers;
+std::unordered_map<std::string, std::unique_ptr<SpdkController>>
+    g_spdk_controllers;
 
 absl::StatusOr<ParsedPath> ParsePath(std::string_view path) {
   if (!path.starts_with(kSpdkPrefix)) {
@@ -162,10 +170,11 @@ bool ProbeCallback(void* context, const spdk_nvme_transport_id* trid,
 
 void AttachCallback(void* context, const spdk_nvme_transport_id* trid,
                     spdk_nvme_ctrlr* ctrlr,
-                    const spdk_nvme_ctrlr_opts*) {
+                    const spdk_nvme_ctrlr_opts* options) {
   auto* probe = static_cast<ProbeContext*>(context);
   if (probe->traddr_ == trid->traddr) {
     probe->ctrlr_ = ctrlr;
+    probe->io_queue_count_ = options->num_io_queues;
   }
 }
 
@@ -184,10 +193,10 @@ absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
     return initialized;
   }
 
-  spdk_nvme_ctrlr* ctrlr = nullptr;
+  SpdkController* controller = nullptr;
   auto known = g_spdk_controllers.find(parsed->traddr_);
   if (known != g_spdk_controllers.end()) {
-    ctrlr = known->second;
+    controller = known->second.get();
   } else {
     spdk_nvme_transport_id trid{};
     trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
@@ -202,11 +211,21 @@ absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
                           "SPDK could not attach NVMe controller " +
                               parsed->traddr_);
     }
-    ctrlr = context.ctrlr_;
-    g_spdk_controllers.emplace(parsed->traddr_, ctrlr);
+    auto attached = std::make_unique<SpdkController>();
+    attached->traddr_ = parsed->traddr_;
+    attached->ctrlr_ = context.ctrlr_;
+    attached->io_queue_count_ = context.io_queue_count_;
+    attached->sync_qpair_ =
+        spdk_nvme_ctrlr_alloc_io_qpair(attached->ctrlr_, nullptr, 0);
+    if (attached->sync_qpair_ == nullptr) {
+      return absl::Status(absl::StatusCode::kResourceExhausted,
+                          "SPDK failed to allocate metadata I/O qpair");
+    }
+    controller = attached.get();
+    g_spdk_controllers.emplace(parsed->traddr_, std::move(attached));
   }
 
-  spdk_nvme_ns* ns = spdk_nvme_ctrlr_get_ns(ctrlr, parsed->nsid_);
+  spdk_nvme_ns* ns = spdk_nvme_ctrlr_get_ns(controller->ctrlr_, parsed->nsid_);
   if (ns == nullptr || !spdk_nvme_ns_is_active(ns)) {
     return absl::Status(absl::StatusCode::kNotFound,
                         "SPDK NVMe namespace is not active: " +
@@ -221,15 +240,10 @@ absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
   device->path_ = parsed->canonical_;
   device->traddr_ = parsed->traddr_;
   device->nsid_ = parsed->nsid_;
-  device->ctrlr_ = ctrlr;
+  device->controller_ = controller;
   device->ns_ = ns;
   device->sector_size_ = sector_size;
   device->size_bytes_ = spdk_nvme_ns_get_size(ns);
-  device->sync_qpair_ = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, nullptr, 0);
-  if (device->sync_qpair_ == nullptr) {
-    return absl::Status(absl::StatusCode::kResourceExhausted,
-                        "SPDK failed to allocate metadata I/O qpair");
-  }
   SpdkDevice* raw = device.get();
   g_spdk_devices.emplace(parsed->canonical_, std::move(device));
   return raw;
@@ -260,19 +274,24 @@ absl::Status SubmitSync(SpdkDevice& device, void* buffer, std::size_t bytes,
   const std::uint64_t lba = offset / device.sector_size_;
   const std::uint32_t lba_count =
       static_cast<std::uint32_t>(bytes / device.sector_size_);
+  SpdkController& controller = *device.controller_;
+  if (controller.sync_qpair_ == nullptr) {
+    return absl::Status(absl::StatusCode::kFailedPrecondition,
+                        "SPDK metadata qpair has already been released");
+  }
   SyncCompletion completion;
-  int rc = write ? spdk_nvme_ns_cmd_write(device.ns_, device.sync_qpair_,
-                                           buffer, lba, lba_count, CompleteSync,
-                                           &completion, 0)
-                 : spdk_nvme_ns_cmd_read(device.ns_, device.sync_qpair_, buffer,
-                                          lba, lba_count, CompleteSync,
-                                          &completion, 0);
+  int rc =
+      write
+          ? spdk_nvme_ns_cmd_write(device.ns_, controller.sync_qpair_, buffer,
+                                   lba, lba_count, CompleteSync, &completion, 0)
+          : spdk_nvme_ns_cmd_read(device.ns_, controller.sync_qpair_, buffer,
+                                  lba, lba_count, CompleteSync, &completion, 0);
   if (rc != 0) {
     return absl::Status(absl::StatusCode::kUnavailable,
                         "SPDK metadata I/O submission failed");
   }
   while (!completion.done_) {
-    if (spdk_nvme_qpair_process_completions(device.sync_qpair_, 0) < 0) {
+    if (spdk_nvme_qpair_process_completions(controller.sync_qpair_, 0) < 0) {
       return absl::Status(absl::StatusCode::kUnavailable,
                           "SPDK metadata qpair failed");
     }
@@ -285,14 +304,14 @@ absl::Status SubmitSync(SpdkDevice& device, void* buffer, std::size_t bytes,
     return absl::OkStatus();
   }
   completion = {};
-  rc = spdk_nvme_ns_cmd_flush(device.ns_, device.sync_qpair_, CompleteSync,
+  rc = spdk_nvme_ns_cmd_flush(device.ns_, controller.sync_qpair_, CompleteSync,
                               &completion);
   if (rc != 0) {
     return absl::Status(absl::StatusCode::kUnavailable,
                         "SPDK metadata flush submission failed");
   }
   while (!completion.done_) {
-    if (spdk_nvme_qpair_process_completions(device.sync_qpair_, 0) < 0) {
+    if (spdk_nvme_qpair_process_completions(controller.sync_qpair_, 0) < 0) {
       return absl::Status(absl::StatusCode::kUnavailable,
                           "SPDK metadata flush qpair failed");
     }
@@ -315,8 +334,22 @@ absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(
   if (!device.ok()) {
     return device.status();
   }
-  return SpdkStorageDeviceInfo{.io_alignment_ = (*device)->sector_size_,
-                               .size_bytes_ = (*device)->size_bytes_};
+  return SpdkStorageDeviceInfo{
+      .io_alignment_ = (*device)->sector_size_,
+      .size_bytes_ = (*device)->size_bytes_,
+      .controller_id_ = (*device)->controller_->traddr_,
+      .io_queue_count_ = (*device)->controller_->io_queue_count_};
+}
+
+void ReleaseSpdkStorageMetadataQpairs() noexcept {
+  std::lock_guard<std::mutex> lock(g_spdk_mutex);
+  for (auto& [_, controller] : g_spdk_controllers) {
+    std::lock_guard<std::mutex> controller_lock(controller->sync_mutex_);
+    if (controller->sync_qpair_ != nullptr) {
+      spdk_nvme_ctrlr_free_io_qpair(controller->sync_qpair_);
+      controller->sync_qpair_ = nullptr;
+    }
+  }
 }
 
 absl::Status ReadSpdkStorage(std::string_view path,
@@ -331,7 +364,7 @@ absl::Status ReadSpdkStorage(std::string_view path,
     return absl::Status(absl::StatusCode::kResourceExhausted,
                         "SPDK metadata DMA allocation failed");
   }
-  std::lock_guard<std::mutex> lock((*device)->sync_mutex_);
+  std::lock_guard<std::mutex> lock((*device)->controller_->sync_mutex_);
   absl::Status status =
       SubmitSync(**device, dma, output.size(), offset, false, false);
   if (status.ok()) {
@@ -354,7 +387,7 @@ absl::Status WriteSpdkStorage(std::string_view path,
                         "SPDK metadata DMA allocation failed");
   }
   std::memcpy(dma, input.data(), input.size());
-  std::lock_guard<std::mutex> lock((*device)->sync_mutex_);
+  std::lock_guard<std::mutex> lock((*device)->controller_->sync_mutex_);
   absl::Status status =
       SubmitSync(**device, dma, input.size(), offset, true, flush);
   spdk_dma_free(dma);
@@ -414,17 +447,18 @@ void SpdkStorageBackend::Shutdown() {
   while (outstanding_ != 0) {
     Poll();
   }
-  for (OpenFile& file : files_) {
-    if (file.qpair_ != nullptr) {
-      spdk_nvme_ctrlr_free_io_qpair(file.qpair_);
-      file.qpair_ = nullptr;
+  for (ControllerChannel& channel : channels_) {
+    if (channel.qpair_ != nullptr) {
+      spdk_nvme_ctrlr_free_io_qpair(channel.qpair_);
+      channel.qpair_ = nullptr;
     }
   }
   files_.clear();
+  channels_.clear();
   pending_completions_.clear();
   request_pool_.clear();
   free_requests_ = nullptr;
-  next_poll_file_ = 0;
+  next_poll_channel_ = 0;
   worker_ = nullptr;
   initialized_ = false;
 }
@@ -493,14 +527,25 @@ absl::Status SpdkStorageBackend::SubmitOpenDirect(
     return absl::Status(absl::StatusCode::kAlreadyExists,
                         "SPDK fixed file is already open");
   }
-  opened.device_ = *device;
-  opened.qpair_ =
-      spdk_nvme_ctrlr_alloc_io_qpair((*device)->ctrlr_, nullptr, 0);
-  if (opened.qpair_ == nullptr) {
-    opened.device_ = nullptr;
-    return absl::Status(absl::StatusCode::kResourceExhausted,
-                        "SPDK failed to allocate worker I/O qpair");
+  SpdkController* controller = (*device)->controller_;
+  auto channel = std::find_if(channels_.begin(), channels_.end(),
+                              [controller](const ControllerChannel& candidate) {
+                                return candidate.controller_ == controller;
+                              });
+  if (channel == channels_.end()) {
+    spdk_nvme_qpair* qpair =
+        spdk_nvme_ctrlr_alloc_io_qpair(controller->ctrlr_, nullptr, 0);
+    if (qpair == nullptr) {
+      return absl::Status(absl::StatusCode::kResourceExhausted,
+                          "SPDK failed to allocate worker I/O qpair");
+    }
+    channels_.push_back(ControllerChannel{
+        .controller_ = controller, .qpair_ = qpair, .open_files_ = 0});
+    channel = std::prev(channels_.end());
   }
+  opened.device_ = *device;
+  opened.qpair_ = channel->qpair_;
+  ++channel->open_files_;
   // The coroutine awaitable stores its continuation only after this submit
   // method returns.  Defer even immediately completed operations until Poll().
   pending_completions_.emplace_back(tag, 0);
@@ -514,7 +559,20 @@ absl::Status SpdkStorageBackend::SubmitCloseDirect(FixedFile file,
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "invalid or busy SPDK close request");
   }
-  spdk_nvme_ctrlr_free_io_qpair(opened->qpair_);
+  auto channel = std::find_if(channels_.begin(), channels_.end(),
+                              [opened](const ControllerChannel& candidate) {
+                                return candidate.qpair_ == opened->qpair_;
+                              });
+  assert(channel != channels_.end() && channel->open_files_ != 0);
+  if (--channel->open_files_ == 0) {
+    spdk_nvme_ctrlr_free_io_qpair(channel->qpair_);
+    channels_.erase(channel);
+    if (channels_.empty()) {
+      next_poll_channel_ = 0;
+    } else if (next_poll_channel_ >= channels_.size()) {
+      next_poll_channel_ %= channels_.size();
+    }
+  }
   *opened = {};
   pending_completions_.emplace_back(tag, 0);
   return absl::OkStatus();
@@ -627,13 +685,10 @@ SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
     result.did_work_ = true;
     result.completions_ = static_cast<std::uint32_t>(completions.size());
   }
-  const std::size_t file_count = files_.size();
-  for (std::size_t visited = 0; visited < file_count; ++visited) {
-    const std::size_t index = (next_poll_file_ + visited) % file_count;
-    OpenFile& file = files_[index];
-    if (file.qpair_ == nullptr) {
-      continue;
-    }
+  const std::size_t channel_count = channels_.size();
+  for (std::size_t visited = 0; visited < channel_count; ++visited) {
+    const std::size_t index = (next_poll_channel_ + visited) % channel_count;
+    ControllerChannel& channel = channels_[index];
     const unsigned remaining =
         max_completions == 0
             ? 0
@@ -641,16 +696,16 @@ SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
                    ? 0
                    : max_completions - result.completions_);
     if (max_completions != 0 && remaining == 0) {
-      next_poll_file_ = index;
+      next_poll_channel_ = index;
       break;
     }
     const int32_t completed =
-        spdk_nvme_qpair_process_completions(file.qpair_, remaining);
+        spdk_nvme_qpair_process_completions(channel.qpair_, remaining);
     if (completed > 0) {
       result.did_work_ = true;
       result.completions_ += static_cast<std::uint32_t>(completed);
     }
-    next_poll_file_ = (index + 1) % file_count;
+    next_poll_channel_ = (index + 1) % channel_count;
   }
   return result;
 }

@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -41,6 +42,8 @@ class Worker;
 struct SpdkStorageDeviceInfo {
   std::size_t io_alignment_ = 0;
   std::uint64_t size_bytes_ = 0;
+  std::string controller_id_;
+  unsigned io_queue_count_ = 0;
 };
 
 struct SpdkPollResult {
@@ -59,6 +62,9 @@ absl::Status ReadSpdkStorage(std::string_view path,
 absl::Status WriteSpdkStorage(std::string_view path,
                               std::span<const std::byte> input,
                               std::uint64_t offset, bool flush);
+// Releases the temporary qpairs used by synchronous metadata I/O. Call after
+// metadata preparation and before allocating per-worker qpairs.
+void ReleaseSpdkStorageMetadataQpairs() noexcept;
 
 // Storage buffers are ordinary aligned allocations in the io_uring build and
 // pinned DMA allocations in the SPDK build.
@@ -112,6 +118,12 @@ class SpdkStorageBackend {
     spdk_nvme_qpair* qpair_ = nullptr;
   };
 
+  struct ControllerChannel {
+    void* controller_ = nullptr;
+    spdk_nvme_qpair* qpair_ = nullptr;
+    unsigned open_files_ = 0;
+  };
+
   absl::Status SubmitIo(FixedFile file, void* buffer, std::size_t bytes,
                         std::uint64_t offset, bool write, IoCompletion* tag);
   OpenFile* Lookup(FixedFile file);
@@ -122,10 +134,11 @@ class SpdkStorageBackend {
 
   Worker* worker_ = nullptr;
   std::vector<OpenFile> files_;
+  std::vector<ControllerChannel> channels_;
   std::vector<std::pair<IoCompletion*, int>> pending_completions_;
   std::vector<AsyncRequest> request_pool_;
   AsyncRequest* free_requests_ = nullptr;
-  std::size_t next_poll_file_ = 0;
+  std::size_t next_poll_channel_ = 0;
   std::size_t outstanding_ = 0;
   bool initialized_ = false;
 };
