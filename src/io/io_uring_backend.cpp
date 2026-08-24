@@ -34,10 +34,13 @@ namespace celer {
 
 namespace {
 
-constexpr std::uintptr_t kMultishotTag =
-    1;                      // low-bit marker on a recv Connection*
+constexpr std::uintptr_t kRecvTag = 1;
+constexpr std::uintptr_t kPeerDisconnectTag = 2;
+constexpr std::uintptr_t kConnectionTagMask = 3;
+static_assert(alignof(Connection) > kConnectionTagMask);
 int kWakePollTag = 0;       // CQE user_data sentinel: wake eventfd poll
 int kCrossCoreWakeTag = 0;  // CQE user_data sentinel: cross-core MSG_RING wake
+int kPeerDisconnectCancelTag = 0;
 
 std::int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -47,16 +50,32 @@ std::int64_t NowMs() {
 
 void* EncodeMultishotData(Connection* connection) {
   return reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(connection) |
-                                 kMultishotTag);
+                                 kRecvTag);
 }
 
 bool IsMultishotData(void* data) {
-  return (reinterpret_cast<std::uintptr_t>(data) & kMultishotTag) != 0;
+  return (reinterpret_cast<std::uintptr_t>(data) & kConnectionTagMask) ==
+         kRecvTag;
 }
 
 Connection* DecodeMultishotConnection(void* data) {
   return reinterpret_cast<Connection*>(reinterpret_cast<std::uintptr_t>(data) &
-                                       ~kMultishotTag);
+                                       ~kConnectionTagMask);
+}
+
+void* EncodePeerDisconnectData(Connection* connection) {
+  return reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(connection) |
+                                 kPeerDisconnectTag);
+}
+
+bool IsPeerDisconnectData(void* data) {
+  return (reinterpret_cast<std::uintptr_t>(data) & kConnectionTagMask) ==
+         kPeerDisconnectTag;
+}
+
+Connection* DecodePeerDisconnectConnection(void* data) {
+  return reinterpret_cast<Connection*>(reinterpret_cast<std::uintptr_t>(data) &
+                                       ~kConnectionTagMask);
 }
 
 }  // namespace
@@ -547,6 +566,50 @@ absl::Status IoUringBackend::SubmitCancelRecv(Connection* connection,
   return absl::OkStatus();
 }
 
+absl::Status IoUringBackend::StartPeerDisconnectPoll(
+    Connection* connection) {
+  if (connection == nullptr) {
+    return absl::InvalidArgumentError("connection must not be null");
+  }
+  if (connection->peer_disconnect_poll_armed_ || connection->closed_ ||
+      connection->closing_) {
+    return absl::OkStatus();
+  }
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return absl::UnavailableError(
+        "failed to acquire peer disconnect poll sqe");
+  }
+  const int fd = connection->file_.is_fixed_
+                     ? static_cast<int>(connection->file_.fixed_index_)
+                     : connection->file_.fd_;
+  io_uring_prep_poll_add(
+      sqe, fd, static_cast<unsigned>(POLLERR | POLLHUP | POLLRDHUP));
+  if (connection->file_.is_fixed_) sqe->flags |= IOSQE_FIXED_FILE;
+  io_uring_sqe_set_data(sqe, EncodePeerDisconnectData(connection));
+  connection->peer_disconnect_poll_armed_ = true;
+  connection->peer_disconnect_poll_cancel_requested_ = false;
+  ++connection->inflight_ops_;
+  return absl::OkStatus();
+}
+
+absl::Status IoUringBackend::CancelPeerDisconnectPoll(
+    Connection* connection) {
+  if (connection == nullptr || !connection->peer_disconnect_poll_armed_ ||
+      connection->peer_disconnect_poll_cancel_requested_) {
+    return absl::OkStatus();
+  }
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return absl::UnavailableError(
+        "failed to acquire peer disconnect cancel sqe");
+  }
+  io_uring_prep_cancel(sqe, EncodePeerDisconnectData(connection), 0);
+  io_uring_sqe_set_data(sqe, &kPeerDisconnectCancelTag);
+  connection->peer_disconnect_poll_cancel_requested_ = true;
+  return absl::OkStatus();
+}
+
 void IoUringBackend::RecycleMultishotBuffer(std::uint16_t buffer_id) {
   if (multishot_ring_.ring_ == nullptr ||
       buffer_id >= multishot_ring_.entries_) {
@@ -662,14 +725,33 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
   }
 }
 
+void IoUringBackend::HandlePeerDisconnect(Connection* connection,
+                                          io_uring_cqe* cqe) {
+  if (connection == nullptr) return;
+  connection->peer_disconnect_poll_armed_ = false;
+  connection->peer_disconnect_poll_cancel_requested_ = false;
+  if (connection->inflight_ops_ != 0) --connection->inflight_ops_;
+  if (cqe->res < 0 || connection->state_ != ConnectionState::kActive) return;
+  if ((cqe->res & (POLLERR | POLLHUP | POLLRDHUP)) == 0) return;
+  if (connection->peer_disconnect_callback_ != nullptr) {
+    connection->peer_disconnect_callback_(
+        connection->peer_disconnect_context_);
+  }
+}
+
 void IoUringBackend::DispatchCqe(io_uring_cqe* cqe) {
   void* data = io_uring_cqe_get_data(cqe);
   if (data == &kWakePollTag) {
     HandleWakePoll();
   } else if (data == &kCrossCoreWakeTag) {
     // Cross-core wake marker; the worker drains its mailbox separately.
+  } else if (data == &kPeerDisconnectCancelTag) {
+    // The cancelled poll's own CQE retires the connection operation. The
+    // cancel request completion carries no additional state.
   } else if (IsMultishotData(data)) {
     HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
+  } else if (IsPeerDisconnectData(data)) {
+    HandlePeerDisconnect(DecodePeerDisconnectConnection(data), cqe);
   } else {
     auto* op = static_cast<IoCompletion*>(data);
     if (op != nullptr) {

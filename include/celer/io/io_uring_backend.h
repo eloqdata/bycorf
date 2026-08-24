@@ -79,6 +79,8 @@ class IoUringBackend {
   absl::Status StartRecvMultishot(
       Connection* connection);  // multishot, idempotent
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag);
+  absl::Status StartPeerDisconnectPoll(Connection* connection);
+  absl::Status CancelPeerDisconnectPoll(Connection* connection);
 
   std::span<const std::byte> ViewRecvBuffer(const Connection* connection,
                                             std::uint16_t buffer_id,
@@ -129,6 +131,7 @@ class IoUringBackend {
   bool ArmWakePoll();
   void HandleWakePoll();
   void HandleMultishotRecv(Connection* connection, io_uring_cqe* cqe);
+  void HandlePeerDisconnect(Connection* connection, io_uring_cqe* cqe);
   void RecycleMultishotBuffer(std::uint16_t buffer_id);
   void DispatchCqe(io_uring_cqe* cqe);
   bool

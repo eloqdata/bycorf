@@ -49,6 +49,12 @@ class TcpStream {
 
   bool IsOpen() const noexcept;
   int NativeFd() const noexcept;
+  // Observe transport disconnect without consuming application bytes. The
+  // callback runs on this connection's worker and remains installed until it
+  // is cleared or the one-shot disconnect event fires.
+  absl::Status SetPeerDisconnectCallback(
+      Connection::PeerDisconnectCallback callback, void* context) noexcept;
+  void ClearPeerDisconnectCallback() noexcept;
   // Numeric peer endpoint. IPv6 uses [host]:port so callers can pass the
   // result back as an unambiguous endpoint.
   absl::StatusOr<std::string> PeerAddress() const;

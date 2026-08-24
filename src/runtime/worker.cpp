@@ -317,6 +317,11 @@ void Worker::BeginClose(Connection *connection, absl::Status reason,
   connection->closing_ = true;
   connection->state_ = ConnectionState::kClosing;
 
+  // Stop the independent peer-disconnect observer before retiring the
+  // Connection storage. Its completion owns one inflight operation and will
+  // make the connection reclaimable.
+  (void)backend_.CancelPeerDisconnectPoll(connection);
+
   if (connection->file_.fd_ >= 0) {
     const int fd = connection->file_.fd_;
     connection->file_.fd_ = -1;

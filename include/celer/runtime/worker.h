@@ -214,6 +214,12 @@ class Worker {
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag) {
     return backend_.SubmitCancelRecv(connection, tag);
   }
+  absl::Status EnsurePeerDisconnectPollArmed(Connection* connection) {
+    return backend_.StartPeerDisconnectPoll(connection);
+  }
+  absl::Status CancelPeerDisconnectPoll(Connection* connection) {
+    return backend_.CancelPeerDisconnectPoll(connection);
+  }
   std::span<const std::byte> ViewMultishotBuffer(const Connection* connection,
                                                  std::uint16_t buffer_id,
                                                  std::size_t offset,

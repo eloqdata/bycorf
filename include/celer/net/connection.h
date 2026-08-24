@@ -63,6 +63,8 @@ struct ReceivedBuffer {
 };
 
 struct Connection {
+  using PeerDisconnectCallback = void (*)(void*) noexcept;
+
   Worker* worker_ = nullptr;
   std::uint64_t id_ = 0;
   RegisteredFile file_;
@@ -90,6 +92,10 @@ struct Connection {
   bool needs_recv_rearm_ =
       false;  // re-arm deferred out of the completion handler
   bool recv_eof_ = false;
+  bool peer_disconnect_poll_armed_ = false;
+  bool peer_disconnect_poll_cancel_requested_ = false;
+  PeerDisconnectCallback peer_disconnect_callback_ = nullptr;
+  void* peer_disconnect_context_ = nullptr;
   RecvMode recv_mode_ = RecvMode::kMultishot;
   std::shared_ptr<TlsState> tls_state_;
   void* protocol_context_ = nullptr;

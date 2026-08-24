@@ -375,6 +375,30 @@ int TcpStream::NativeFd() const noexcept {
   return connection_ == nullptr ? -1 : connection_->file_.fd_;
 }
 
+absl::Status TcpStream::SetPeerDisconnectCallback(
+    Connection::PeerDisconnectCallback callback, void* context) noexcept {
+  if (connection_ == nullptr || connection_->worker_ == nullptr ||
+      !IsOpen()) {
+    return absl::FailedPreconditionError(
+        "cannot observe disconnect on a closed stream");
+  }
+  connection_->peer_disconnect_callback_ = callback;
+  connection_->peer_disconnect_context_ = context;
+  absl::Status armed =
+      connection_->worker_->EnsurePeerDisconnectPollArmed(connection_);
+  if (!armed.ok()) {
+    connection_->peer_disconnect_callback_ = nullptr;
+    connection_->peer_disconnect_context_ = nullptr;
+  }
+  return armed;
+}
+
+void TcpStream::ClearPeerDisconnectCallback() noexcept {
+  if (connection_ == nullptr) return;
+  connection_->peer_disconnect_callback_ = nullptr;
+  connection_->peer_disconnect_context_ = nullptr;
+}
+
 absl::StatusOr<std::string> TcpStream::PeerAddress() const {
   if (!IsOpen()) {
     return absl::FailedPreconditionError(
