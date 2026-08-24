@@ -55,6 +55,12 @@ class Service {
   // to close the service's sockets so its Run loops unblock. Must be
   // thread-safe.
   virtual void Stop() noexcept = 0;
+
+  // Called once on each worker's own thread after every worker has left its
+  // event loop, all IO backends are quiescent, and all remaining coroutine
+  // frames have been destroyed. Services may override this to release
+  // worker-affine state before the native worker thread exits.
+  virtual void FinalizeWorker(Worker&) noexcept {}
 };
 
 }  // namespace celer

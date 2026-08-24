@@ -135,6 +135,22 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   worker.Shutdown();
   worker.DestroyDetachedTasks();
 
+  // A frame destroyed on one worker may release state owned by another.
+  // Finalizers can reclaim worker-owned service state only after every such
+  // destructor has run.
+  reclaimed_workers_.fetch_add(1, std::memory_order_acq_rel);
+  while (reclaimed_workers_.load(std::memory_order_acquire) <
+         options_.thread_count_) {
+    std::this_thread::yield();
+  }
+
+  // Unwind services in reverse registration order so a service may release
+  // dependencies only after their later-registered consumers have finalized.
+  for (auto service = services_.rbegin(); service != services_.rend();
+       ++service) {
+    (*service)->FinalizeWorker(worker);
+  }
+
   if (!worker.stop_requested()) [[unlikely]] {
     return 1;
   }
