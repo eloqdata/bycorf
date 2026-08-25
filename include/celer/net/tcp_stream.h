@@ -126,6 +126,12 @@ class TcpStream {
   // result back as an unambiguous endpoint.
   absl::StatusOr<std::string> PeerAddress() const;
 
+  // Select whether the transport may prefetch multiple receive buffers while
+  // the application is not reading. Must be configured before the first read.
+  // Disabling read-ahead provides socket-level backpressure for protocols
+  // with their own bounded ingress queues.
+  absl::Status SetReadAhead(bool enabled) noexcept;
+
   Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
   Task<absl::StatusOr<std::size_t>> WriteSome(
       std::span<const std::byte> buffer);

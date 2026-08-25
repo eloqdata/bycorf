@@ -351,6 +351,21 @@ absl::StatusOr<std::string> TcpStream::PeerAddress() const {
   return FormatPeerAddress(NativeFd());
 }
 
+absl::Status TcpStream::SetReadAhead(bool enabled) noexcept {
+  if (connection_ == nullptr || connection_->worker_ == nullptr || !IsOpen()) {
+    return absl::FailedPreconditionError(
+        "cannot configure recv on a closed stream");
+  }
+  if (connection_->recv_armed_ || connection_->read_inflight_ ||
+      connection_->read_waiter_ || !connection_->received_buffers_.empty()) {
+    return absl::FailedPreconditionError(
+        "recv read-ahead must be configured before the first read");
+  }
+  connection_->recv_mode_ =
+      enabled ? RecvMode::kMultishot : RecvMode::kOneShot;
+  return absl::OkStatus();
+}
+
 Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(
     std::span<std::byte> buffer) {
   if (tls_ != nullptr) {
