@@ -17,15 +17,19 @@
 #ifndef CELER_NET_TCP_STREAM_H_
 #define CELER_NET_TCP_STREAM_H_
 
+#include <sys/socket.h>
 #include <sys/uio.h>
 
+#include <coroutine>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 
 #include "absl/status/statusor.h"
+#include "celer/io/completion.h"
 #include "celer/net/connection.h"
 #include "celer/runtime/task.h"
 
@@ -33,6 +37,69 @@ namespace celer {
 
 class TlsContext;
 class TlsState;
+
+// Raw socket operations are awaitables rather than Task-returning wrappers,
+// so they live directly in the awaiting coroutine frame.
+class ReadOperation final : public IoCompletion {
+ public:
+  ReadOperation(Connection* connection, std::span<std::byte> buffer) noexcept;
+  ReadOperation(const ReadOperation&) = delete;
+  ReadOperation& operator=(const ReadOperation&) = delete;
+  ReadOperation(ReadOperation&&) = delete;
+  ReadOperation& operator=(ReadOperation&&) = delete;
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  absl::StatusOr<std::size_t> await_resume() noexcept;
+  void Complete(Worker& worker, int result, unsigned flags) override;
+
+ private:
+  Connection* connection_ = nullptr;
+  std::span<std::byte> buffer_;
+  std::optional<absl::Status> immediate_status_;
+  std::optional<std::size_t> immediate_result_;
+};
+
+class WriteOperation final : public IoCompletion {
+ public:
+  WriteOperation(Connection* connection,
+                 std::span<const std::byte> buffer) noexcept;
+  WriteOperation(const WriteOperation&) = delete;
+  WriteOperation& operator=(const WriteOperation&) = delete;
+  WriteOperation(WriteOperation&&) = delete;
+  WriteOperation& operator=(WriteOperation&&) = delete;
+
+  bool await_ready() const noexcept { return buffer_.empty(); }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  absl::StatusOr<std::size_t> await_resume() noexcept;
+  void Complete(Worker& worker, int result, unsigned flags) override;
+
+ private:
+  Connection* connection_ = nullptr;
+  std::span<const std::byte> buffer_;
+  int result_ = 0;
+};
+
+class WriteVOperation final : public IoCompletion {
+ public:
+  WriteVOperation(Connection* connection,
+                  std::span<const iovec> buffers) noexcept;
+  WriteVOperation(const WriteVOperation&) = delete;
+  WriteVOperation& operator=(const WriteVOperation&) = delete;
+  WriteVOperation(WriteVOperation&&) = delete;
+  WriteVOperation& operator=(WriteVOperation&&) = delete;
+
+  bool await_ready() const noexcept { return buffers_.empty(); }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  absl::StatusOr<std::size_t> await_resume() noexcept;
+  void Complete(Worker& worker, int result, unsigned flags) override;
+
+ private:
+  Connection* connection_ = nullptr;
+  std::span<const iovec> buffers_;
+  msghdr message_{};
+  int result_ = 0;
+};
 
 class TcpStream {
  public:
@@ -87,11 +154,9 @@ class TcpStream {
  private:
   friend class TlsState;
 
-  Task<absl::StatusOr<std::size_t>> ReadRawSome(std::span<std::byte> buffer);
-  Task<absl::StatusOr<std::size_t>> WriteRawSome(
-      std::span<const std::byte> buffer);
-  Task<absl::StatusOr<std::size_t>> WriteRawSomeV(
-      std::span<const iovec> buffers);
+  ReadOperation ReadRawSome(std::span<std::byte> buffer) noexcept;
+  WriteOperation WriteRawSome(std::span<const std::byte> buffer) noexcept;
+  WriteVOperation WriteRawSomeV(std::span<const iovec> buffers) noexcept;
   Task<absl::Status> WriteRawAll(std::span<const std::byte> buffer);
 
   Connection* connection_ = nullptr;

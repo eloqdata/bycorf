@@ -74,250 +74,6 @@ absl::StatusOr<std::string> FormatPeerAddress(int fd) {
   return std::string(host) + ":" + service;
 }
 
-class ReadOperation final : public IoCompletion {
- public:
-  ReadOperation(Connection* connection, std::span<std::byte> buffer)
-      : connection_(connection), buffer_(buffer) {}
-
-  bool await_ready() const noexcept { return false; }
-
-  bool await_suspend(std::coroutine_handle<> awaiting) {
-    awaiting_ = awaiting;
-
-    if (buffer_.empty()) {
-      immediate_result_ = std::size_t{0};
-      return false;
-    }
-    if (connection_ == nullptr || connection_->worker_ == nullptr) {
-      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument,
-                                       "stream is not bound");
-      return false;
-    }
-    if (connection_->state_ != ConnectionState::kActive ||
-        connection_->closed_ || connection_->closing_) {
-      immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
-                                       "read on closed stream");
-      return false;
-    }
-
-    if (!connection_->received_buffers_.empty() || connection_->recv_eof_ ||
-        !connection_->last_error_.ok()) {
-      return false;
-    }
-
-    if (connection_->read_inflight_ || connection_->read_waiter_) {
-      immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
-                                       "concurrent read is not allowed");
-      return false;
-    }
-
-    const auto arm_status = connection_->worker_->EnsureRecvArmed(connection_);
-    if (!arm_status.ok()) {
-      immediate_status_ = arm_status;
-      return false;
-    }
-
-    connection_->read_inflight_ = true;
-    connection_->read_waiter_ = awaiting_;
-    return true;
-  }
-
-  absl::StatusOr<std::size_t> await_resume() noexcept {
-    if (immediate_status_.has_value()) {
-      return *immediate_status_;
-    }
-    if (immediate_result_.has_value()) {
-      return *immediate_result_;
-    }
-
-    if (connection_ == nullptr) {
-      return absl::Status(absl::StatusCode::kInvalidArgument,
-                          "stream is not bound");
-    }
-
-    if (!connection_->last_error_.ok()) {
-      absl::Status status = connection_->last_error_;
-      connection_->last_error_ = absl::OkStatus();
-      return status;
-    }
-
-    if (connection_->recv_eof_ && connection_->received_buffers_.empty()) {
-      return std::size_t{0};
-    }
-
-    if (connection_->received_buffers_.empty()) {
-      return absl::Status(absl::StatusCode::kUnavailable,
-                          "no received data available");
-    }
-
-    auto& received = connection_->received_buffers_.front();
-    const std::size_t available =
-        static_cast<std::size_t>(received.size_ - received.offset_);
-    const std::size_t to_copy = std::min(buffer_.size(), available);
-    auto chunk = connection_->worker_->ViewMultishotBuffer(
-        connection_, received.buffer_id_, received.offset_, to_copy);
-    if (chunk.size() != to_copy) {
-      return absl::Status(absl::StatusCode::kInternal,
-                          "invalid multishot buffer view");
-    }
-
-    std::memcpy(buffer_.data(), chunk.data(), chunk.size());
-    received.offset_ += static_cast<std::uint32_t>(to_copy);
-    if (received.offset_ == received.size_) {
-      const auto buffer_id = received.buffer_id_;
-      connection_->received_buffers_.pop_front();
-      connection_->worker_->ReleaseReceivedBuffer(connection_, buffer_id);
-    }
-    return to_copy;
-  }
-
-  void Complete(Worker& worker, int result, unsigned flags) override {
-    (void)worker;
-    (void)result;
-    (void)flags;
-  }
-
- private:
-  Connection* connection_ = nullptr;
-  std::span<std::byte> buffer_;
-  std::optional<absl::Status> immediate_status_;
-  std::optional<std::size_t> immediate_result_;
-};
-
-class WriteOperation final : public IoCompletion {
- public:
-  WriteOperation(Connection* connection, std::span<const std::byte> buffer)
-      : connection_(connection), buffer_(buffer) {}
-
-  bool await_ready() const noexcept { return buffer_.empty(); }
-
-  bool await_suspend(std::coroutine_handle<> awaiting) {
-    awaiting_ = awaiting;
-
-    if (connection_ == nullptr || connection_->worker_ == nullptr) {
-      result_ = -EINVAL;
-      return false;
-    }
-    if (connection_->state_ != ConnectionState::kActive ||
-        connection_->closed_ || connection_->closing_) {
-      result_ = -EBADF;
-      return false;
-    }
-    if (connection_->write_inflight_) {
-      result_ = -EINVAL;
-      return false;
-    }
-
-    auto status =
-        connection_->worker_->SubmitSend(connection_->file_, buffer_, this);
-    if (!status.ok()) {
-      result_ = -EAGAIN;
-      return false;
-    }
-
-    connection_->write_inflight_ = true;
-    connection_->inflight_ops_ += 1;
-    submitted_ = true;
-    return true;
-  }
-
-  absl::StatusOr<std::size_t> await_resume() noexcept {
-    if (!submitted_) {
-      if (result_ >= 0) {
-        return static_cast<std::size_t>(result_);
-      }
-      return ErrnoToStatus(-result_, "send failed");
-    }
-
-    if (result_ >= 0) {
-      return static_cast<std::size_t>(result_);
-    }
-    return ErrnoToStatus(-result_, "send failed");
-  }
-
-  void Complete(Worker& worker, int result, unsigned flags) override {
-    (void)flags;
-    result_ = result;
-    if (connection_ != nullptr) {
-      connection_->write_inflight_ = false;
-      connection_->inflight_ops_ -= 1;
-    }
-    worker.Enqueue(awaiting_);
-  }
-
- private:
-  Connection* connection_ = nullptr;
-  std::span<const std::byte> buffer_;
-  int result_ = 0;
-  bool submitted_ = false;
-};
-
-class WriteVOperation final : public IoCompletion {
- public:
-  WriteVOperation(Connection* connection, std::span<const iovec> buffers)
-      : connection_(connection), buffers_(buffers) {}
-
-  bool await_ready() const noexcept { return buffers_.empty(); }
-
-  bool await_suspend(std::coroutine_handle<> awaiting) {
-    awaiting_ = awaiting;
-
-    if (connection_ == nullptr || connection_->worker_ == nullptr) {
-      result_ = -EINVAL;
-      return false;
-    }
-    if (connection_->state_ != ConnectionState::kActive ||
-        connection_->closed_ || connection_->closing_) {
-      result_ = -EBADF;
-      return false;
-    }
-    if (connection_->write_inflight_) {
-      result_ = -EINVAL;
-      return false;
-    }
-
-    message_.msg_iov = const_cast<iovec*>(buffers_.data());
-    message_.msg_iovlen = buffers_.size();
-    auto status = connection_->worker_->SubmitSendMsg(connection_->file_,
-                                                      &message_, this);
-    if (!status.ok()) {
-      result_ = -EAGAIN;
-      return false;
-    }
-
-    connection_->write_inflight_ = true;
-    connection_->inflight_ops_ += 1;
-    submitted_ = true;
-    return true;
-  }
-
-  absl::StatusOr<std::size_t> await_resume() noexcept {
-    if (!submitted_) {
-      if (result_ >= 0) return static_cast<std::size_t>(result_);
-      return ErrnoToStatus(-result_, "sendmsg failed");
-    }
-    if (result_ >= 0) return static_cast<std::size_t>(result_);
-    return ErrnoToStatus(-result_, "sendmsg failed");
-  }
-
-  void Complete(Worker& worker, int result, unsigned flags) override {
-    (void)flags;
-    result_ = result;
-    if (connection_ != nullptr) {
-      connection_->write_inflight_ = false;
-      connection_->inflight_ops_ -= 1;
-    }
-    worker.Enqueue(awaiting_);
-  }
-
- private:
-  Connection* connection_ = nullptr;
-  std::span<const iovec> buffers_;
-  msghdr message_{};
-  int result_ = 0;
-  bool submitted_ = false;
-};
-
 class CancelRecvOperation final : public IoCompletion {
  public:
   explicit CancelRecvOperation(Connection* connection)
@@ -364,6 +120,194 @@ class CancelRecvOperation final : public IoCompletion {
 };
 
 }  // namespace
+
+ReadOperation::ReadOperation(Connection* connection,
+                             std::span<std::byte> buffer) noexcept
+    : connection_(connection), buffer_(buffer) {}
+
+bool ReadOperation::await_suspend(std::coroutine_handle<> awaiting) {
+  awaiting_ = awaiting;
+
+  if (buffer_.empty()) {
+    immediate_result_ = std::size_t{0};
+    return false;
+  }
+  if (connection_ == nullptr || connection_->worker_ == nullptr) {
+    immediate_status_ =
+        absl::Status(absl::StatusCode::kInvalidArgument, "stream is not bound");
+    return false;
+  }
+  if (connection_->state_ != ConnectionState::kActive || connection_->closed_ ||
+      connection_->closing_) {
+    immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                     "read on closed stream");
+    return false;
+  }
+  if (!connection_->received_buffers_.empty() || connection_->recv_eof_ ||
+      !connection_->last_error_.ok()) {
+    return false;
+  }
+  if (connection_->read_inflight_ || connection_->read_waiter_) {
+    immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                     "concurrent read is not allowed");
+    return false;
+  }
+
+  const auto arm_status = connection_->worker_->EnsureRecvArmed(connection_);
+  if (!arm_status.ok()) {
+    immediate_status_ = arm_status;
+    return false;
+  }
+
+  connection_->read_inflight_ = true;
+  connection_->read_waiter_ = awaiting_;
+  return true;
+}
+
+absl::StatusOr<std::size_t> ReadOperation::await_resume() noexcept {
+  if (immediate_status_.has_value()) return *immediate_status_;
+  if (immediate_result_.has_value()) return *immediate_result_;
+  if (connection_ == nullptr) {
+    return absl::Status(absl::StatusCode::kInvalidArgument,
+                        "stream is not bound");
+  }
+  if (!connection_->last_error_.ok()) {
+    absl::Status status = connection_->last_error_;
+    connection_->last_error_ = absl::OkStatus();
+    return status;
+  }
+  if (connection_->recv_eof_ && connection_->received_buffers_.empty()) {
+    return std::size_t{0};
+  }
+  if (connection_->received_buffers_.empty()) {
+    return absl::Status(absl::StatusCode::kUnavailable,
+                        "no received data available");
+  }
+
+  auto& received = connection_->received_buffers_.front();
+  const std::size_t available =
+      static_cast<std::size_t>(received.size_ - received.offset_);
+  const std::size_t to_copy = std::min(buffer_.size(), available);
+  auto chunk = connection_->worker_->ViewMultishotBuffer(
+      connection_, received.buffer_id_, received.offset_, to_copy);
+  if (chunk.size() != to_copy) {
+    return absl::Status(absl::StatusCode::kInternal,
+                        "invalid multishot buffer view");
+  }
+
+  std::memcpy(buffer_.data(), chunk.data(), chunk.size());
+  received.offset_ += static_cast<std::uint32_t>(to_copy);
+  if (received.offset_ == received.size_) {
+    const auto buffer_id = received.buffer_id_;
+    connection_->received_buffers_.pop_front();
+    connection_->worker_->ReleaseReceivedBuffer(connection_, buffer_id);
+  }
+  return to_copy;
+}
+
+void ReadOperation::Complete(Worker& worker, int result, unsigned flags) {
+  (void)worker;
+  (void)result;
+  (void)flags;
+}
+
+WriteOperation::WriteOperation(Connection* connection,
+                               std::span<const std::byte> buffer) noexcept
+    : connection_(connection), buffer_(buffer) {}
+
+bool WriteOperation::await_suspend(std::coroutine_handle<> awaiting) {
+  awaiting_ = awaiting;
+
+  if (connection_ == nullptr || connection_->worker_ == nullptr) {
+    result_ = -EINVAL;
+    return false;
+  }
+  if (connection_->state_ != ConnectionState::kActive || connection_->closed_ ||
+      connection_->closing_) {
+    result_ = -EBADF;
+    return false;
+  }
+  if (connection_->write_inflight_) {
+    result_ = -EINVAL;
+    return false;
+  }
+
+  auto status =
+      connection_->worker_->SubmitSend(connection_->file_, buffer_, this);
+  if (!status.ok()) {
+    result_ = -EAGAIN;
+    return false;
+  }
+
+  connection_->write_inflight_ = true;
+  connection_->inflight_ops_ += 1;
+  return true;
+}
+
+absl::StatusOr<std::size_t> WriteOperation::await_resume() noexcept {
+  if (result_ >= 0) return static_cast<std::size_t>(result_);
+  return ErrnoToStatus(-result_, "send failed");
+}
+
+void WriteOperation::Complete(Worker& worker, int result, unsigned flags) {
+  (void)flags;
+  result_ = result;
+  if (connection_ != nullptr) {
+    connection_->write_inflight_ = false;
+    connection_->inflight_ops_ -= 1;
+  }
+  worker.Enqueue(awaiting_);
+}
+
+WriteVOperation::WriteVOperation(Connection* connection,
+                                 std::span<const iovec> buffers) noexcept
+    : connection_(connection), buffers_(buffers) {}
+
+bool WriteVOperation::await_suspend(std::coroutine_handle<> awaiting) {
+  awaiting_ = awaiting;
+
+  if (connection_ == nullptr || connection_->worker_ == nullptr) {
+    result_ = -EINVAL;
+    return false;
+  }
+  if (connection_->state_ != ConnectionState::kActive || connection_->closed_ ||
+      connection_->closing_) {
+    result_ = -EBADF;
+    return false;
+  }
+  if (connection_->write_inflight_) {
+    result_ = -EINVAL;
+    return false;
+  }
+
+  message_.msg_iov = const_cast<iovec*>(buffers_.data());
+  message_.msg_iovlen = buffers_.size();
+  auto status =
+      connection_->worker_->SubmitSendMsg(connection_->file_, &message_, this);
+  if (!status.ok()) {
+    result_ = -EAGAIN;
+    return false;
+  }
+
+  connection_->write_inflight_ = true;
+  connection_->inflight_ops_ += 1;
+  return true;
+}
+
+absl::StatusOr<std::size_t> WriteVOperation::await_resume() noexcept {
+  if (result_ >= 0) return static_cast<std::size_t>(result_);
+  return ErrnoToStatus(-result_, "sendmsg failed");
+}
+
+void WriteVOperation::Complete(Worker& worker, int result, unsigned flags) {
+  (void)flags;
+  result_ = result;
+  if (connection_ != nullptr) {
+    connection_->write_inflight_ = false;
+    connection_->inflight_ops_ -= 1;
+  }
+  worker.Enqueue(awaiting_);
+}
 
 bool TcpStream::IsOpen() const noexcept {
   return connection_ != nullptr &&
@@ -415,9 +359,8 @@ Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(
   co_return co_await ReadRawSome(buffer);
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::ReadRawSome(
-    std::span<std::byte> buffer) {
-  co_return co_await ReadOperation(connection_, buffer);
+ReadOperation TcpStream::ReadRawSome(std::span<std::byte> buffer) noexcept {
+  return ReadOperation(connection_, buffer);
 }
 
 Task<absl::StatusOr<std::size_t>> TcpStream::WriteSome(
@@ -428,9 +371,9 @@ Task<absl::StatusOr<std::size_t>> TcpStream::WriteSome(
   co_return co_await WriteRawSome(buffer);
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::WriteRawSome(
-    std::span<const std::byte> buffer) {
-  co_return co_await WriteOperation(connection_, buffer);
+WriteOperation TcpStream::WriteRawSome(
+    std::span<const std::byte> buffer) noexcept {
+  return WriteOperation(connection_, buffer);
 }
 
 Task<absl::StatusOr<std::size_t>> TcpStream::WriteSomeV(
@@ -448,9 +391,9 @@ Task<absl::StatusOr<std::size_t>> TcpStream::WriteSomeV(
   co_return co_await WriteRawSomeV(buffers);
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::WriteRawSomeV(
-    std::span<const iovec> buffers) {
-  co_return co_await WriteVOperation(connection_, buffers);
+WriteVOperation TcpStream::WriteRawSomeV(
+    std::span<const iovec> buffers) noexcept {
+  return WriteVOperation(connection_, buffers);
 }
 
 Task<absl::Status> TcpStream::WriteRawAll(std::span<const std::byte> buffer) {

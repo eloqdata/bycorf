@@ -22,8 +22,9 @@
 #include <coroutine>
 #include <cstdint>
 #include <deque>
-#include <string_view>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -35,7 +36,23 @@ namespace celer {
 
 class Worker;
 class TcpListener;
-class AcceptAwaitable;
+
+// Allocation-free awaitable for one accepted, not-yet-registered socket. It
+// is embedded in the caller's coroutine frame rather than allocating a nested
+// Task frame for every accepted connection.
+class AcceptUnregisteredAwaitable final {
+ public:
+  explicit AcceptUnregisteredAwaitable(TcpListener* listener) noexcept
+      : listener_(listener) {}
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  absl::StatusOr<Connection> await_resume();
+
+ private:
+  TcpListener* listener_ = nullptr;
+  std::optional<absl::Status> immediate_status_;
+};
 
 struct ResolvedTcpAddress {
   sockaddr_storage address_{};
@@ -90,13 +107,13 @@ class TcpListener {
   // Accept a socket without registering it with the accepting worker. This is
   // used by TcpService to hand a fresh socket to its selected owner before any
   // recv operation is armed.
-  Task<absl::StatusOr<Connection>> AcceptUnregistered();
+  AcceptUnregisteredAwaitable AcceptUnregistered() noexcept;
   Task<absl::StatusOr<Connection*>> Accept();
   absl::Status Close() noexcept;
 
  private:
   friend class ListenerAcceptState;
-  friend class AcceptAwaitable;
+  friend class AcceptUnregisteredAwaitable;
 
   Worker* worker_ = nullptr;
   int fd_ = -1;

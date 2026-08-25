@@ -193,60 +193,57 @@ void ListenerAcceptState::CloseAllAcceptedFds() noexcept {
   }
 }
 
-class AcceptAwaitable final {
- public:
-  explicit AcceptAwaitable(TcpListener* listener) : listener_(listener) {}
-
-  bool await_ready() const noexcept { return false; }
-
-  bool await_suspend(std::coroutine_handle<> awaiting) {
-    if (listener_ == nullptr) {
-      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument,
-                                       "listener is not bound");
-      return false;
-    }
-    if (listener_->fd_ < 0 || listener_->closed_) {
-      immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
-                                       "listener is closed");
-      return false;
-    }
-    if (listener_->worker_ == nullptr) {
-      immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument,
-                                       "listener is not bound");
-      return false;
-    }
-
-    auto& state = listener_->accept_state_;
-    if (state.HasAcceptedFd() || state.HasError()) {
-      return false;
-    }
-    if (state.HasWaiter()) {
-      immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
-                                       "concurrent accept is not allowed");
-      return false;
-    }
-
-    const auto arm_status = state.Arm();
-    if (!arm_status.ok()) {
-      immediate_status_ = arm_status;
-      return false;
-    }
-
-    state.SetWaiter(awaiting);
-    return true;
+bool AcceptUnregisteredAwaitable::await_suspend(
+    std::coroutine_handle<> awaiting) {
+  if (listener_ == nullptr) {
+    immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument,
+                                     "listener is not bound");
+    return false;
+  }
+  if (listener_->fd_ < 0 || listener_->closed_) {
+    immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                     "listener is closed");
+    return false;
+  }
+  if (listener_->worker_ == nullptr) {
+    immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument,
+                                     "listener is not bound");
+    return false;
   }
 
-  absl::StatusOr<int> await_resume() {
-    if (immediate_status_.has_value()) {
-      return *immediate_status_;
-    }
-    return listener_->accept_state_.ConsumeAcceptedFd();
+  auto& state = listener_->accept_state_;
+  if (state.HasAcceptedFd() || state.HasError()) {
+    return false;
+  }
+  if (state.HasWaiter()) {
+    immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                     "concurrent accept is not allowed");
+    return false;
   }
 
- private:
-  TcpListener* listener_ = nullptr;
-  std::optional<absl::Status> immediate_status_;
-};
+  const auto arm_status = state.Arm();
+  if (!arm_status.ok()) {
+    immediate_status_ = arm_status;
+    return false;
+  }
+
+  state.SetWaiter(awaiting);
+  return true;
+}
+
+absl::StatusOr<Connection> AcceptUnregisteredAwaitable::await_resume() {
+  if (immediate_status_.has_value()) {
+    return *immediate_status_;
+  }
+  auto accepted = listener_->accept_state_.ConsumeAcceptedFd();
+  if (!accepted.ok()) return accepted.status();
+
+  Connection connection;
+  connection.file_.fd_ = *accepted;
+  connection.closed_ = false;
+  connection.generation_ = listener_->next_generation_++;
+  return connection;
+}
 
 bool TcpListener::IsOpen() const noexcept { return !closed_ && fd_ >= 0; }
 
@@ -331,17 +328,8 @@ absl::Status TcpListener::Bind(Worker* worker,
   return absl::OkStatus();
 }
 
-Task<absl::StatusOr<Connection>> TcpListener::AcceptUnregistered() {
-  auto accepted = co_await AcceptAwaitable(this);
-  if (!accepted.ok()) {
-    co_return accepted.status();
-  }
-
-  Connection connection;
-  connection.file_.fd_ = *accepted;
-  connection.closed_ = false;
-  connection.generation_ = next_generation_++;
-  co_return connection;
+AcceptUnregisteredAwaitable TcpListener::AcceptUnregistered() noexcept {
+  return AcceptUnregisteredAwaitable(this);
 }
 
 Task<absl::StatusOr<Connection*>> TcpListener::Accept() {
