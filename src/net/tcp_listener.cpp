@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -31,6 +32,7 @@
 
 #include "celer/io/completion.h"
 #include "celer/runtime/worker.h"
+#include "spdlog/spdlog.h"
 
 namespace celer {
 
@@ -237,6 +239,18 @@ absl::StatusOr<Connection> AcceptUnregisteredAwaitable::await_resume() {
   }
   auto accepted = listener_->accept_state_.ConsumeAcceptedFd();
   if (!accepted.ok()) return accepted.status();
+
+  // Accepted sockets otherwise keep Nagle enabled: a pipelined reply that
+  // takes several flushes then stalls on Nagle x delayed ACK (~40ms per batch
+  // on loopback). Match the outbound connections (see rpc.cpp), which all run
+  // with TCP_NODELAY. Best-effort: this fd is always TCP, and a failure here
+  // must not reject the connection.
+  int one = 1;
+  if (::setsockopt(*accepted, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) !=
+      0) {
+    spdlog::warn("setsockopt(TCP_NODELAY) on accepted fd {} failed: {}",
+                 *accepted, std::strerror(errno));
+  }
 
   Connection connection;
   connection.file_.fd_ = *accepted;
