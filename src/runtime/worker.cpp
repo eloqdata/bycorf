@@ -36,6 +36,15 @@
 
 namespace celer {
 
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+std::uint64_t CrossCoreTraceNowNanos() noexcept {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+#endif
+
 namespace {
 
 std::int64_t NowMs() {
@@ -626,6 +635,44 @@ Worker::SchedulerStats Worker::TakeSchedulerStats() noexcept {
   return result;
 }
 
+void Worker::LatencySampleStats::Add(std::uint64_t nanoseconds) noexcept {
+  ++count_;
+  sum_ns_ += nanoseconds;
+  max_ns_ = std::max(max_ns_, nanoseconds);
+  const std::uint64_t microseconds = (nanoseconds + 999) / 1000;
+  const auto it = std::lower_bound(kBucketUpperUs.begin(),
+                                   kBucketUpperUs.end(), microseconds);
+  const std::size_t index =
+      it == kBucketUpperUs.end()
+          ? kBucketUpperUs.size() - 1
+          : static_cast<std::size_t>(it - kBucketUpperUs.begin());
+  ++buckets_[index];
+}
+
+double Worker::LatencySampleStats::AverageUs() const noexcept {
+  return count_ == 0
+             ? 0.0
+             : static_cast<double>(sum_ns_) /
+                   (1000.0 * static_cast<double>(count_));
+}
+
+std::uint64_t Worker::LatencySampleStats::PercentileUpperUs(
+    double percentile) const noexcept {
+  if (count_ == 0) {
+    return 0;
+  }
+  const std::uint64_t target = static_cast<std::uint64_t>(
+      static_cast<double>(count_) * percentile + 0.999999);
+  std::uint64_t cumulative = 0;
+  for (std::size_t i = 0; i < buckets_.size(); ++i) {
+    cumulative += buckets_[i];
+    if (cumulative >= target) {
+      return kBucketUpperUs[i];
+    }
+  }
+  return kBucketUpperUs.back();
+}
+
 void Worker::RecordStorageReadCompletion(std::size_t bytes) noexcept {
   ++storage_io_stats_.read_operations_;
   storage_io_stats_.read_bytes_ += bytes;
@@ -742,16 +789,35 @@ bool Worker::DrainCrossCore() {
   std::size_t nrep = 0;
   std::size_t nnotifications = 0;
   const auto schedule_request = [this](RemoteWork *work) {
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+    const std::uint64_t now = CrossCoreTraceNowNanos();
+    if (work->request_post_ns_ != 0 && now >= work->request_post_ns_) {
+      cross_core_latency_stats_.request_queue_.Add(now -
+                                                   work->request_post_ns_);
+    }
+#endif
     if (work->task_class_ == TaskClass::kBackground) {
       background_remote_work_.push_back(work);
     } else {
       foreground_remote_work_.push_back(work);
     }
   };
+  const auto schedule_reply = [this](RemoteWork *work) {
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+    const std::uint64_t now = CrossCoreTraceNowNanos();
+    if (work->reply_post_ns_ != 0 && now >= work->reply_post_ns_) {
+      cross_core_latency_stats_.reply_queue_.Add(now - work->reply_post_ns_);
+    }
+#endif
+    Enqueue(work->waiter_);
+  };
 
   // The bounded SPSC lane is the normal path. Only touch the old MPSC queues
-  // when a producer reported a full lane.
-  if (mb.overflow_pending_.exchange(false, std::memory_order_acq_rel)) {
+  // when a producer reported a full lane. A stale false from the read-only
+  // fast path only defers draining; the wake-sequence handshake prevents the
+  // receiver from parking past a producer that published overflow work.
+  if (mb.overflow_pending_.load(std::memory_order_relaxed) &&
+      mb.overflow_pending_.exchange(false, std::memory_order_acquire)) {
     const std::size_t overflow_requests =
         mb.requests_.try_dequeue_bulk(batch, 64);
     for (std::size_t i = 0; i < overflow_requests; ++i) {
@@ -762,7 +828,7 @@ bool Worker::DrainCrossCore() {
     const std::size_t overflow_replies =
         mb.replies_.try_dequeue_bulk(batch, 64);
     for (std::size_t i = 0; i < overflow_replies; ++i) {
-      Enqueue(batch[i]->waiter_);
+      schedule_reply(batch[i]);
     }
     nrep += overflow_replies;
 
@@ -811,7 +877,7 @@ bool Worker::DrainCrossCore() {
         const std::size_t count =
             lane.replies_.try_dequeue_bulk(batch, 64 - nrep);
         for (std::size_t i = 0; i < count; ++i) {
-          Enqueue(batch[i]->waiter_);
+          schedule_reply(batch[i]);
         }
         nrep += count;
       }
@@ -851,8 +917,21 @@ void Worker::FlushWakes() {
     w.wake_pending_[target] = 0;
     WorkerMailbox &mb = cross_core_->mailbox(target);
     ++wake_checks_;
-    if (mb.wake_seq_.fetch_add(1, std::memory_order_acq_rel) ==
-        kWakeSeqParked) {
+    const bool parked =
+        mb.wake_seq_.fetch_add(1, std::memory_order_acq_rel) == kWakeSeqParked;
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+    const std::uint64_t now = CrossCoreTraceNowNanos();
+    const std::uint64_t mark = w.wake_mark_ns_[target];
+    if (mark != 0 && now >= mark) {
+      const std::uint64_t wait = now - mark;
+      cross_core_latency_stats_.wake_batch_wait_.Add(wait);
+      if (parked) {
+        cross_core_latency_stats_.parked_wake_batch_wait_.Add(wait);
+      }
+    }
+    w.wake_mark_ns_[target] = 0;
+#endif
+    if (parked) {
       ++wake_sent_;
       backend_.WakeRemote(mb.ring_fd_);
     }

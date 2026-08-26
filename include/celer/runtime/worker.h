@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 
 #include <atomic>
+#include <array>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -92,6 +93,28 @@ class Worker {
     std::uint64_t storage_poll_cycles_ = 0;
     std::uint64_t storage_max_poll_cycles_ = 0;
     double cycles_per_second_ = 0.0;
+  };
+
+  struct LatencySampleStats {
+    static constexpr std::array<std::uint64_t, 24> kBucketUpperUs{
+        1,   2,   3,   4,   5,    8,    10,   15,
+        20,  30,  40,  50,  75,   100,  150,  200,
+        300, 500, 750, 1000, 1500, 2000, 5000, 10000};
+    std::uint64_t count_ = 0;
+    std::uint64_t sum_ns_ = 0;
+    std::uint64_t max_ns_ = 0;
+    std::array<std::uint64_t, kBucketUpperUs.size()> buckets_{};
+
+    void Add(std::uint64_t nanoseconds) noexcept;
+    double AverageUs() const noexcept;
+    std::uint64_t PercentileUpperUs(double percentile) const noexcept;
+  };
+
+  struct CrossCoreLatencyStats {
+    LatencySampleStats wake_batch_wait_;
+    LatencySampleStats parked_wake_batch_wait_;
+    LatencySampleStats request_queue_;
+    LatencySampleStats reply_queue_;
   };
 
   struct StorageIoStats {
@@ -181,6 +204,9 @@ class Worker {
     return result;
   }
   SchedulerStats TakeSchedulerStats() noexcept;
+  CrossCoreLatencyStats TakeCrossCoreLatencyStats() noexcept {
+    return std::exchange(cross_core_latency_stats_, CrossCoreLatencyStats{});
+  }
 
   // Storage completions run on the owning worker. These counters and the
   // per-file durability watermarks therefore need no atomics; metrics
@@ -407,6 +433,7 @@ class Worker {
   std::int64_t background_deadline_cycles_ = 0;
   double cycle_frequency_ = 0.0;
   SchedulerStats scheduler_stats_{};
+  CrossCoreLatencyStats cross_core_latency_stats_{};
   StorageIoStats storage_io_stats_{};
   std::vector<StorageFileIoStats> storage_file_io_stats_;
 };

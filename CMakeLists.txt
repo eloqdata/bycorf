@@ -30,6 +30,8 @@ option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
 option(CELER_WITH_DPDK "Build with the DPDK net backend instead of io_uring" OFF)
 option(CELER_WITH_SPDK_STORAGE
   "Use SPDK for storage while retaining the io_uring network backend" OFF)
+option(CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+  "Enable detailed cross-core queue and wake latency tracing" OFF)
 
 find_program(CELER_CLANG_FORMAT NAMES clang-format-18 clang-format)
 file(GLOB_RECURSE CELER_FORMAT_FILES CONFIGURE_DEPENDS
@@ -132,6 +134,10 @@ add_library(celer
   src/net/tcp_listener.cpp
   src/net/tcp_stream.cpp
   src/net/tls.cpp
+)
+
+target_compile_definitions(celer PUBLIC
+  CELER_ENABLE_CROSS_CORE_LATENCY_TRACE=$<BOOL:${CELER_ENABLE_CROSS_CORE_LATENCY_TRACE}>
 )
 
 if (CELER_WITH_SPDK_STORAGE)

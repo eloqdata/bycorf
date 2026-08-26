@@ -42,6 +42,9 @@
 #ifndef CELER_ENABLE_SUBMIT_TASK_COUNT
 #define CELER_ENABLE_SUBMIT_TASK_COUNT 0
 #endif
+#ifndef CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+#define CELER_ENABLE_CROSS_CORE_LATENCY_TRACE 0
+#endif
 
 namespace celer {
 
@@ -62,6 +65,10 @@ struct RemoteWork {
   TaskClass task_class_ = TaskClass::kForeground;
   void (*run_fn_)(RemoteWork*) = nullptr;  // runs the user fn, stores result
   bool reply_deferred_ = false;
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+  std::uint64_t request_post_ns_ = 0;
+  std::uint64_t reply_post_ns_ = 0;
+#endif
 };
 
 // Small one-way control message. It is copied into the target mailbox, so the
@@ -88,8 +95,13 @@ class alignas(64) SpscRing {
   bool try_enqueue(T value) noexcept {
     const std::size_t tail = tail_.load(std::memory_order_relaxed);
     const std::size_t next = (tail + 1) & (Capacity - 1);
-    if (next == head_.load(std::memory_order_acquire)) {
-      return false;
+    // head_ is written by the consumer. Avoid reading that remote cache line
+    // until the producer's conservative snapshot says the ring may be full.
+    if (next == cached_head_) {
+      cached_head_ = head_.load(std::memory_order_acquire);
+      if (next == cached_head_) {
+        return false;
+      }
     }
     entries_[tail] = std::move(value);
     tail_.store(next, std::memory_order_release);
@@ -118,6 +130,7 @@ class alignas(64) SpscRing {
  private:
   alignas(64) std::atomic<std::size_t> head_{0};
   alignas(64) std::atomic<std::size_t> tail_{0};
+  std::size_t cached_head_ = 0;  // producer-owned snapshot of head_
   alignas(64) std::array<T, Capacity> entries_{};
 };
 
@@ -190,10 +203,17 @@ class CrossCore {
                         std::memory_order_release);
   }
   std::uint64_t TakeActiveSenders(unsigned receiver, unsigned word) noexcept {
-    return active_senders_[static_cast<std::size_t>(receiver) *
-                               active_sender_word_count_ +
-                           word]
-        .bits_.exchange(0, std::memory_order_acq_rel);
+    auto& bits = active_senders_[static_cast<std::size_t>(receiver) *
+                                     active_sender_word_count_ +
+                                 word]
+                     .bits_;
+    // Busy polling calls this repeatedly. Keep the empty path read-only; a
+    // stale zero only postpones a concurrently published bit to the next
+    // drain round. The nonempty exchange acquires the producer's publication.
+    if (bits.load(std::memory_order_relaxed) == 0) {
+      return 0;
+    }
+    return bits.exchange(0, std::memory_order_acquire);
   }
 
  private:
@@ -214,7 +234,14 @@ struct CurrentWorker {
   Worker* self_ = nullptr;
   std::vector<std::uint8_t> wake_pending_;  // per-target dedup flag
   std::vector<unsigned> wake_list_;         // targets marked this round
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+  std::vector<std::uint64_t> wake_mark_ns_;  // first mark in the wake batch
+#endif
 };
+
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+std::uint64_t CrossCoreTraceNowNanos() noexcept;
+#endif
 
 inline CurrentWorker& MutableThisWorker() noexcept {
   static thread_local CurrentWorker w;
@@ -240,6 +267,9 @@ inline void SetThisWorker(WorkerId id, CrossCore* cross_core,
   w.self_ = self;
   w.wake_pending_.assign(cross_core->size(), 0);
   w.wake_list_.clear();
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+  w.wake_mark_ns_.assign(cross_core->size(), 0);
+#endif
 }
 
 // Mark worker `target` to be woken at the end of the current loop iteration.
@@ -253,6 +283,9 @@ inline void MarkWakeWorker(unsigned target) noexcept {
   if (w.wake_pending_[target] == 0) {
     w.wake_pending_[target] = 1;
     w.wake_list_.push_back(target);
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+    w.wake_mark_ns_[target] = CrossCoreTraceNowNanos();
+#endif
   }
 }
 
@@ -266,6 +299,9 @@ inline void ActivateCrossCoreLane(CrossCore* cc, unsigned receiver,
 
 inline void PostRequest(CrossCore* cc, unsigned target,
                         RemoteWork* work) noexcept {
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+  work->request_post_ns_ = CrossCoreTraceNowNanos();
+#endif
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(target, sender);
   if (lane.requests_.try_enqueue(work)) {
@@ -280,6 +316,9 @@ inline void PostRequest(CrossCore* cc, unsigned target,
 
 inline void PostReply(CrossCore* cc, WorkerId origin,
                       RemoteWork* work) noexcept {
+#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+  work->reply_post_ns_ = CrossCoreTraceNowNanos();
+#endif
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(origin, sender);
   if (lane.replies_.try_enqueue(work)) {
