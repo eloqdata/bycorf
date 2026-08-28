@@ -37,7 +37,9 @@ class Worker;
 // A Service that listens on one TCP port and serves each accepted connection.
 // It owns a listener per worker (bound with SO_REUSEPORT) and runs the accept
 // loop; subclasses implement the per-connection protocol in Serve(). Concrete
-// protocols (e.g. Redis) derive from this and only override Serve.
+// protocols (e.g. Redis) derive from this and override Serve. Protocols that
+// need pre-TLS admission control may also override the connection lifecycle
+// hooks; TcpService itself does not impose a connection limit.
 class TcpService : public Service {
  public:
   explicit TcpService(std::uint16_t port, int backlog = 128)
@@ -46,14 +48,20 @@ class TcpService : public Service {
   }
 
   std::uint16_t port() const noexcept { return port_; }
-  void AddTlsEndpoint(std::uint16_t port,
-                      std::shared_ptr<TlsContext> context);
+  void AddTlsEndpoint(std::uint16_t port, std::shared_ptr<TlsContext> context);
 
   void Prepare(unsigned thread_count) override;
   Task<absl::Status> Run(Worker& worker, ServiceContext ctx) override;
   void Stop() noexcept override;
 
  protected:
+  // Runs on the accepting worker before registration or TLS setup. Returning
+  // false makes TcpService close the raw socket. For every true return,
+  // OnConnectionClosed() is called exactly once, including when registration
+  // or TLS setup fails, so implementations can safely own admission counters.
+  virtual bool AdmitConnection(int, bool) noexcept { return true; }
+  virtual void OnConnectionClosed() noexcept {}
+
   // Handles one accepted connection. The framework closes the connection after
   // this returns (unless already closed by the protocol).
   virtual Task<absl::Status> Serve(TcpStream stream) = 0;

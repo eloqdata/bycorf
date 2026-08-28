@@ -20,6 +20,7 @@
 
 #include <unordered_set>
 
+#include "absl/cleanup/cleanup.h"
 #include "celer/runtime/cross_core.h"
 #include "celer/runtime/worker.h"
 #include "spdlog/spdlog.h"
@@ -137,6 +138,13 @@ Task<absl::Status> TcpService::AcceptLoop(Worker& worker,
       continue;
     }
 
+    const int fd = accepted->file_.fd_;
+    if (!AdmitConnection(fd, bound->tls_ != nullptr)) {
+      ::close(fd);
+      accepted->file_.fd_ = -1;
+      continue;
+    }
+
     const unsigned target = static_cast<unsigned>(
         next_connection_worker_.fetch_add(1, std::memory_order_relaxed) %
         thread_count_);
@@ -152,6 +160,7 @@ Task<absl::Status> TcpService::AcceptLoop(Worker& worker,
       spdlog::warn("failed to start accepted connection on worker[{}]: {}",
                    target, started.message());
     }
+    if (!started.ok()) OnConnectionClosed();
   }
 
   co_return absl::OkStatus();
@@ -160,6 +169,7 @@ Task<absl::Status> TcpService::AcceptLoop(Worker& worker,
 Task<absl::Status> TcpService::RunSession(Worker& worker,
                                           Connection* connection,
                                           std::shared_ptr<TlsContext> tls) {
+  auto connection_slot = absl::MakeCleanup([this] { OnConnectionClosed(); });
   TcpStream stream(connection);
   absl::Status status;
   if (tls != nullptr) {
@@ -170,8 +180,7 @@ Task<absl::Status> TcpService::RunSession(Worker& worker,
   }
 
   if (status.ok() && connection != nullptr &&
-      connection->state_ == ConnectionState::kActive &&
-      !connection->closing_) {
+      connection->state_ == ConnectionState::kActive && !connection->closing_) {
     TcpStream closing_stream(connection);
     absl::Status shutdown = co_await closing_stream.ShutdownTls();
     if (!shutdown.ok()) status = shutdown;
