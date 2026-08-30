@@ -224,16 +224,18 @@ class CrossCore {
   std::unique_ptr<ActiveSenderWord[]> active_senders_;
 };
 
-// "Which worker is this thread", plus its per-round wake batch. Set at the top
-// of Worker::Run. wake_pending/wake_list live here (not on Worker) so the hot
-// cross-core post path marks wakes fully inline without needing Worker's
-// definition; the owning worker drains wake_list once per loop in FlushWakes.
+// "Which worker is this thread", plus its per-round publication batch. Set at
+// the top of Worker::Run. wake_pending/wake_list live here (not on Worker) so
+// the hot cross-core post path can deduplicate targets without needing Worker's
+// definition; FlushWakes performs the optional final lane publication and the
+// one batched wake for each target.
 struct CurrentWorker {
   WorkerId id_ = 0;
   CrossCore* cross_core_ = nullptr;
   Worker* self_ = nullptr;
-  std::vector<std::uint8_t> wake_pending_;  // per-target dedup flag
-  std::vector<unsigned> wake_list_;         // targets marked this round
+  // Per target: 0 = idle, 1 = first post published, 2 = later posts batched.
+  std::vector<std::uint8_t> wake_pending_;
+  std::vector<unsigned> wake_list_;  // targets marked this round
 #if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
   std::vector<std::uint64_t> wake_mark_ns_;  // first mark in the wake batch
 #endif
@@ -272,13 +274,14 @@ inline void SetThisWorker(WorkerId id, CrossCore* cross_core,
 #endif
 }
 
-// Mark worker `target` to be woken at the end of the current loop iteration.
-// Batched: the actual MSG_RING wake (one per parked target per round) is issued
-// by FlushWakes. Inline on the hot post path — touches only thread-local state.
-inline void MarkWakeWorker(unsigned target) noexcept {
+// Mark worker `target` for a wake at the end of the current loop iteration.
+// Returns true for the first post, which the caller publishes immediately so
+// an isolated cross-core operation gains no batching delay. Later same-round
+// posts are coalesced and FlushWakes republishes the lane once before waking.
+inline bool MarkWakeWorker(unsigned target) noexcept {
   CurrentWorker& w = MutableThisWorker();
   if (target == w.id_) {
-    return;  // never wake self
+    return false;  // never wake self
   }
   if (w.wake_pending_[target] == 0) {
     w.wake_pending_[target] = 1;
@@ -286,7 +289,10 @@ inline void MarkWakeWorker(unsigned target) noexcept {
 #if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
     w.wake_mark_ns_[target] = CrossCoreTraceNowNanos();
 #endif
+    return true;
   }
+  w.wake_pending_[target] = 2;
+  return false;
 }
 
 inline void ActivateCrossCoreLane(CrossCore* cc, unsigned receiver,
@@ -297,6 +303,16 @@ inline void ActivateCrossCoreLane(CrossCore* cc, unsigned receiver,
   }
 }
 
+// Publish all ring entries posted to `target` by the current worker since its
+// previous flush. The release side orders those entries before the active bit;
+// the receiver's lane-close handshake acquires this RMW when it coalesces work
+// into an already-active lane.
+inline void PublishCrossCoreLane(unsigned target) noexcept {
+  CurrentWorker& w = MutableThisWorker();
+  CrossCoreLane& lane = w.cross_core_->lane(target, w.id_);
+  ActivateCrossCoreLane(w.cross_core_, target, w.id_, lane);
+}
+
 inline void PostRequest(CrossCore* cc, unsigned target,
                         RemoteWork* work) noexcept {
 #if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
@@ -304,14 +320,19 @@ inline void PostRequest(CrossCore* cc, unsigned target,
 #endif
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(target, sender);
-  if (lane.requests_.try_enqueue(work)) {
-    ActivateCrossCoreLane(cc, target, sender, lane);
-  } else {
+  const bool queued = lane.requests_.try_enqueue(work);
+  if (!queued) {
     WorkerMailbox& mailbox = cc->mailbox(target);
     mailbox.requests_.enqueue(work);
     mailbox.overflow_pending_.store(true, std::memory_order_release);
   }
-  MarkWakeWorker(target);
+  const bool publish_now = MarkWakeWorker(target);
+  if (queued && (target == sender || publish_now)) {
+    // SubmitTaskTo deliberately routes its local asynchronous completion
+    // through this lane. It has no remote target in wake_list_, so preserve
+    // immediate activation for that uncommon self-post path.
+    ActivateCrossCoreLane(cc, target, sender, lane);
+  }
 }
 
 inline void PostReply(CrossCore* cc, WorkerId origin,
@@ -321,28 +342,32 @@ inline void PostReply(CrossCore* cc, WorkerId origin,
 #endif
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(origin, sender);
-  if (lane.replies_.try_enqueue(work)) {
-    ActivateCrossCoreLane(cc, origin, sender, lane);
-  } else {
+  const bool queued = lane.replies_.try_enqueue(work);
+  if (!queued) {
     WorkerMailbox& mailbox = cc->mailbox(origin);
     mailbox.replies_.enqueue(work);
     mailbox.overflow_pending_.store(true, std::memory_order_release);
   }
-  MarkWakeWorker(origin);
+  const bool publish_now = MarkWakeWorker(origin);
+  if (queued && (origin == sender || publish_now)) {
+    ActivateCrossCoreLane(cc, origin, sender, lane);
+  }
 }
 
 inline void PostNotification(CrossCore* cc, unsigned target,
                              RemoteNotification notification) noexcept {
   const unsigned sender = ThisWorker().id_;
   CrossCoreLane& lane = cc->lane(target, sender);
-  if (lane.notifications_.try_enqueue(notification)) {
-    ActivateCrossCoreLane(cc, target, sender, lane);
-  } else {
+  const bool queued = lane.notifications_.try_enqueue(notification);
+  if (!queued) {
     WorkerMailbox& mailbox = cc->mailbox(target);
     mailbox.notifications_.enqueue(notification);
     mailbox.overflow_pending_.store(true, std::memory_order_release);
   }
-  MarkWakeWorker(target);
+  const bool publish_now = MarkWakeWorker(target);
+  if (queued && (target == sender || publish_now)) {
+    ActivateCrossCoreLane(cc, target, sender, lane);
+  }
 }
 
 // Defined in worker.cpp, where Worker is complete. This keeps the generic

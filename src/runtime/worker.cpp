@@ -914,6 +914,12 @@ void Worker::FlushWakes() {
     return;
   }
   for (unsigned target : w.wake_list_) {
+    // The first post was published immediately. If this round added more,
+    // republish once after the burst: this preserves the receiver's lane-close
+    // handshake without an active-state RMW for every intervening message.
+    if (w.wake_pending_[target] == 2) {
+      PublishCrossCoreLane(target);
+    }
     w.wake_pending_[target] = 0;
     WorkerMailbox &mb = cross_core_->mailbox(target);
     ++wake_checks_;
