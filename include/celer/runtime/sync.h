@@ -17,13 +17,14 @@
 #ifndef CELER_RUNTIME_SYNC_H_
 #define CELER_RUNTIME_SYNC_H_
 
-// Single-threaded coroutine synchronization primitives. AsyncMutex,
-// UnlockGuard, and AsyncNotification are worker-local: all suspensions and
-// wake-ups must happen on one worker, so they need no atomics. Only
-// CoroutineBarrier is cross-worker; arrivals may come from any worker and the
-// release resumes each waiter on the worker it arrived on.
+// Coroutine synchronization primitives. AsyncMutex, UnlockGuard, and
+// AsyncNotification are worker-local: all suspensions and wake-ups must happen
+// on one worker, so they need no atomics. CrossWorkerMutex and
+// CoroutineBarrier resume each waiter on the worker where it suspended.
 
+#include <atomic>
 #include <coroutine>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <utility>
@@ -75,6 +76,146 @@ class AsyncMutex {
  private:
   bool locked_ = false;
   std::deque<std::coroutine_handle<>> waiters_;
+};
+
+// A FIFO coroutine mutex for state shared by multiple runtime workers.
+// Contention suspends only the caller; the worker pthread remains available to
+// run unrelated connections. The atomic queue guard is held only while moving
+// waiter pointers and never while protected application code runs. The mutex
+// and every queued coroutine frame must remain alive until that waiter resumes;
+// cancellation must coordinate with lock acquisition rather than destroying a
+// queued frame.
+class CrossWorkerMutex {
+  struct Waiter {
+    Worker* worker_ = nullptr;
+    std::coroutine_handle<> handle_{};
+    Waiter* next_ = nullptr;
+  };
+
+ public:
+  class LockAwaiter {
+   public:
+    LockAwaiter(CrossWorkerMutex* mutex, Worker* worker) noexcept
+        : mutex_(mutex) {
+      waiter_.worker_ = worker;
+    }
+
+    bool await_ready() const noexcept { return false; }
+    bool await_suspend(std::coroutine_handle<> awaiting) noexcept {
+      queued_ = mutex_->AcquireOrQueue(&waiter_, awaiting);
+      return queued_;
+    }
+    void await_resume() const noexcept {
+      // A queued owner does not re-enter AcquireOrQueue after handoff. Touch
+      // the queue guard once so protected writes published by Unlock are
+      // visible independently of the runtime's scheduling transport.
+      if (queued_) mutex_->SynchronizeAcquisition();
+    }
+
+   private:
+    CrossWorkerMutex* mutex_ = nullptr;
+    Waiter waiter_;
+    bool queued_ = false;
+  };
+
+  class Guard {
+   public:
+    explicit Guard(CrossWorkerMutex* mutex) noexcept : mutex_(mutex) {}
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+    ~Guard() { mutex_->Unlock(); }
+
+   private:
+    CrossWorkerMutex* mutex_ = nullptr;
+  };
+
+  CrossWorkerMutex() = default;
+  CrossWorkerMutex(const CrossWorkerMutex&) = delete;
+  CrossWorkerMutex& operator=(const CrossWorkerMutex&) = delete;
+
+  LockAwaiter Lock(Worker& worker) noexcept {
+    return LockAwaiter(this, &worker);
+  }
+
+ private:
+  static void ResumeRemote(void* context, std::uint64_t value) noexcept {
+    static_cast<Worker*>(context)->Enqueue(
+        std::coroutine_handle<>::from_address(
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(value))));
+  }
+
+  bool AcquireOrQueue(Waiter* waiter,
+                      std::coroutine_handle<> awaiting) noexcept {
+    waiter->handle_ = awaiting;
+    waiter->next_ = nullptr;
+    LockQueue();
+    if (!held_) {
+      held_ = true;
+      UnlockQueue();
+      return false;
+    }
+    if (waiters_tail_ == nullptr) {
+      waiters_head_ = waiter;
+    } else {
+      waiters_tail_->next_ = waiter;
+    }
+    waiters_tail_ = waiter;
+    UnlockQueue();
+    return true;
+  }
+
+  void Unlock() noexcept {
+    LockQueue();
+    Waiter* wake = waiters_head_;
+    if (wake == nullptr) {
+      held_ = false;
+      UnlockQueue();
+      return;
+    }
+    waiters_head_ = wake->next_;
+    if (waiters_head_ == nullptr) waiters_tail_ = nullptr;
+    // Ownership transfers directly to the FIFO head. Keep held_ set so a
+    // newcomer cannot overtake it before its coroutine runs.
+    UnlockQueue();
+
+    const CurrentWorker& current = ThisWorker();
+    if (wake->worker_->id() == current.id_) {
+      wake->worker_->Enqueue(wake->handle_);
+    } else {
+      PostNotification(
+          current.cross_core_, wake->worker_->id(),
+          RemoteNotification{
+              .context_ = wake->worker_,
+              .value_ = static_cast<std::uint64_t>(
+                  reinterpret_cast<std::uintptr_t>(wake->handle_.address())),
+              .run_fn_ = &CrossWorkerMutex::ResumeRemote,
+          });
+    }
+  }
+
+  void LockQueue() noexcept {
+    while (queue_lock_.test_and_set(std::memory_order_acquire)) {
+#if defined(__x86_64__) || defined(__i386__)
+      __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+      asm volatile("yield" ::: "memory");
+#else
+      std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+    }
+  }
+
+  void UnlockQueue() noexcept { queue_lock_.clear(std::memory_order_release); }
+
+  void SynchronizeAcquisition() noexcept {
+    LockQueue();
+    UnlockQueue();
+  }
+
+  std::atomic_flag queue_lock_ = ATOMIC_FLAG_INIT;
+  bool held_ = false;
+  Waiter* waiters_head_ = nullptr;
+  Waiter* waiters_tail_ = nullptr;
 };
 
 class UnlockGuard {

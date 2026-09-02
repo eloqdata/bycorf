@@ -51,6 +51,8 @@ Key files:
 - `include/celer/base/log.h`: thin project-local logging facade
 - `include/celer/io/io.h`: transport-agnostic I/O layer marker
 - `include/celer/runtime/task.h`: coroutine `Task<T>`
+- `include/celer/runtime/sync.h`: worker-local and cross-worker coroutine
+  synchronization primitives
 - `include/celer/runtime/operation.h`: `io_uring` completion base type
 - `include/celer/runtime/runtime.h`: runtime start/stop/wait API
 - `include/celer/runtime/worker.h`: worker event loop, connection ownership, close/reclaim
@@ -148,6 +150,10 @@ These are currently intentional:
 - one read and one write may coexist
 - worker owns connections
 - retired connections must not be freed until async state drains
+- `AsyncMutex` is worker-local; shared state accessed by multiple workers uses
+  `CrossWorkerMutex`, whose FIFO waiters resume on their originating workers
+- a `CrossWorkerMutex` guard is released from a runtime worker, and the mutex
+  and queued coroutine frames remain alive until every queued waiter resumes
 
 ## How To Run
 
