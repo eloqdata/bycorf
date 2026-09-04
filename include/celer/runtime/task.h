@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <exception>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 #include "celer/runtime/coroutine_frame_pool.h"
@@ -102,7 +103,16 @@ class Task {
       return FinalAwaiter{};
     }
 
-    void return_value(T value) noexcept { value_ = std::move(value); }
+    template <typename U>
+      requires std::is_constructible_v<T, U&&>
+    void return_value(U&& value) noexcept {
+      // A coroutine reaches exactly one co_return, so its promise has no
+      // previous result to assign over. Forwarding directly into the
+      // disengaged slot avoids both optional's assign-or-construct branch and
+      // a by-value return_value parameter; the latter otherwise adds a large
+      // intermediate move for results such as CommandReply.
+      value_.emplace(std::forward<U>(value));
+    }
 
     void unhandled_exception() noexcept { std::terminate(); }
   };
@@ -165,7 +175,14 @@ class Task {
       return handle_;
     }
 
-    T await_resume() { return std::move(*handle_.promise().value_); }
+    // The owning Task remains alive through the co_await full expression, so
+    // callers can consume the promise result directly. Returning an xvalue
+    // avoids materializing an intermediate T for `co_return co_await task`;
+    // as with other temporary-backed awaiters, callers must not retain a
+    // reference beyond that full expression.
+    T&& await_resume() noexcept {
+      return std::move(*handle_.promise().value_);
+    }
   };
 
   auto operator co_await() && noexcept { return Awaiter{handle_}; }

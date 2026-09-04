@@ -404,7 +404,10 @@ class SubmitAwaiter : public RemoteWork {
     PostRequest(ThisWorker().cross_core_, target_, this);
   }
 
-  R await_resume() { return std::move(result_); }
+  // The awaiter owns result_ through the co_await full expression. Exposing
+  // it as an xvalue lets an immediate local or coroutine result consume it
+  // without first materializing another R.
+  R&& await_resume() noexcept { return std::move(result_); }
 
  private:
   static void RunFn(RemoteWork* base) {
@@ -464,7 +467,11 @@ class SubmitTaskAwaiter : public RemoteWork {
     PostRequest(ThisWorker().cross_core_, target_, this);
   }
 
-  R await_resume() { return std::move(*result_); }
+  // The awaiter lives in the origin coroutine frame through this full
+  // expression. Let its immediate consumer move from the stored result so a
+  // `co_return co_await SubmitTaskTo(...)` chain does not materialize another
+  // R between the cross-core result slot and the caller's promise.
+  R&& await_resume() noexcept { return std::move(*result_); }
 
  private:
   static void Start(RemoteWork* base) {
