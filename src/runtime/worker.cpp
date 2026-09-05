@@ -784,6 +784,8 @@ void Worker::RunRemoteWork(RemoteWork *work) {
 bool Worker::DrainCrossCore() {
   WorkerMailbox &mb = cross_core_->mailbox(id_);
   RemoteWork *batch[64];
+  // Both dequeue paths assign all fields of [0, count); never read the unused
+  // suffix. Default initialization intentionally leaves this scratch untouched.
   RemoteNotification notifications[64];
   std::size_t nreq = 0;
   std::size_t nrep = 0;

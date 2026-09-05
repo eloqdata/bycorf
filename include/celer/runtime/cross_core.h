@@ -74,11 +74,16 @@ struct RemoteWork {
 // Small one-way control message. It is copied into the target mailbox, so the
 // sender does not have to keep an awaiter or heap allocation alive. Intended
 // for ownership hand-backs such as returning a registered buffer to its owner.
+// Keep default initialization trivial: dequeue scratch is overwritten before
+// use, and clearing it would write 1.5 KiB on every worker drain, even idle ones.
+// Actual messages must use aggregate initialization ({} zeroes omitted fields)
+// or assign every field before publication; a published callback must be valid.
 struct RemoteNotification {
-  void* context_ = nullptr;
-  std::uint64_t value_ = 0;
-  void (*run_fn_)(void*, std::uint64_t) noexcept = nullptr;
+  void* context_;
+  std::uint64_t value_;
+  void (*run_fn_)(void*, std::uint64_t) noexcept;
 };
+static_assert(std::is_trivially_default_constructible_v<RemoteNotification>);
 
 // wake_seq value meaning "the owner is parked": the owner CASes wake_seq to
 // this before blocking; a producer bumps wake_seq after enqueuing and wakes the
