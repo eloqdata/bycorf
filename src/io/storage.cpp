@@ -262,6 +262,79 @@ absl::Status TimeoutAwaitable::await_resume() {
   return StorageError(-result(), "io_uring timeout failed");
 }
 
+void CancellableTimerState::Complete(Worker& worker, int result,
+                                     unsigned flags) {
+  (void)flags;
+  completed_ = true;
+  result_ = result;
+  if (waiter_) {
+    worker.Enqueue(waiter_);
+  }
+}
+
+void TimerCancelHandle::Cancel() const noexcept {
+  if (state_ == nullptr) {
+    return;
+  }
+  state_->cancelled_.store(true, std::memory_order_release);
+  // io_uring_prep_cancel must be issued by the owning worker (the ring is
+  // single-issuer). From any other thread the flag alone carries the cancel;
+  // the pending fire then resolves as a kCancelled no-op at its deadline.
+  if (ThisWorker().self_ == state_->worker_ && !state_->completed_) {
+    (void)state_->worker_->SubmitCancel(state_.get());
+  }
+}
+
+CancellableTimerAwaitable::CancellableTimerAwaitable(
+    Worker& worker, std::chrono::nanoseconds duration) noexcept
+    : worker_(&worker),
+      duration_(duration),
+      state_(std::make_shared<CancellableTimerState>(&worker)) {
+  const auto seconds =
+      std::chrono::duration_cast<std::chrono::seconds>(duration);
+  const auto nanoseconds =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(duration - seconds);
+  timeout_.tv_sec = seconds.count();
+  timeout_.tv_nsec = nanoseconds.count();
+}
+
+bool CancellableTimerAwaitable::await_suspend(
+    std::coroutine_handle<> awaiting) {
+  state_->waiter_ = awaiting;
+  if (duration_.count() <= 0) {
+    immediate_status_.emplace(absl::Status(absl::StatusCode::kInvalidArgument,
+                                           "sleep duration must be positive"));
+    return false;
+  }
+  // A cancel that landed before the co_await never touches the ring.
+  if (state_->cancelled_.load(std::memory_order_acquire)) {
+    immediate_status_.emplace(
+        absl::Status(absl::StatusCode::kCancelled, "timer cancelled"));
+    return false;
+  }
+  absl::Status status = worker_->SubmitTimeout(timeout_, state_.get());
+  if (!status.ok()) {
+    immediate_status_.emplace(std::move(status));
+    return false;
+  }
+  return true;
+}
+
+absl::Status CancellableTimerAwaitable::await_resume() {
+  if (immediate_status_.has_value()) {
+    return std::move(*immediate_status_);
+  }
+  // The cancelled flag wins over the raw CQE result: a fire that raced with
+  // the cancel (or arrived after a foreign-thread cancel) is a no-op.
+  if (state_->cancelled_.load(std::memory_order_acquire)) {
+    return absl::Status(absl::StatusCode::kCancelled, "timer cancelled");
+  }
+  if (state_->result_ == -ETIME || state_->result_ == 0) {
+    return absl::OkStatus();
+  }
+  return StorageError(-state_->result_, "io_uring timeout failed");
+}
+
 OpenFixedFileAwaitable OpenFixedFile(Worker& worker, std::string path,
                                      int flags, mode_t mode, FixedFile file) {
   return OpenFixedFileAwaitable(worker, std::move(path), flags, mode, file);
@@ -309,6 +382,11 @@ FileStatusAwaitable Fdatasync(Worker& worker, FixedFile file) {
 
 TimeoutAwaitable SleepFor(Worker& worker, std::chrono::nanoseconds duration) {
   return TimeoutAwaitable(worker, duration);
+}
+
+CancellableTimerAwaitable CancellableSleepFor(
+    Worker& worker, std::chrono::nanoseconds duration) {
+  return CancellableTimerAwaitable(worker, duration);
 }
 
 }  // namespace celer

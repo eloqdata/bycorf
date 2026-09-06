@@ -17,9 +17,11 @@
 #ifndef CELER_NET_TCP_STREAM_H_
 #define CELER_NET_TCP_STREAM_H_
 
+#include <linux/time_types.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 
+#include <chrono>
 #include <coroutine>
 #include <cstddef>
 #include <memory>
@@ -27,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "celer/io/completion.h"
@@ -101,6 +104,63 @@ class WriteVOperation final : public IoCompletion {
   int result_ = 0;
 };
 
+// Outbound async connect (IORING_OP_CONNECT) on a not-yet-registered fd, raced
+// against an optional deadline. The awaitable owns both SQEs; the first
+// completion to arrive submits io_uring_prep_cancel for the loser, and the
+// awaiting coroutine resumes only after BOTH completions are consumed — so the
+// kernel never references this frame after await_resume. A non-positive
+// timeout disables the deadline. Success resolves to OkStatus; a lost race to
+// kDeadlineExceeded.
+class ConnectOperation final : public IoCompletion {
+ public:
+  ConnectOperation(Worker& worker, int fd, const sockaddr* address,
+                   socklen_t address_length,
+                   std::chrono::nanoseconds timeout) noexcept;
+  ConnectOperation(const ConnectOperation&) = delete;
+  ConnectOperation& operator=(const ConnectOperation&) = delete;
+  ConnectOperation(ConnectOperation&&) = delete;
+  ConnectOperation& operator=(ConnectOperation&&) = delete;
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  absl::Status await_resume();
+  void Complete(Worker& worker, int result, unsigned flags) override;
+
+ private:
+  // The timeout SQE carries this tag (not `this`) so its CQE is
+  // distinguishable from the connect CQE at dispatch.
+  class TimeoutTag final : public IoCompletion {
+   public:
+    explicit TimeoutTag(ConnectOperation* owner) noexcept : owner_(owner) {}
+    void Complete(Worker& worker, int result, unsigned flags) override;
+
+   private:
+    ConnectOperation* owner_ = nullptr;
+  };
+
+  void OnTimeoutComplete(Worker& worker, int result);
+  void CancelLoser(Worker& worker, IoCompletion* loser);
+  void MaybeResume(Worker& worker);
+
+  Worker* worker_ = nullptr;
+  int fd_ = -1;
+  sockaddr_storage address_{};
+  socklen_t address_length_ = 0;
+  __kernel_timespec timeout_{};
+  TimeoutTag timeout_tag_{this};
+  std::optional<absl::Status> immediate_status_;
+  int connect_result_ = 0;
+  bool has_timeout_ = false;
+  bool connect_done_ = false;
+  // Invariant: true ⟺ no timeout CQE is outstanding. Set from whether the
+  // deadline is armed at construction — arming the deadline while this stays
+  // true skips the loser cancel and lets the timeout CQE dispatch into a
+  // destroyed frame.
+  bool timeout_done_ = false;
+  bool loser_cancel_submitted_ = false;
+  bool resumed_ = false;
+};
+
 class TcpStream {
  public:
   TcpStream() = default;
@@ -143,6 +203,9 @@ class TcpStream {
                               bool server, std::string_view peer_name = {});
   Task<absl::Status> ShutdownTls();
   bool IsTls() const noexcept { return tls_ != nullptr; }
+  // Returns all URI subjectAltName values from the verified peer
+  // certificate. Available only after a successful TLS handshake.
+  absl::StatusOr<std::vector<std::string>> PeerCertificateUriSans() const;
 
   // A paused stream may transfer its TLS state alongside a duplicated fd.
   // The caller must ensure no read/write coroutine is still in flight.
@@ -168,6 +231,15 @@ class TcpStream {
   Connection* connection_ = nullptr;
   std::shared_ptr<TlsState> tls_;
 };
+
+// Connect a TCP stream to a numeric IPv4/IPv6 address (no DNS). Creates the
+// socket (TCP_NODELAY, nonblocking), drives IORING_OP_CONNECT under the
+// deadline, and on success registers the fd as a Connection on `worker` —
+// mirroring the accept-side registration flow. Must be awaited on `worker`.
+// On any failure the fd is closed; a lost deadline yields kDeadlineExceeded.
+Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
+                                           std::uint16_t port,
+                                           std::chrono::nanoseconds timeout);
 
 }  // namespace celer
 

@@ -104,6 +104,13 @@ class TcpListener {
                     int backlog = 128, bool reuse_port = false);
   absl::Status Bind(Worker* worker, const ResolvedTcpAddress& address,
                     int backlog = 128, bool reuse_port = false);
+  // Binds a filesystem AF_UNIX stream socket. A live existing socket is never
+  // replaced; an orphaned socket inode is removed after a failed connection
+  // probe. The parent directory must not be group/world-writable. Close()
+  // unlinks only when the pathname still names the exact socket inode this
+  // listener bound, so a replacement file is never removed.
+  absl::Status BindUnix(Worker* worker, std::string_view path,
+                        int backlog = 128, std::uint32_t mode = 0600);
   // Accept a socket without registering it with the accepting worker. This is
   // used by TcpService to hand a fresh socket to its selected owner before any
   // recv operation is armed.
@@ -117,6 +124,10 @@ class TcpListener {
 
   Worker* worker_ = nullptr;
   int fd_ = -1;
+  std::string unix_path_;
+  std::uint64_t unix_device_ = 0;
+  std::uint64_t unix_inode_ = 0;
+  bool unix_identity_valid_ = false;
   bool closed_ = true;
   std::uint64_t next_generation_ = 1;
   ListenerAcceptState accept_state_{this};

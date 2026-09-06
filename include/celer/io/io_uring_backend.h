@@ -76,6 +76,18 @@ class IoUringBackend {
                              const msghdr* message, IoCompletion* tag);
   absl::Status SubmitAcceptMultishot(int listen_fd,
                                      IoCompletion* tag);  // multishot
+  // Async connect on a raw fd whose socket is not registered as a Connection
+  // yet (registration happens in ConnectTcp after a successful completion).
+  // `address` is referenced by the SQE until the CQE arrives; callers keep it
+  // alive by embedding it in the awaitable.
+  absl::Status SubmitConnect(int fd, const sockaddr* address,
+                             socklen_t address_length, IoCompletion* tag);
+  // Best-effort cancel of the in-flight SQE whose user_data is `target`. The
+  // cancel request's own CQE is dropped (kCancelRequestTag); the target's CQE
+  // still arrives — normally or with -ECANCELED — so the owner MUST wait for
+  // it before reclaiming state the SQE referenced. -ENOENT (already done) is
+  // an expected outcome, not an error.
+  absl::Status SubmitCancel(IoCompletion* target);
   absl::Status StartRecvMultishot(
       Connection* connection);  // multishot, idempotent
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag);

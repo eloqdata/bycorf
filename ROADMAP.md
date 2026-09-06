@@ -42,13 +42,19 @@ deferred (seastar::rpc has all of these):
 - **Async verb handlers (`Task<Bytes>`).** Let a handler `co_await SubmitTo(...)`
   to reach the data-owning core (keylane cross-node GET/SET forwards to the shard
   core). The bench version uses sync handlers (echo) processed inline.
-- **Async client connect.** Replace the startup blocking `connect()` with io_uring
-  `IORING_OP_CONNECT`.
+- **Async client connect.** `celer::ConnectTcp` (net/tcp_stream.h) now provides
+  `IORING_OP_CONNECT` with a deadline and loser-cancellation for outbound
+  streams; rewiring `RpcClient::Connect`'s startup blocking `connect()` to it
+  remains open.
 - **Per-call timeout (deadline).** Must-have for production: a hung peer must not
-  hang the caller. Give each pending a deadline; resume as `DeadlineExceeded`.
+  hang the caller. `celer::CancellableSleepFor` (io/storage.h) now provides the
+  cancellable one-shot timer; giving each pending call a deadline and resuming
+  as `DeadlineExceeded` remains open.
 - **Reconnect.** Re-establish dropped peer connections (may live app-side, as in
   seastar where the app rebuilds the client).
-- **Cancellation.** Cancel in-flight calls on timeout / shutdown.
+- **Cancellation.** The backend now has cancel-by-user_data
+  (`IoUringBackend::SubmitCancel`); cancelling in-flight rpc calls on timeout /
+  shutdown remains open.
 - **Handshake / feature negotiation.** Protocol version + feature flags.
 - **TCP keepalive.** setsockopt on rpc connections.
 - **Compression (lz4)** for large / WAN payloads.

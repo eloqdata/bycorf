@@ -17,6 +17,10 @@
 #include "celer/net/tls.h"
 
 #include <arpa/inet.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#include <openssl/x509_vfy.h>
+#include <openssl/x509v3.h>
 
 #include <algorithm>
 #include <array>
@@ -24,10 +28,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-#include <openssl/x509_vfy.h>
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -51,8 +51,7 @@ std::string DrainErrorQueue() {
 }
 
 absl::Status TlsError(std::string_view operation) {
-  return absl::InternalError(
-      absl::StrCat(operation, ": ", DrainErrorQueue()));
+  return absl::InternalError(absl::StrCat(operation, ": ", DrainErrorQueue()));
 }
 
 bool IsIpAddress(std::string_view value, int* family) {
@@ -87,8 +86,8 @@ absl::Status LoadIdentity(SSL_CTX* context, std::string_view cert_file,
     return absl::InvalidArgumentError(
         "TLS certificate and private key must be configured together");
   }
-  if (SSL_CTX_use_certificate_chain_file(
-          context, std::string(cert_file).c_str()) != 1) {
+  if (SSL_CTX_use_certificate_chain_file(context,
+                                         std::string(cert_file).c_str()) != 1) {
     return TlsError("failed to load TLS certificate");
   }
   if (SSL_CTX_use_PrivateKey_file(context, std::string(key_file).c_str(),
@@ -132,8 +131,8 @@ absl::StatusOr<std::shared_ptr<TlsContext>> TlsContext::CreateServer(
     if (options.ca_cert_file_.empty()) {
       status = absl::InvalidArgumentError(
           "TLS client authentication requires a CA certificate");
-    } else if (SSL_CTX_load_verify_locations(
-                   raw, options.ca_cert_file_.c_str(), nullptr) != 1) {
+    } else if (SSL_CTX_load_verify_locations(raw, options.ca_cert_file_.c_str(),
+                                             nullptr) != 1) {
       status = TlsError("failed to load TLS client CA certificate");
     } else {
       STACK_OF(X509_NAME)* client_ca =
@@ -160,8 +159,7 @@ absl::StatusOr<std::shared_ptr<TlsContext>> TlsContext::CreateServer(
 absl::StatusOr<std::shared_ptr<TlsContext>> TlsContext::CreateClient(
     const TlsClientOptions& options) {
   if (options.ca_cert_file_.empty()) {
-    return absl::InvalidArgumentError(
-        "TLS client requires a CA certificate");
+    return absl::InvalidArgumentError("TLS client requires a CA certificate");
   }
   ERR_clear_error();
   SSL_CTX* raw = SSL_CTX_new(TLS_client_method());
@@ -198,6 +196,43 @@ struct TlsState::Impl {
 
 TlsState::TlsState(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 TlsState::~TlsState() = default;
+
+absl::StatusOr<std::vector<std::string>> TlsState::PeerCertificateUriSans()
+    const {
+  if (!impl_->handshake_complete_) {
+    return absl::FailedPreconditionError("TLS handshake is not complete");
+  }
+  X509* certificate = SSL_get1_peer_certificate(impl_->ssl_);
+  if (certificate == nullptr) {
+    return absl::UnauthenticatedError("TLS peer supplied no certificate");
+  }
+  GENERAL_NAMES* names = static_cast<GENERAL_NAMES*>(
+      X509_get_ext_d2i(certificate, NID_subject_alt_name, nullptr, nullptr));
+  std::vector<std::string> result;
+  if (names != nullptr) {
+    const int count = sk_GENERAL_NAME_num(names);
+    for (int ii = 0; ii < count; ++ii) {
+      const GENERAL_NAME* name = sk_GENERAL_NAME_value(names, ii);
+      if (name->type != GEN_URI) continue;
+      const ASN1_IA5STRING* uri = name->d.uniformResourceIdentifier;
+      const unsigned char* data = ASN1_STRING_get0_data(uri);
+      const int length = ASN1_STRING_length(uri);
+      if (data == nullptr || length < 0 ||
+          std::memchr(data, '\0', static_cast<std::size_t>(length)) !=
+              nullptr) {
+        GENERAL_NAMES_free(names);
+        X509_free(certificate);
+        return absl::UnauthenticatedError(
+            "TLS peer URI SAN contains invalid bytes");
+      }
+      result.emplace_back(reinterpret_cast<const char*>(data),
+                          static_cast<std::size_t>(length));
+    }
+    GENERAL_NAMES_free(names);
+  }
+  X509_free(certificate);
+  return result;
+}
 
 absl::StatusOr<std::shared_ptr<TlsState>> TlsState::Create(
     const std::shared_ptr<TlsContext>& context, bool server,
@@ -237,8 +272,8 @@ absl::StatusOr<std::shared_ptr<TlsState>> TlsState::Create(
     }
     X509_VERIFY_PARAM* verify = SSL_get0_param(ssl);
     if (IsIpAddress(peer_name, nullptr)) {
-      if (X509_VERIFY_PARAM_set1_ip_asc(
-              verify, std::string(peer_name).c_str()) != 1) {
+      if (X509_VERIFY_PARAM_set1_ip_asc(verify,
+                                        std::string(peer_name).c_str()) != 1) {
         BIO_free(network);
         SSL_free(ssl);
         return TlsError("failed to configure TLS peer IP verification");
@@ -269,10 +304,9 @@ Task<absl::Status> TlsState::FlushOutput(TcpStream& stream) {
   UnlockGuard unlock(&impl_->output_mutex_, stream.connection_->worker_);
 
   while (BIO_ctrl_pending(impl_->network_bio_) != 0) {
-    const std::size_t pending = static_cast<std::size_t>(
-        BIO_ctrl_pending(impl_->network_bio_));
-    std::vector<std::byte> ciphertext(
-        std::min(pending, kTlsIoBufferBytes));
+    const std::size_t pending =
+        static_cast<std::size_t>(BIO_ctrl_pending(impl_->network_bio_));
+    std::vector<std::byte> ciphertext(std::min(pending, kTlsIoBufferBytes));
     const int consumed = BIO_read(impl_->network_bio_, ciphertext.data(),
                                   static_cast<int>(ciphertext.size()));
     if (consumed <= 0) {
@@ -290,15 +324,14 @@ Task<absl::Status> TlsState::ReadCiphertext(TcpStream& stream) {
   auto read = co_await stream.ReadRawSome(ciphertext);
   if (!read.ok()) co_return read.status();
   if (*read == 0) {
-    co_return absl::UnavailableError(
-        "TLS peer closed without close_notify");
+    co_return absl::UnavailableError("TLS peer closed without close_notify");
   }
 
   std::size_t offset = 0;
   while (offset < *read) {
-    const int written = BIO_write(
-        impl_->network_bio_, ciphertext.data() + offset,
-        static_cast<int>(*read - offset));
+    const int written =
+        BIO_write(impl_->network_bio_, ciphertext.data() + offset,
+                  static_cast<int>(*read - offset));
     if (written <= 0) {
       co_return TlsError("failed to feed TLS input BIO");
     }
@@ -311,8 +344,8 @@ Task<absl::Status> TlsState::Handshake(TcpStream& stream) {
   while (!impl_->handshake_complete_) {
     ERR_clear_error();
     const int result = SSL_do_handshake(impl_->ssl_);
-    const int error = result == 1 ? SSL_ERROR_NONE
-                                  : SSL_get_error(impl_->ssl_, result);
+    const int error =
+        result == 1 ? SSL_ERROR_NONE : SSL_get_error(impl_->ssl_, result);
     absl::Status flushed = co_await FlushOutput(stream);
     if (!flushed.ok()) co_return flushed;
     if (result == 1) {
@@ -340,10 +373,10 @@ Task<absl::StatusOr<std::size_t>> TlsState::ReadSome(
   while (true) {
     std::size_t size = 0;
     ERR_clear_error();
-    const int result = SSL_read_ex(impl_->ssl_, buffer.data(), buffer.size(),
-                                   &size);
-    const int error = result == 1 ? SSL_ERROR_NONE
-                                  : SSL_get_error(impl_->ssl_, result);
+    const int result =
+        SSL_read_ex(impl_->ssl_, buffer.data(), buffer.size(), &size);
+    const int error =
+        result == 1 ? SSL_ERROR_NONE : SSL_get_error(impl_->ssl_, result);
     absl::Status flushed = co_await FlushOutput(stream);
     if (!flushed.ok()) co_return flushed;
     if (result == 1) co_return size;
@@ -364,10 +397,10 @@ Task<absl::StatusOr<std::size_t>> TlsState::WriteSome(
   while (true) {
     std::size_t size = 0;
     ERR_clear_error();
-    const int result = SSL_write_ex(impl_->ssl_, buffer.data(), buffer.size(),
-                                    &size);
-    const int error = result == 1 ? SSL_ERROR_NONE
-                                  : SSL_get_error(impl_->ssl_, result);
+    const int result =
+        SSL_write_ex(impl_->ssl_, buffer.data(), buffer.size(), &size);
+    const int error =
+        result == 1 ? SSL_ERROR_NONE : SSL_get_error(impl_->ssl_, result);
     absl::Status flushed = co_await FlushOutput(stream);
     if (!flushed.ok()) co_return flushed;
     if (result == 1) co_return size;
@@ -389,8 +422,8 @@ Task<absl::Status> TlsState::Shutdown(TcpStream& stream) {
   impl_->shutdown_started_ = true;
   ERR_clear_error();
   const int result = SSL_shutdown(impl_->ssl_);
-  const int error = result >= 0 ? SSL_ERROR_NONE
-                                : SSL_get_error(impl_->ssl_, result);
+  const int error =
+      result >= 0 ? SSL_ERROR_NONE : SSL_get_error(impl_->ssl_, result);
   absl::Status flushed = co_await FlushOutput(stream);
   if (!flushed.ok()) co_return flushed;
   if (result >= 0 || error == SSL_ERROR_WANT_READ ||

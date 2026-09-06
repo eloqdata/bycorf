@@ -41,6 +41,9 @@ static_assert(alignof(Connection) > kConnectionTagMask);
 int kWakePollTag = 0;       // CQE user_data sentinel: wake eventfd poll
 int kCrossCoreWakeTag = 0;  // CQE user_data sentinel: cross-core MSG_RING wake
 int kPeerDisconnectCancelTag = 0;
+// CQE user_data sentinel for fire-and-forget cancel requests (SubmitCancel):
+// the request's own completion carries no state and is dropped on dispatch.
+int kCancelRequestTag = 0;
 
 std::int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -504,6 +507,38 @@ absl::Status IoUringBackend::SubmitAcceptMultishot(int listen_fd,
   return absl::OkStatus();
 }
 
+absl::Status IoUringBackend::SubmitConnect(int fd, const sockaddr* address,
+                                           socklen_t address_length,
+                                           IoCompletion* tag) {
+  if (fd < 0 || address == nullptr || tag == nullptr) {
+    return absl::Status(absl::StatusCode::kInvalidArgument,
+                        "invalid connect request");
+  }
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return absl::Status(absl::StatusCode::kUnavailable,
+                        "failed to acquire connect sqe");
+  }
+  io_uring_prep_connect(sqe, fd, address, address_length);
+  io_uring_sqe_set_data(sqe, tag);
+  return absl::OkStatus();
+}
+
+absl::Status IoUringBackend::SubmitCancel(IoCompletion* target) {
+  if (target == nullptr) {
+    return absl::Status(absl::StatusCode::kInvalidArgument,
+                        "cancel target must not be null");
+  }
+  io_uring_sqe* sqe = AcquireSqe();
+  if (sqe == nullptr) {
+    return absl::Status(absl::StatusCode::kUnavailable,
+                        "failed to acquire cancel sqe");
+  }
+  io_uring_prep_cancel(sqe, target, 0);
+  io_uring_sqe_set_data(sqe, &kCancelRequestTag);
+  return absl::OkStatus();
+}
+
 absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
   if (connection == nullptr) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
@@ -748,6 +783,9 @@ void IoUringBackend::DispatchCqe(io_uring_cqe* cqe) {
   } else if (data == &kPeerDisconnectCancelTag) {
     // The cancelled poll's own CQE retires the connection operation. The
     // cancel request completion carries no additional state.
+  } else if (data == &kCancelRequestTag) {
+    // SubmitCancel's request CQE (0 or -ENOENT) is informational only; the
+    // cancelled operation's own CQE is what its owner waits for.
   } else if (IsMultishotData(data)) {
     HandleMultishotRecv(DecodeMultishotConnection(data), cqe);
   } else if (IsPeerDisconnectData(data)) {

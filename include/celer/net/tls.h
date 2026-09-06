@@ -22,6 +22,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "celer/runtime/task.h"
@@ -93,6 +94,7 @@ class TlsState {
   Task<absl::StatusOr<std::size_t>> WriteSome(
       TcpStream& stream, std::span<const std::byte> buffer);
   Task<absl::Status> Shutdown(TcpStream& stream);
+  absl::StatusOr<std::vector<std::string>> PeerCertificateUriSans() const;
 
   Task<absl::Status> FlushOutput(TcpStream& stream);
   Task<absl::Status> ReadCiphertext(TcpStream& stream);

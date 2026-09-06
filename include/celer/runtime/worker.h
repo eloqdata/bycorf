@@ -234,6 +234,16 @@ class Worker {
   absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
     return backend_.SubmitAcceptMultishot(listen_fd, tag);
   }
+  // Async connect on a raw fd (pre-registration); see ConnectTcp.
+  absl::Status SubmitConnect(int fd, const sockaddr* address,
+                             socklen_t address_length, IoCompletion* tag) {
+    return backend_.SubmitConnect(fd, address, address_length, tag);
+  }
+  // Best-effort cancel of the in-flight SQE tagged `target`; owner-thread
+  // only (the ring is single-issuer).
+  absl::Status SubmitCancel(IoCompletion* target) {
+    return backend_.SubmitCancel(target);
+  }
   absl::Status EnsureRecvArmed(Connection* connection) {
     return backend_.StartRecvMultishot(connection);
   }

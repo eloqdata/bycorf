@@ -16,7 +16,10 @@
 
 #include "celer/net/tcp_stream.h"
 
+#include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -48,6 +51,12 @@ absl::Status ErrnoToStatus(int err, const char* operation) {
       return absl::Status(absl::StatusCode::kFailedPrecondition, operation);
     case ENOSYS:
       return absl::Status(absl::StatusCode::kUnimplemented, operation);
+    case ECONNREFUSED:
+    case EHOSTUNREACH:
+    case ENETUNREACH:
+      // Reachability failures surface on connect (and on a racing send); the
+      // peer being down is a transient condition for the caller.
+      return absl::Status(absl::StatusCode::kUnavailable, operation);
     default:
       return absl::Status(absl::StatusCode::kUnknown, operation);
   }
@@ -309,6 +318,123 @@ void WriteVOperation::Complete(Worker& worker, int result, unsigned flags) {
   worker.Enqueue(awaiting_);
 }
 
+ConnectOperation::ConnectOperation(Worker& worker, int fd,
+                                   const sockaddr* address,
+                                   socklen_t address_length,
+                                   std::chrono::nanoseconds timeout) noexcept
+    : worker_(&worker),
+      fd_(fd),
+      has_timeout_(timeout.count() > 0),
+      timeout_done_(timeout.count() <= 0) {
+  // The SQEs reference the address and the timespec until their CQEs arrive;
+  // both live here in the awaiting frame, which outlives the operation.
+  if (address != nullptr && address_length > 0 &&
+      address_length <= sizeof(address_)) {
+    std::memcpy(&address_, address, address_length);
+    address_length_ = address_length;
+  }
+  const auto seconds =
+      std::chrono::duration_cast<std::chrono::seconds>(timeout);
+  const auto nanoseconds =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(timeout - seconds);
+  timeout_.tv_sec = seconds.count();
+  timeout_.tv_nsec = nanoseconds.count();
+}
+
+bool ConnectOperation::await_suspend(std::coroutine_handle<> awaiting) {
+  awaiting_ = awaiting;
+  if (fd_ < 0 || address_length_ == 0) {
+    immediate_status_ = absl::Status(absl::StatusCode::kInvalidArgument,
+                                     "invalid connect target");
+    return false;
+  }
+  absl::Status status =
+      worker_->SubmitConnect(fd_, reinterpret_cast<const sockaddr*>(&address_),
+                             address_length_, static_cast<IoCompletion*>(this));
+  if (!status.ok()) {
+    immediate_status_ = std::move(status);
+    return false;
+  }
+  if (!has_timeout_) {
+    return true;
+  }
+  status = worker_->SubmitTimeout(timeout_, &timeout_tag_);
+  if (!status.ok()) {
+    // The connect is already in flight; its CQE must still be consumed before
+    // this frame may be destroyed. Drop the deadline, pull the connect back,
+    // and surface the submission failure once the connect CQE lands.
+    timeout_done_ = true;
+    immediate_status_ = std::move(status);
+    CancelLoser(*worker_, static_cast<IoCompletion*>(this));
+  }
+  return true;
+}
+
+absl::Status ConnectOperation::await_resume() {
+  if (immediate_status_.has_value()) {
+    return std::move(*immediate_status_);
+  }
+  if (connect_result_ == 0) {
+    return absl::OkStatus();
+  }
+  if (connect_result_ == -ECANCELED) {
+    // Only the deadline cancels the connect, so the timeout won the race.
+    return absl::Status(absl::StatusCode::kDeadlineExceeded,
+                        "connect timed out");
+  }
+  return ErrnoToStatus(-connect_result_, "connect failed");
+}
+
+void ConnectOperation::Complete(Worker& worker, int result, unsigned flags) {
+  (void)flags;
+  connect_result_ = result;
+  connect_done_ = true;
+  if (!timeout_done_) {
+    CancelLoser(worker, &timeout_tag_);
+  }
+  MaybeResume(worker);
+}
+
+void ConnectOperation::TimeoutTag::Complete(Worker& worker, int result,
+                                            unsigned flags) {
+  (void)flags;
+  owner_->OnTimeoutComplete(worker, result);
+}
+
+void ConnectOperation::OnTimeoutComplete(Worker& worker, int result) {
+  // The race outcome is inferred from the connect result; the timeout result
+  // (-ETIME when it fired, -ECANCELED when the connect won) carries no state.
+  (void)result;
+  timeout_done_ = true;
+  if (!connect_done_) {
+    CancelLoser(worker, static_cast<IoCompletion*>(this));
+  }
+  MaybeResume(worker);
+}
+
+void ConnectOperation::CancelLoser(Worker& worker, IoCompletion* loser) {
+  if (loser_cancel_submitted_) {
+    return;
+  }
+  loser_cancel_submitted_ = true;
+  // Best effort: if the cancel cannot be submitted (ring tearing down), the
+  // loser's own CQE still arrives — a timeout always fires — so awaiting both
+  // completions never deadlocks; the resume is merely late.
+  (void)worker.SubmitCancel(loser);
+}
+
+void ConnectOperation::MaybeResume(Worker& worker) {
+  // Resuming requires both CQEs: the loser is cancelled asynchronously, and an
+  // early resume would let this frame be destroyed while the kernel still
+  // holds an SQE referencing it. AcquireSqe dispatches nested completions on
+  // its SQ-full retry, so a nested loser CQE can beat the outer winner handler
+  // here — resumed_ guards against the resulting double-enqueue.
+  if (connect_done_ && timeout_done_ && !resumed_) {
+    resumed_ = true;
+    worker.Enqueue(awaiting_);
+  }
+}
+
 bool TcpStream::IsOpen() const noexcept {
   return connection_ != nullptr &&
          connection_->state_ == ConnectionState::kActive &&
@@ -321,8 +447,7 @@ int TcpStream::NativeFd() const noexcept {
 
 absl::Status TcpStream::SetPeerDisconnectCallback(
     Connection::PeerDisconnectCallback callback, void* context) noexcept {
-  if (connection_ == nullptr || connection_->worker_ == nullptr ||
-      !IsOpen()) {
+  if (connection_ == nullptr || connection_->worker_ == nullptr || !IsOpen()) {
     return absl::FailedPreconditionError(
         "cannot observe disconnect on a closed stream");
   }
@@ -361,8 +486,7 @@ absl::Status TcpStream::SetReadAhead(bool enabled) noexcept {
     return absl::FailedPreconditionError(
         "recv read-ahead must be configured before the first read");
   }
-  connection_->recv_mode_ =
-      enabled ? RecvMode::kMultishot : RecvMode::kOneShot;
+  connection_->recv_mode_ = enabled ? RecvMode::kMultishot : RecvMode::kOneShot;
   return absl::OkStatus();
 }
 
@@ -507,6 +631,14 @@ Task<absl::Status> TcpStream::ShutdownTls() {
   co_return co_await tls_->Shutdown(*this);
 }
 
+absl::StatusOr<std::vector<std::string>> TcpStream::PeerCertificateUriSans()
+    const {
+  if (tls_ == nullptr) {
+    return absl::FailedPreconditionError("TLS is not active");
+  }
+  return tls_->PeerCertificateUriSans();
+}
+
 std::shared_ptr<TlsState> TcpStream::TakeTlsState() noexcept {
   if (connection_ != nullptr) connection_->tls_state_.reset();
   return std::exchange(tls_, nullptr);
@@ -554,6 +686,77 @@ absl::Status TcpStream::Close() noexcept {
   connection_->worker_->BeginClose(connection_, absl::OkStatus(),
                                    CloseMode::kLocalClose);
   return absl::OkStatus();
+}
+
+Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
+                                           std::uint16_t port,
+                                           std::chrono::nanoseconds timeout) {
+  // Numeric endpoints only: DNS resolution does not belong on a worker loop.
+  sockaddr_storage address{};
+  socklen_t address_length = 0;
+  int family = AF_UNSPEC;
+  const std::string host(ip);
+  sockaddr_in address4{};
+  address4.sin_family = AF_INET;
+  address4.sin_port = htons(port);
+  if (::inet_pton(AF_INET, host.c_str(), &address4.sin_addr) == 1) {
+    family = AF_INET;
+    std::memcpy(&address, &address4, sizeof(address4));
+    address_length = sizeof(address4);
+  } else {
+    sockaddr_in6 address6{};
+    address6.sin6_family = AF_INET6;
+    address6.sin6_port = htons(port);
+    if (::inet_pton(AF_INET6, host.c_str(), &address6.sin6_addr) == 1) {
+      family = AF_INET6;
+      std::memcpy(&address, &address6, sizeof(address6));
+      address_length = sizeof(address6);
+    }
+  }
+  if (family == AF_UNSPEC) {
+    co_return absl::Status(absl::StatusCode::kInvalidArgument,
+                           "connect target is not a numeric IPv4/IPv6 address");
+  }
+
+  // Nonblocking at creation: io_uring issues the connect on the worker, and
+  // the registered Connection assumes nonblocking semantics (as accepted
+  // sockets do).
+  const int fd =
+      ::socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+  if (fd < 0) {
+    co_return ErrnoToStatus(errno, "socket creation failed");
+  }
+  int one = 1;
+  if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
+    const int error = errno;
+    ::close(fd);
+    co_return ErrnoToStatus(error, "setsockopt(TCP_NODELAY) failed");
+  }
+
+  ConnectOperation operation(worker, fd,
+                             reinterpret_cast<const sockaddr*>(&address),
+                             address_length, timeout);
+  absl::Status connected = co_await operation;
+  if (!connected.ok()) {
+    // The operation retired fully (both CQEs consumed), so the ring no longer
+    // references the fd and a plain close is deterministic cleanup.
+    ::close(fd);
+    co_return connected;
+  }
+
+  // Mirror the accept-side registration: hand the fd to the owning worker's
+  // connection table, then wrap it as a TcpStream.
+  Connection connection;
+  connection.worker_ = &worker;
+  connection.file_.fd_ = fd;
+  connection.closed_ = false;
+  Connection* registered = worker.AddConnection(std::move(connection));
+  if (registered == nullptr) {
+    ::close(fd);
+    co_return absl::Status(absl::StatusCode::kInternal,
+                           "failed to register outbound connection");
+  }
+  co_return TcpStream(registered);
 }
 
 }  // namespace celer

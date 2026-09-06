@@ -300,4 +300,9 @@ if (CELER_BUILD_EXAMPLES)
     example/rpc_bench.cpp
   )
   target_link_libraries(rpc_bench PRIVATE celer::rpc)
+
+  add_executable(celer_connect_timer_check
+    example/connect_timer_check.cpp
+  )
+  target_link_libraries(celer_connect_timer_check PRIVATE celer::core)
 endif()
