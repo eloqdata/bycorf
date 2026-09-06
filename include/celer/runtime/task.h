@@ -20,7 +20,7 @@
 #include <coroutine>
 #include <cstdint>
 #include <exception>
-#include <optional>
+#include <memory>
 #include <type_traits>
 #include <utility>
 
@@ -53,9 +53,21 @@ class Task {
   struct promise_type {
     using completion_fn = void (*)(void*, std::coroutine_handle<>) noexcept;
 
-    promise_type() = default;
+    promise_type() noexcept : empty_{} {}
 
-    std::optional<T> value_;
+    ~promise_type() {
+      if (value_constructed_) std::destroy_at(&value_);
+    }
+
+    // Task has exactly one successful co_return and unhandled exceptions
+    // terminate. Keep the result directly in the promise so return_value does
+    // not pay optional::emplace's reset/engagement branch on every completion.
+    // The flag is still required for destroying a frame before it completes.
+    union {
+      char empty_;
+      T value_;
+    };
+    bool value_constructed_ = false;
     std::coroutine_handle<> continuation_{};
     void* completion_context_ = nullptr;
     completion_fn completion_ = nullptr;
@@ -106,12 +118,11 @@ class Task {
     template <typename U>
       requires std::is_constructible_v<T, U&&>
     void return_value(U&& value) noexcept {
-      // A coroutine reaches exactly one co_return, so its promise has no
-      // previous result to assign over. Forwarding directly into the
-      // disengaged slot avoids both optional's assign-or-construct branch and
-      // a by-value return_value parameter; the latter otherwise adds a large
-      // intermediate move for results such as CommandReply.
-      value_.emplace(std::forward<U>(value));
+      // Forwarding directly into the uninitialized slot also avoids a
+      // by-value return_value parameter; the latter adds a large intermediate
+      // move for results such as CommandReply.
+      std::construct_at(&value_, std::forward<U>(value));
+      value_constructed_ = true;
     }
 
     void unhandled_exception() noexcept { std::terminate(); }
@@ -181,13 +192,13 @@ class Task {
     // as with other temporary-backed awaiters, callers must not retain a
     // reference beyond that full expression.
     T&& await_resume() noexcept {
-      return std::move(*handle_.promise().value_);
+      return std::move(handle_.promise().value_);
     }
   };
 
   auto operator co_await() && noexcept { return Awaiter{handle_}; }
 
-  T TakeResult() && { return std::move(*handle_.promise().value_); }
+  T TakeResult() && { return std::move(handle_.promise().value_); }
   handle_type ReleaseHandle() && noexcept { return std::exchange(handle_, {}); }
 
  private:

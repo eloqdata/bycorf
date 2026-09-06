@@ -18,6 +18,7 @@
 #define CELER_RUNTIME_COROUTINE_FRAME_POOL_H_
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -106,13 +107,13 @@ class CoroutineFramePool {
   }
 
   static std::size_t ClassIndex(std::size_t requested) noexcept {
-    std::size_t bytes = kMinClassBytes;
-    for (std::size_t i = 0; i < kClassCount; ++i, bytes <<= 1) {
-      if (requested <= bytes) {
-        return i;
-      }
-    }
-    return kClassCount;
+    if (requested <= kMinClassBytes) return 0;
+    // Classes are consecutive powers of two. bit_width maps requested bytes
+    // to the same ceiling class without a comparison loop on every coroutine
+    // allocation; values above the largest class naturally return kClassCount
+    // or greater and follow the uncached path.
+    return std::bit_width(requested - 1) -
+           std::bit_width(kMinClassBytes - 1);
   }
 
   std::array<Block*, kClassCount> free_{};
