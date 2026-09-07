@@ -72,8 +72,8 @@ class IoUringBackend {
   // the backend updates the Connection directly and resumes its reader.
   absl::Status SubmitSend(const RegisteredFile& file,
                           std::span<const std::byte> buffer, IoCompletion* tag);
-  absl::Status SubmitSendMsg(const RegisteredFile& file,
-                             const msghdr* message, IoCompletion* tag);
+  absl::Status SubmitSendMsg(const RegisteredFile& file, const msghdr* message,
+                             IoCompletion* tag);
   absl::Status SubmitAcceptMultishot(int listen_fd,
                                      IoCompletion* tag);  // multishot
   // Async connect on a raw fd whose socket is not registered as a Connection

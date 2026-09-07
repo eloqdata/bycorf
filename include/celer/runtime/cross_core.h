@@ -75,9 +75,10 @@ struct RemoteWork {
 // sender does not have to keep an awaiter or heap allocation alive. Intended
 // for ownership hand-backs such as returning a registered buffer to its owner.
 // Keep default initialization trivial: dequeue scratch is overwritten before
-// use, and clearing it would write 1.5 KiB on every worker drain, even idle ones.
-// Actual messages must use aggregate initialization ({} zeroes omitted fields)
-// or assign every field before publication; a published callback must be valid.
+// use, and clearing it would write 1.5 KiB on every worker drain, even idle
+// ones. Actual messages must use aggregate initialization ({} zeroes omitted
+// fields) or assign every field before publication; a published callback must
+// be valid.
 struct RemoteNotification {
   void* context_;
   std::uint64_t value_;

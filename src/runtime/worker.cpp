@@ -80,7 +80,7 @@ double CycleFrequency() noexcept {
 #endif
 }
 
-const char *CycleCounterName() noexcept {
+const char* CycleCounterName() noexcept {
 #if defined(__x86_64__)
   return "rdtsc";
 #elif defined(__aarch64__)
@@ -90,7 +90,7 @@ const char *CycleCounterName() noexcept {
 #endif
 }
 
-const char *CycleFrequencySourceName() noexcept {
+const char* CycleFrequencySourceName() noexcept {
 #if defined(__x86_64__)
   return "absl::NominalCPUFrequency";
 #elif defined(__aarch64__)
@@ -150,7 +150,7 @@ void ForgetTaskScheduling(std::coroutine_handle<> handle) noexcept {
 
 Worker::~Worker() { Shutdown(); }
 
-absl::Status Worker::Init(const WorkerOptions &options) {
+absl::Status Worker::Init(const WorkerOptions& options) {
   if (initialized_) {
     return absl::OkStatus();
   }
@@ -219,8 +219,8 @@ void Worker::Shutdown() {
 
 void Worker::Spawn(Task<absl::Status> task) {
   task.SetCompletionCallback(
-      this, [](void *context, std::coroutine_handle<> completed) noexcept {
-        static_cast<Worker *>(context)->Enqueue(completed, true);
+      this, [](void* context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker*>(context)->Enqueue(completed, true);
       });
   auto handle = std::move(task).ReleaseHandle();
   if (handle) {
@@ -237,8 +237,8 @@ void Worker::Spawn(Task<absl::Status> task) {
 
 void Worker::SpawnRoot(Task<absl::Status> task) {
   task.SetCompletionCallback(
-      this, [](void *context, std::coroutine_handle<> completed) noexcept {
-        static_cast<Worker *>(context)->Enqueue(completed, true);
+      this, [](void* context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker*>(context)->Enqueue(completed, true);
       });
   auto handle = std::move(task).ReleaseHandle();
   if (!handle) {
@@ -255,8 +255,8 @@ void Worker::SpawnRoot(Task<absl::Status> task) {
 
 void Worker::SpawnBackground(Task<absl::Status> task) {
   task.SetCompletionCallback(
-      this, [](void *context, std::coroutine_handle<> completed) noexcept {
-        static_cast<Worker *>(context)->Enqueue(completed, true);
+      this, [](void* context, std::coroutine_handle<> completed) noexcept {
+        static_cast<Worker*>(context)->Enqueue(completed, true);
       });
   auto handle = std::move(task).ReleaseHandle();
   if (!handle) {
@@ -292,13 +292,13 @@ bool Worker::NotifyWake() noexcept {
   return stopping_.load(std::memory_order_acquire);
 }
 
-Connection *Worker::AddConnection(Connection connection) {
+Connection* Worker::AddConnection(Connection connection) {
   const int fd = connection.file_.fd_;
   if (fd < 0) {
     return nullptr;
   }
   auto owned = std::make_unique<Connection>(std::move(connection));
-  Connection *raw = owned.get();
+  Connection* raw = owned.get();
   raw->id_ = next_connection_id_++;
   raw->last_active_ms_ = NowMs();
   connections_[raw->id_] = std::move(owned);
@@ -306,7 +306,7 @@ Connection *Worker::AddConnection(Connection connection) {
   return raw;
 }
 
-void Worker::BeginClose(Connection *connection, absl::Status reason,
+void Worker::BeginClose(Connection* connection, absl::Status reason,
                         CloseMode mode) noexcept {
   if (connection == nullptr) {
     return;
@@ -355,7 +355,7 @@ void Worker::BeginClose(Connection *connection, absl::Status reason,
   RetireConnection(connection);
 }
 
-void Worker::RetireConnection(Connection *connection) {
+void Worker::RetireConnection(Connection* connection) {
   if (connection == nullptr) {
     return;
   }
@@ -421,7 +421,7 @@ namespace {
 
 using SpawnPromise = Task<absl::Status>::promise_type;
 
-SpawnPromise &PromiseOf(void *address) noexcept {
+SpawnPromise& PromiseOf(void* address) noexcept {
   return std::coroutine_handle<SpawnPromise>::from_address(address).promise();
 }
 
@@ -437,7 +437,7 @@ void Worker::ForgetDetached(std::coroutine_handle<> handle) noexcept {
   if (!handle) {
     return;
   }
-  SpawnPromise &promise = PromiseOf(handle.address());
+  SpawnPromise& promise = PromiseOf(handle.address());
   const std::uint32_t index = promise.detached_index_;
   if (index == SpawnPromise::kNotDetached) {
     return;
@@ -454,9 +454,9 @@ void Worker::DestroyDetachedTasks() noexcept {
   // Destroying a root frame runs its destructors, which release any child
   // Task frames it owns; the io_uring ring must already be quiesced so no
   // in-flight kernel operation can touch the freed frames.
-  std::vector<void *> tasks = std::move(detached_tasks_);
+  std::vector<void*> tasks = std::move(detached_tasks_);
   detached_tasks_.clear();
-  for (void *address : tasks) {
+  for (void* address : tasks) {
     const std::coroutine_handle<> handle =
         std::coroutine_handle<>::from_address(address);
     ForgetScheduling(handle);
@@ -535,7 +535,7 @@ std::size_t Worker::DrainReadyUntil(std::int64_t deadline_cycles) {
     const bool run_remote = !foreground_remote_work_.empty() &&
                             (ready_.empty() || foreground_remote_turn_);
     if (run_remote) {
-      RemoteWork *work = foreground_remote_work_.front();
+      RemoteWork* work = foreground_remote_work_.front();
       foreground_remote_work_.pop_front();
       TaskClassGuard task_class_guard(TaskClass::kForeground);
       RunRemoteWork(work);
@@ -561,7 +561,7 @@ std::size_t Worker::DrainBackgroundUntil(std::int64_t deadline_cycles) {
         !background_remote_work_.empty() &&
         (background_ready_.empty() || background_remote_turn_);
     if (run_remote) {
-      RemoteWork *work = background_remote_work_.front();
+      RemoteWork* work = background_remote_work_.front();
       background_remote_work_.pop_front();
       TaskClassGuard task_class_guard(TaskClass::kBackground);
       RunRemoteWork(work);
@@ -640,8 +640,8 @@ void Worker::LatencySampleStats::Add(std::uint64_t nanoseconds) noexcept {
   sum_ns_ += nanoseconds;
   max_ns_ = std::max(max_ns_, nanoseconds);
   const std::uint64_t microseconds = (nanoseconds + 999) / 1000;
-  const auto it = std::lower_bound(kBucketUpperUs.begin(),
-                                   kBucketUpperUs.end(), microseconds);
+  const auto it = std::lower_bound(kBucketUpperUs.begin(), kBucketUpperUs.end(),
+                                   microseconds);
   const std::size_t index =
       it == kBucketUpperUs.end()
           ? kBucketUpperUs.size() - 1
@@ -650,10 +650,9 @@ void Worker::LatencySampleStats::Add(std::uint64_t nanoseconds) noexcept {
 }
 
 double Worker::LatencySampleStats::AverageUs() const noexcept {
-  return count_ == 0
-             ? 0.0
-             : static_cast<double>(sum_ns_) /
-                   (1000.0 * static_cast<double>(count_));
+  return count_ == 0 ? 0.0
+                     : static_cast<double>(sum_ns_) /
+                           (1000.0 * static_cast<double>(count_));
 }
 
 std::uint64_t Worker::LatencySampleStats::PercentileUpperUs(
@@ -697,7 +696,7 @@ void Worker::RecordFdatasyncCompletion(FixedFile file,
   if (file.index_ >= storage_file_io_stats_.size()) [[unlikely]] {
     return;
   }
-  StorageFileIoStats &stats = storage_file_io_stats_[file.index_];
+  StorageFileIoStats& stats = storage_file_io_stats_[file.index_];
   if (write_bytes > stats.durable_write_bytes_) {
     storage_io_stats_.fdatasync_bytes_ +=
         write_bytes - stats.durable_write_bytes_;
@@ -705,7 +704,7 @@ void Worker::RecordFdatasyncCompletion(FixedFile file,
   }
 }
 
-bool Worker::CanReclaim(const Connection &connection) const noexcept {
+bool Worker::CanReclaim(const Connection& connection) const noexcept {
   return connection.state_ != ConnectionState::kActive &&
          connection.inflight_ops_ == 0 && !connection.read_waiter_ &&
          !connection.read_inflight_ && !connection.write_inflight_ &&
@@ -726,7 +725,7 @@ void Worker::ReclaimConnections() {
       continue;
     }
 
-    Connection *connection = it->second.get();
+    Connection* connection = it->second.get();
     if (!CanReclaim(*connection)) {
       connection->state_ = ConnectionState::kDraining;
       still_retired.push_back(connection_id);
@@ -740,7 +739,7 @@ void Worker::ReclaimConnections() {
   retired_connection_ids_ = std::move(still_retired);
 }
 
-void Worker::DiscardReceivedBuffers(Connection *connection) {
+void Worker::DiscardReceivedBuffers(Connection* connection) {
   if (connection == nullptr) {
     return;
   }
@@ -757,9 +756,9 @@ void Worker::CheckIdleConnections() {
   }
 
   const std::int64_t now_ms = NowMs();
-  for (auto &[connection_id, owned] : connections_) {
+  for (auto& [connection_id, owned] : connections_) {
     (void)connection_id;
-    Connection *connection = owned.get();
+    Connection* connection = owned.get();
     if (connection->retired_ || connection->closed_ ||
         connection->last_active_ms_ <= 0) {
       continue;
@@ -774,7 +773,7 @@ void Worker::CheckIdleConnections() {
   }
 }
 
-void Worker::RunRemoteWork(RemoteWork *work) {
+void Worker::RunRemoteWork(RemoteWork* work) {
   work->run_fn_(work);
   if (!work->reply_deferred_) {
     PostReply(cross_core_, work->origin_, work);
@@ -782,15 +781,15 @@ void Worker::RunRemoteWork(RemoteWork *work) {
 }
 
 bool Worker::DrainCrossCore() {
-  WorkerMailbox &mb = cross_core_->mailbox(id_);
-  RemoteWork *batch[64];
+  WorkerMailbox& mb = cross_core_->mailbox(id_);
+  RemoteWork* batch[64];
   // Both dequeue paths assign all fields of [0, count); never read the unused
   // suffix. Default initialization intentionally leaves this scratch untouched.
   RemoteNotification notifications[64];
   std::size_t nreq = 0;
   std::size_t nrep = 0;
   std::size_t nnotifications = 0;
-  const auto schedule_request = [this](RemoteWork *work) {
+  const auto schedule_request = [this](RemoteWork* work) {
 #if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
     const std::uint64_t now = CrossCoreTraceNowNanos();
     if (work->request_post_ns_ != 0 && now >= work->request_post_ns_) {
@@ -804,7 +803,7 @@ bool Worker::DrainCrossCore() {
       foreground_remote_work_.push_back(work);
     }
   };
-  const auto schedule_reply = [this](RemoteWork *work) {
+  const auto schedule_reply = [this](RemoteWork* work) {
 #if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
     const std::uint64_t now = CrossCoreTraceNowNanos();
     if (work->reply_post_ns_ != 0 && now >= work->reply_post_ns_) {
@@ -837,7 +836,7 @@ bool Worker::DrainCrossCore() {
     const std::size_t overflow_notifications =
         mb.notifications_.try_dequeue_bulk(notifications, 64);
     for (std::size_t i = 0; i < overflow_notifications; ++i) {
-      RemoteNotification &notification = notifications[i];
+      RemoteNotification& notification = notifications[i];
       notification.run_fn_(notification.context_, notification.value_);
     }
     nnotifications += overflow_notifications;
@@ -861,7 +860,7 @@ bool Worker::DrainCrossCore() {
         continue;
       }
 
-      CrossCoreLane &lane = cross_core_->lane(id_, sender);
+      CrossCoreLane& lane = cross_core_->lane(id_, sender);
       // Keep active=true while draining. A producer that races with the drain
       // may therefore coalesce into this visit. Clearing followed by an empty
       // check closes the case where it arrived after that message kind's tail
@@ -888,7 +887,7 @@ bool Worker::DrainCrossCore() {
         const std::size_t count = lane.notifications_.try_dequeue_bulk(
             notifications, 64 - nnotifications);
         for (std::size_t i = 0; i < count; ++i) {
-          RemoteNotification &notification = notifications[i];
+          RemoteNotification& notification = notifications[i];
           notification.run_fn_(notification.context_, notification.value_);
         }
         nnotifications += count;
@@ -911,7 +910,7 @@ bool Worker::DrainCrossCore() {
 }
 
 void Worker::FlushWakes() {
-  CurrentWorker &w = MutableThisWorker();
+  CurrentWorker& w = MutableThisWorker();
   if (w.wake_list_.empty()) {
     return;
   }
@@ -923,7 +922,7 @@ void Worker::FlushWakes() {
       PublishCrossCoreLane(target);
     }
     w.wake_pending_[target] = 0;
-    WorkerMailbox &mb = cross_core_->mailbox(target);
+    WorkerMailbox& mb = cross_core_->mailbox(target);
     ++wake_checks_;
     const bool parked =
         mb.wake_seq_.fetch_add(1, std::memory_order_acq_rel) == kWakeSeqParked;
@@ -995,16 +994,14 @@ bool Worker::BusyPoll() {
 #ifdef CELER_WITH_SPDK_STORAGE
 bool Worker::PollStorage() {
   const std::int64_t start = CycleNow();
-  const SpdkPollResult result = storage_backend_.Poll(
-      options_.spdk_max_completions_per_poll_);
-  const std::uint64_t elapsed =
-      static_cast<std::uint64_t>(CycleNow() - start);
+  const SpdkPollResult result =
+      storage_backend_.Poll(options_.spdk_max_completions_per_poll_);
+  const std::uint64_t elapsed = static_cast<std::uint64_t>(CycleNow() - start);
   ++scheduler_stats_.storage_poll_calls_;
   scheduler_stats_.storage_poll_empty_ += result.completions_ == 0;
   scheduler_stats_.storage_completions_ += result.completions_;
-  scheduler_stats_.storage_max_completions_ =
-      std::max<std::uint64_t>(scheduler_stats_.storage_max_completions_,
-                              result.completions_);
+  scheduler_stats_.storage_max_completions_ = std::max<std::uint64_t>(
+      scheduler_stats_.storage_max_completions_, result.completions_);
   scheduler_stats_.storage_poll_cycles_ += elapsed;
   scheduler_stats_.storage_max_poll_cycles_ =
       std::max(scheduler_stats_.storage_max_poll_cycles_, elapsed);
@@ -1042,9 +1039,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
        !foreground_remote_work_.empty())) {
     MergeDeferred();
     const std::int64_t pre_poll_start = CycleNow();
-    const std::size_t pre_poll_resumes = DrainReadyUntil(
-        pre_poll_start +
-        static_cast<std::int64_t>(spdk_foreground_pre_poll_cycles_));
+    const std::size_t pre_poll_resumes =
+        DrainReadyUntil(pre_poll_start + static_cast<std::int64_t>(
+                                             spdk_foreground_pre_poll_cycles_));
     if (pre_poll_resumes != 0) {
       did_work = true;
       const std::uint64_t pre_poll_cycles =
@@ -1136,7 +1133,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
   //    producer's fetch_add changes wake_seq, so the CAS fails and we loop
   //    instead of park).
   CheckIdleConnections();
-  WorkerMailbox &mb = cross_core_->mailbox(id_);
+  WorkerMailbox& mb = cross_core_->mailbox(id_);
   const std::uint32_t seq = mb.wake_seq_.load(std::memory_order_acquire);
   if (DrainCrossCore()) {
     return true;  // raced: work arrived; next iteration drains + submits it
@@ -1166,7 +1163,7 @@ void Worker::Run() {
     ReclaimConnections();
   }
 
-  for (auto &[connection_id, owned] : connections_) {
+  for (auto& [connection_id, owned] : connections_) {
     (void)connection_id;
     BeginClose(owned.get(),
                absl::Status(absl::StatusCode::kCancelled, "worker shutdown"),

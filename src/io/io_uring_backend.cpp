@@ -549,8 +549,7 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
     return absl::OkStatus();  // already armed / not arm-able (idempotent)
   }
   const bool use_multishot =
-      recv_multishot_enabled_ &&
-      connection->recv_mode_ == RecvMode::kMultishot;
+      recv_multishot_enabled_ && connection->recv_mode_ == RecvMode::kMultishot;
   if (!use_multishot && !connection->received_buffers_.empty()) {
     return absl::OkStatus();
   }
@@ -601,8 +600,7 @@ absl::Status IoUringBackend::SubmitCancelRecv(Connection* connection,
   return absl::OkStatus();
 }
 
-absl::Status IoUringBackend::StartPeerDisconnectPoll(
-    Connection* connection) {
+absl::Status IoUringBackend::StartPeerDisconnectPoll(Connection* connection) {
   if (connection == nullptr) {
     return absl::InvalidArgumentError("connection must not be null");
   }
@@ -612,14 +610,13 @@ absl::Status IoUringBackend::StartPeerDisconnectPoll(
   }
   io_uring_sqe* sqe = AcquireSqe();
   if (sqe == nullptr) {
-    return absl::UnavailableError(
-        "failed to acquire peer disconnect poll sqe");
+    return absl::UnavailableError("failed to acquire peer disconnect poll sqe");
   }
   const int fd = connection->file_.is_fixed_
                      ? static_cast<int>(connection->file_.fixed_index_)
                      : connection->file_.fd_;
-  io_uring_prep_poll_add(
-      sqe, fd, static_cast<unsigned>(POLLERR | POLLHUP | POLLRDHUP));
+  io_uring_prep_poll_add(sqe, fd,
+                         static_cast<unsigned>(POLLERR | POLLHUP | POLLRDHUP));
   if (connection->file_.is_fixed_) sqe->flags |= IOSQE_FIXED_FILE;
   io_uring_sqe_set_data(sqe, EncodePeerDisconnectData(connection));
   connection->peer_disconnect_poll_armed_ = true;
@@ -628,8 +625,7 @@ absl::Status IoUringBackend::StartPeerDisconnectPoll(
   return absl::OkStatus();
 }
 
-absl::Status IoUringBackend::CancelPeerDisconnectPoll(
-    Connection* connection) {
+absl::Status IoUringBackend::CancelPeerDisconnectPoll(Connection* connection) {
   if (connection == nullptr || !connection->peer_disconnect_poll_armed_ ||
       connection->peer_disconnect_poll_cancel_requested_) {
     return absl::OkStatus();
@@ -696,8 +692,7 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
   }
   const bool has_buffer = (cqe->flags & IORING_CQE_F_BUFFER) != 0;
   const bool use_multishot =
-      recv_multishot_enabled_ &&
-      connection->recv_mode_ == RecvMode::kMultishot;
+      recv_multishot_enabled_ && connection->recv_mode_ == RecvMode::kMultishot;
   std::uint16_t buffer_id = 0;
   if (has_buffer) {
     buffer_id =
@@ -769,8 +764,7 @@ void IoUringBackend::HandlePeerDisconnect(Connection* connection,
   if (cqe->res < 0 || connection->state_ != ConnectionState::kActive) return;
   if ((cqe->res & (POLLERR | POLLHUP | POLLRDHUP)) == 0) return;
   if (connection->peer_disconnect_callback_ != nullptr) {
-    connection->peer_disconnect_callback_(
-        connection->peer_disconnect_context_);
+    connection->peer_disconnect_callback_(connection->peer_disconnect_context_);
   }
 }
 

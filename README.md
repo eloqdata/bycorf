@@ -15,3 +15,26 @@ limitations under the License.
 -->
 
 # celer
+
+## Development
+
+Celer uses Google-style C++23 formatting and pins clang-format 23.1.0 through
+`pre-commit`. Install and enable the hook in a standalone Celer checkout:
+
+```bash
+sudo apt-get install pre-commit
+pre-commit install
+```
+
+The hook formats staged first-party C and C++ files. If it changes a file, the
+commit stops so the result can be reviewed and staged before retrying. Format
+the complete maintained source tree with:
+
+```bash
+pre-commit run clang-format --all-files
+```
+
+The CMake `format` and `format-check` targets are enabled only when the detected
+system clang-format reports exactly version 23.1.0. The pre-commit environment
+downloads that pinned formatter independently, so it does not add a runtime
+dependency to Celer.

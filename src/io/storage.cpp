@@ -33,8 +33,7 @@ bool IsSpdkStoragePath(std::string_view path) noexcept {
   return path.starts_with("spdk://");
 }
 
-absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(
-    std::string_view path) {
+absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(std::string_view path) {
   return absl::Status(absl::StatusCode::kUnimplemented,
                       "SPDK storage path requires CELER_WITH_SPDK_STORAGE: " +
                           std::string(path));
@@ -46,17 +45,15 @@ absl::Status ReadSpdkStorage(std::string_view, std::span<std::byte>,
                       "SPDK storage is not compiled in");
 }
 
-absl::Status WriteSpdkStorage(std::string_view,
-                              std::span<const std::byte>, std::uint64_t,
-                              bool) {
+absl::Status WriteSpdkStorage(std::string_view, std::span<const std::byte>,
+                              std::uint64_t, bool) {
   return absl::Status(absl::StatusCode::kUnimplemented,
                       "SPDK storage is not compiled in");
 }
 
 void ReleaseSpdkStorageMetadataQpairs() noexcept {}
 
-void* AllocateStorageBuffer(std::size_t bytes,
-                            std::size_t alignment) noexcept {
+void* AllocateStorageBuffer(std::size_t bytes, std::size_t alignment) noexcept {
   return ::operator new[](bytes, std::align_val_t(alignment), std::nothrow);
 }
 

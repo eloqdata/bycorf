@@ -207,9 +207,9 @@ absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
     if (spdk_nvme_probe(&trid, &context, ProbeCallback, AttachCallback,
                         nullptr) != 0 ||
         context.ctrlr_ == nullptr) {
-      return absl::Status(absl::StatusCode::kNotFound,
-                          "SPDK could not attach NVMe controller " +
-                              parsed->traddr_);
+      return absl::Status(
+          absl::StatusCode::kNotFound,
+          "SPDK could not attach NVMe controller " + parsed->traddr_);
     }
     auto attached = std::make_unique<SpdkController>();
     attached->traddr_ = parsed->traddr_;
@@ -227,9 +227,9 @@ absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
 
   spdk_nvme_ns* ns = spdk_nvme_ctrlr_get_ns(controller->ctrlr_, parsed->nsid_);
   if (ns == nullptr || !spdk_nvme_ns_is_active(ns)) {
-    return absl::Status(absl::StatusCode::kNotFound,
-                        "SPDK NVMe namespace is not active: " +
-                            parsed->canonical_);
+    return absl::Status(
+        absl::StatusCode::kNotFound,
+        "SPDK NVMe namespace is not active: " + parsed->canonical_);
   }
   const std::uint32_t sector_size = spdk_nvme_ns_get_sector_size(ns);
   if (sector_size == 0 || (sector_size & (sector_size - 1)) != 0) {
@@ -265,8 +265,7 @@ absl::Status SubmitSync(SpdkDevice& device, void* buffer, std::size_t bytes,
   if (bytes == 0) {
     return absl::OkStatus();
   }
-  if (offset % device.sector_size_ != 0 ||
-      bytes % device.sector_size_ != 0 ||
+  if (offset % device.sector_size_ != 0 || bytes % device.sector_size_ != 0 ||
       offset > device.size_bytes_ || bytes > device.size_bytes_ - offset) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "unaligned or out-of-range SPDK I/O");
@@ -328,8 +327,7 @@ bool IsSpdkStoragePath(std::string_view path) noexcept {
   return path.starts_with(kSpdkPrefix);
 }
 
-absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(
-    std::string_view path) {
+absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(std::string_view path) {
   auto device = GetDevice(path);
   if (!device.ok()) {
     return device.status();
@@ -352,8 +350,7 @@ void ReleaseSpdkStorageMetadataQpairs() noexcept {
   }
 }
 
-absl::Status ReadSpdkStorage(std::string_view path,
-                             std::span<std::byte> output,
+absl::Status ReadSpdkStorage(std::string_view path, std::span<std::byte> output,
                              std::uint64_t offset) {
   auto device = GetDevice(path);
   if (!device.ok()) {
@@ -394,8 +391,7 @@ absl::Status WriteSpdkStorage(std::string_view path,
   return status;
 }
 
-void* AllocateStorageBuffer(std::size_t bytes,
-                            std::size_t alignment) noexcept {
+void* AllocateStorageBuffer(std::size_t bytes, std::size_t alignment) noexcept {
   return spdk_dma_zmalloc(bytes, alignment, nullptr);
 }
 
@@ -406,9 +402,8 @@ void FreeStorageBuffer(void* buffer, std::size_t) noexcept {
 void SpdkStorageBackend::CompleteAsync(void* context,
                                        const spdk_nvme_cpl* completion) {
   auto* request = static_cast<AsyncRequest*>(context);
-  const int result = spdk_nvme_cpl_is_error(completion)
-                         ? -EIO
-                         : request->success_result_;
+  const int result =
+      spdk_nvme_cpl_is_error(completion) ? -EIO : request->success_result_;
   SpdkStorageBackend* backend = request->backend_;
   IoCompletion* tag = request->tag_;
   backend->CompleteRequest(tag, result);
@@ -494,7 +489,8 @@ SpdkStorageBackend::OpenFile* SpdkStorageBackend::Lookup(FixedFile file) {
              : nullptr;
 }
 
-SpdkStorageBackend::AsyncRequest* SpdkStorageBackend::AcquireRequest() noexcept {
+SpdkStorageBackend::AsyncRequest*
+SpdkStorageBackend::AcquireRequest() noexcept {
   AsyncRequest* request = free_requests_;
   if (request != nullptr) {
     free_requests_ = request->next_;
@@ -511,9 +507,10 @@ void SpdkStorageBackend::ReleaseRequest(AsyncRequest* request) noexcept {
   free_requests_ = request;
 }
 
-absl::Status SpdkStorageBackend::SubmitOpenDirect(
-    std::string_view path, int flags, mode_t, FixedFile file,
-    IoCompletion* tag) {
+absl::Status SpdkStorageBackend::SubmitOpenDirect(std::string_view path,
+                                                  int flags, mode_t,
+                                                  FixedFile file,
+                                                  IoCompletion* tag) {
   if ((flags & O_RDWR) == 0 || file.index_ >= files_.size() || tag == nullptr) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid SPDK open request");
@@ -605,12 +602,10 @@ absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
   request->success_result_ = static_cast<int>(bytes);
   const std::uint64_t lba = offset / sector;
   const std::uint32_t count = static_cast<std::uint32_t>(bytes / sector);
-  int rc = write ? spdk_nvme_ns_cmd_write(device->ns_, opened->qpair_,
-                                           buffer, lba, count, CompleteAsync,
-                                           request, 0)
-                 : spdk_nvme_ns_cmd_read(device->ns_, opened->qpair_,
-                                          buffer, lba, count, CompleteAsync,
-                                          request, 0);
+  int rc = write ? spdk_nvme_ns_cmd_write(device->ns_, opened->qpair_, buffer,
+                                          lba, count, CompleteAsync, request, 0)
+                 : spdk_nvme_ns_cmd_read(device->ns_, opened->qpair_, buffer,
+                                         lba, count, CompleteAsync, request, 0);
   if (rc != 0) {
     ReleaseRequest(request);
     return absl::Status(absl::StatusCode::kUnavailable,
@@ -634,9 +629,10 @@ absl::Status SpdkStorageBackend::SubmitRead(FixedFile file,
   return SubmitIo(file, buffer.data(), buffer.size(), offset, false, tag);
 }
 
-absl::Status SpdkStorageBackend::SubmitWrite(
-    FixedFile file, std::span<const std::byte> buffer, std::uint64_t offset,
-    IoCompletion* tag) {
+absl::Status SpdkStorageBackend::SubmitWrite(FixedFile file,
+                                             std::span<const std::byte> buffer,
+                                             std::uint64_t offset,
+                                             IoCompletion* tag) {
   return SubmitIo(file, const_cast<std::byte*>(buffer.data()), buffer.size(),
                   offset, true, tag);
 }
@@ -664,8 +660,8 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
   request->tag_ = tag;
   request->success_result_ = 0;
   auto* device = static_cast<SpdkDevice*>(opened->device_);
-  if (spdk_nvme_ns_cmd_flush(device->ns_, opened->qpair_,
-                             CompleteAsync, request) != 0) {
+  if (spdk_nvme_ns_cmd_flush(device->ns_, opened->qpair_, CompleteAsync,
+                             request) != 0) {
     ReleaseRequest(request);
     return absl::Status(absl::StatusCode::kUnavailable,
                         "SPDK flush submission failed");
@@ -690,11 +686,10 @@ SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
     const std::size_t index = (next_poll_channel_ + visited) % channel_count;
     ControllerChannel& channel = channels_[index];
     const unsigned remaining =
-        max_completions == 0
-            ? 0
-            : (result.completions_ >= max_completions
-                   ? 0
-                   : max_completions - result.completions_);
+        max_completions == 0 ? 0
+                             : (result.completions_ >= max_completions
+                                    ? 0
+                                    : max_completions - result.completions_);
     if (max_completions != 0 && remaining == 0) {
       next_poll_channel_ = index;
       break;

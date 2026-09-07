@@ -19,8 +19,8 @@
 
 #include <sys/socket.h>
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -97,9 +97,8 @@ class Worker {
 
   struct LatencySampleStats {
     static constexpr std::array<std::uint64_t, 24> kBucketUpperUs{
-        1,   2,   3,   4,   5,    8,    10,   15,
-        20,  30,  40,  50,  75,   100,  150,  200,
-        300, 500, 750, 1000, 1500, 2000, 5000, 10000};
+        1,  2,   3,   4,   5,   8,   10,  15,   20,   30,   40,   50,
+        75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 5000, 10000};
     std::uint64_t count_ = 0;
     std::uint64_t sum_ns_ = 0;
     std::uint64_t max_ns_ = 0;
@@ -227,8 +226,8 @@ class Worker {
                           IoCompletion* tag) {
     return backend_.SubmitSend(file, buffer, tag);
   }
-  absl::Status SubmitSendMsg(const RegisteredFile& file,
-                             const msghdr* message, IoCompletion* tag) {
+  absl::Status SubmitSendMsg(const RegisteredFile& file, const msghdr* message,
+                             IoCompletion* tag) {
     return backend_.SubmitSendMsg(file, message, tag);
   }
   absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {

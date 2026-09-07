@@ -56,7 +56,7 @@ Status InstallShutdownSignalHandler() {
     return Status(StatusCode::kInternal, "eventfd setup failed");
   }
 
-  struct sigaction action {};
+  struct sigaction action{};
   sigemptyset(&action.sa_mask);
   action.sa_handler = ShutdownSignalHandler;
   if (sigaction(SIGINT, &action, nullptr) != 0 ||
@@ -69,7 +69,7 @@ Status InstallShutdownSignalHandler() {
 }
 
 void CleanupShutdownSignalHandler() noexcept {
-  struct sigaction action {};
+  struct sigaction action{};
   sigemptyset(&action.sa_mask);
   action.sa_handler = SIG_DFL;
   (void)sigaction(SIGINT, &action, nullptr);

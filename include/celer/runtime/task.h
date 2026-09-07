@@ -191,9 +191,7 @@ class Task {
     // avoids materializing an intermediate T for `co_return co_await task`;
     // as with other temporary-backed awaiters, callers must not retain a
     // reference beyond that full expression.
-    T&& await_resume() noexcept {
-      return std::move(handle_.promise().value_);
-    }
+    T&& await_resume() noexcept { return std::move(handle_.promise().value_); }
   };
 
   auto operator co_await() && noexcept { return Awaiter{handle_}; }

@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
----
-BasedOnStyle: Google
-Standard: c++23
-...
+repos:
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v23.1.0
+    hooks:
+      - id: clang-format
+        name: clang-format 23.1.0
+        files: '^(example/|include/celer/|src/|tests/).*\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$'
+        exclude: '^include/celer/runtime/concurrentqueue\.h$'

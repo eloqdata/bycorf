@@ -16,11 +16,10 @@
 
 #include "celer/runtime/runtime.h"
 
-#include <sys/eventfd.h>
-#include <unistd.h>
-
 #include <pthread.h>
 #include <sched.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <condition_variable>

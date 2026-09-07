@@ -73,7 +73,7 @@ absl::Status ValidateUnixSocketParent(std::string_view path) {
       slash == std::string_view::npos
           ? "."
           : (slash == 0 ? "/" : std::string(path.substr(0, slash)));
-  struct stat metadata {};
+  struct stat metadata{};
   if (::stat(parent.c_str(), &metadata) != 0) {
     return ErrnoToStatus(errno, "inspect Unix listener parent failed");
   }
@@ -97,7 +97,7 @@ bool SameFileIdentity(const struct stat& left, const struct stat& right) {
 
 absl::Status UnlinkSocketIfSame(const std::string& path,
                                 const struct stat& expected) {
-  struct stat current {};
+  struct stat current{};
   if (::lstat(path.c_str(), &current) != 0) {
     if (errno == ENOENT) return absl::OkStatus();
     return ErrnoToStatus(errno, "inspect Unix listener before unlink failed");
@@ -415,7 +415,7 @@ absl::Status TcpListener::BindUnix(Worker* worker, std::string_view path,
     return parent;
   }
 
-  struct stat existing {};
+  struct stat existing{};
   if (::lstat(address.sun_path, &existing) == 0) {
     if (!S_ISSOCK(existing.st_mode)) {
       return absl::AlreadyExistsError(
@@ -452,7 +452,7 @@ absl::Status TcpListener::BindUnix(Worker* worker, std::string_view path,
     ::close(fd);
     return status;
   }
-  struct stat bound {};
+  struct stat bound{};
   if (::lstat(address.sun_path, &bound) != 0) {
     const int inspect_error = errno;
     ::close(fd);
@@ -532,7 +532,7 @@ absl::Status TcpListener::Close() noexcept {
   }
   if (!unix_path_.empty()) {
     const std::string path = std::exchange(unix_path_, {});
-    struct stat expected {};
+    struct stat expected{};
     expected.st_dev = static_cast<dev_t>(unix_device_);
     expected.st_ino = static_cast<ino_t>(unix_inode_);
     const bool valid = std::exchange(unix_identity_valid_, false);

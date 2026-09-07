@@ -84,8 +84,8 @@ Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
     for (const std::string& host : ctx.bind_addresses_) {
       auto addresses = ResolveTcpAddresses(host, endpoint.port_);
       if (!addresses.ok()) {
-        spdlog::error("worker[{}] resolve {}:{} failed: {}", worker.id(),
-                      host, endpoint.port_, addresses.status().message());
+        spdlog::error("worker[{}] resolve {}:{} failed: {}", worker.id(), host,
+                      endpoint.port_, addresses.status().message());
         worker.RequestStop();
         co_return addresses.status();
       }
@@ -94,8 +94,8 @@ Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
             address.display_ + (endpoint.tls_ == nullptr ? "/plain" : "/tls");
         if (!seen.insert(key).second) continue;
         auto listener = std::make_unique<TcpListener>();
-        absl::Status bound = listener->Bind(
-            &worker, address, backlog_, ctx.reuse_port_);
+        absl::Status bound =
+            listener->Bind(&worker, address, backlog_, ctx.reuse_port_);
         if (!bound.ok()) {
           spdlog::error("worker[{}] bind {} failed: {}", worker.id(),
                         address.display_, bound.message());

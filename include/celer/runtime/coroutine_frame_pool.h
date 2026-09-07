@@ -112,8 +112,7 @@ class CoroutineFramePool {
     // to the same ceiling class without a comparison loop on every coroutine
     // allocation; values above the largest class naturally return kClassCount
     // or greater and follow the uncached path.
-    return std::bit_width(requested - 1) -
-           std::bit_width(kMinClassBytes - 1);
+    return std::bit_width(requested - 1) - std::bit_width(kMinClassBytes - 1);
   }
 
   std::array<Block*, kClassCount> free_{};

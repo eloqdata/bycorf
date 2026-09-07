@@ -54,8 +54,7 @@ void Check(bool condition, std::string_view name) {
   }
 }
 
-std::int64_t ElapsedMs(
-    std::chrono::steady_clock::time_point start) {
+std::int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now() - start)
       .count();
@@ -63,9 +62,9 @@ std::int64_t ElapsedMs(
 
 // Cancels `handle` after `delay`; runs on the worker, so Cancel takes the
 // prompt io_uring_prep_cancel path.
-celer::Task<absl::Status> CancelAfterOnWorker(
-    celer::Worker& worker, celer::TimerCancelHandle handle,
-    std::chrono::nanoseconds delay) {
+celer::Task<absl::Status> CancelAfterOnWorker(celer::Worker& worker,
+                                              celer::TimerCancelHandle handle,
+                                              std::chrono::nanoseconds delay) {
   (void)co_await celer::SleepFor(worker, delay);
   handle.Cancel();
   co_return absl::OkStatus();
@@ -142,8 +141,8 @@ celer::Task<absl::Status> CheckTimerCancelBeforeAwait(celer::Worker& worker) {
 absl::StatusOr<std::uint16_t> BoundPort(const celer::TcpListener& listener) {
   sockaddr_in address{};
   socklen_t length = sizeof(address);
-  if (::getsockname(listener.NativeFd(),
-                    reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+  if (::getsockname(listener.NativeFd(), reinterpret_cast<sockaddr*>(&address),
+                    &length) != 0) {
     return absl::Status(absl::StatusCode::kInternal, "getsockname failed");
   }
   return ntohs(address.sin_port);
@@ -178,9 +177,8 @@ celer::Task<absl::Status> CheckConnectSuccess(celer::Worker& worker) {
   celer::TcpStream server(*accepted);
 
   constexpr std::string_view kPing = "ping";
-  absl::Status written = co_await client->WriteAll(
-      std::span<const std::byte>(
-          reinterpret_cast<const std::byte*>(kPing.data()), kPing.size()));
+  absl::Status written = co_await client->WriteAll(std::span<const std::byte>(
+      reinterpret_cast<const std::byte*>(kPing.data()), kPing.size()));
   Check(written.ok(), "connect-success: client write");
 
   std::array<std::byte, 16> buffer{};
@@ -226,8 +224,9 @@ celer::Task<absl::Status> CheckConnectRefused(celer::Worker& worker) {
   }
   const auto started = std::chrono::steady_clock::now();
   auto client = co_await celer::ConnectTcp(worker, "127.0.0.1", *port, 5s);
-  Check(!client.ok() && client.status().code() == absl::StatusCode::kUnavailable,
-        "connect-refused: ECONNREFUSED maps to kUnavailable");
+  Check(
+      !client.ok() && client.status().code() == absl::StatusCode::kUnavailable,
+      "connect-refused: ECONNREFUSED maps to kUnavailable");
   Check(ElapsedMs(started) < 2000, "connect-refused: fails fast");
   co_return absl::OkStatus();
 }
@@ -237,7 +236,8 @@ celer::Task<absl::Status> CheckConnectRefused(celer::Worker& worker) {
 // and cancels it.
 celer::Task<absl::Status> CheckConnectTimeout(celer::Worker& worker) {
   const auto started = std::chrono::steady_clock::now();
-  auto client = co_await celer::ConnectTcp(worker, "10.255.255.1", 17699, 300ms);
+  auto client =
+      co_await celer::ConnectTcp(worker, "10.255.255.1", 17699, 300ms);
   const std::int64_t elapsed = ElapsedMs(started);
   if (!client.ok() &&
       client.status().code() == absl::StatusCode::kUnavailable) {
@@ -259,8 +259,7 @@ celer::Task<absl::Status> CheckConnectTimeout(celer::Worker& worker) {
 }
 
 celer::Task<absl::Status> CheckConnectRejectsHostname(celer::Worker& worker) {
-  auto client =
-      co_await celer::ConnectTcp(worker, "localhost", 17699, 100ms);
+  auto client = co_await celer::ConnectTcp(worker, "localhost", 17699, 100ms);
   Check(!client.ok() &&
             client.status().code() == absl::StatusCode::kInvalidArgument,
         "connect: non-numeric host is rejected without DNS");
@@ -296,8 +295,9 @@ celer::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
     auto client = co_await celer::ConnectTcp(worker, "127.0.0.1", *port, 1s);
     if (client.ok() ||
         client.status().code() != absl::StatusCode::kUnavailable) {
-      Check(false, "deadline-retired(fail): refused connect maps to "
-                   "kUnavailable");
+      Check(false,
+            "deadline-retired(fail): refused connect maps to "
+            "kUnavailable");
       co_return absl::OkStatus();
     }
   }
@@ -341,8 +341,7 @@ celer::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
   Check(ElapsedMs(started) < 2000,
         "deadline-retired(ok): connect loop stays fast");
   (void)co_await celer::SleepFor(worker, 1500ms);
-  Check(true,
-        "deadline-retired(ok): no late timeout dispatch after teardown");
+  Check(true, "deadline-retired(ok): no late timeout dispatch after teardown");
 
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
     auto accepted = co_await listener.Accept();

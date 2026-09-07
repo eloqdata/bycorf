@@ -54,10 +54,8 @@ struct SpdkPollResult {
 // SPDK paths use spdk://<PCI-domain>:<bus>:<device>.<function>/<nsid>, for
 // example spdk://69f9:00:00.0/1.  The namespace defaults to 1.
 bool IsSpdkStoragePath(std::string_view path) noexcept;
-absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(
-    std::string_view path);
-absl::Status ReadSpdkStorage(std::string_view path,
-                             std::span<std::byte> output,
+absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(std::string_view path);
+absl::Status ReadSpdkStorage(std::string_view path, std::span<std::byte> output,
                              std::uint64_t offset);
 absl::Status WriteSpdkStorage(std::string_view path,
                               std::span<const std::byte> input,
@@ -92,8 +90,7 @@ class SpdkStorageBackend {
                                std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                           std::uint64_t offset, IoCompletion* tag);
-  absl::Status SubmitWrite(FixedFile file,
-                           std::span<const std::byte> buffer,
+  absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                            std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                                 std::uint64_t offset, IoCompletion* tag);
@@ -129,8 +126,7 @@ class SpdkStorageBackend {
   OpenFile* Lookup(FixedFile file);
   AsyncRequest* AcquireRequest() noexcept;
   void ReleaseRequest(AsyncRequest* request) noexcept;
-  static void CompleteAsync(void* context,
-                            const spdk_nvme_cpl* completion);
+  static void CompleteAsync(void* context, const spdk_nvme_cpl* completion);
 
   Worker* worker_ = nullptr;
   std::vector<OpenFile> files_;

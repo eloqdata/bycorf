@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
       (argc >= 4) ? static_cast<unsigned>(std::stoul(argv[3])) : 1;
 
   g_signal_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  struct sigaction sa {};
+  struct sigaction sa{};
   sigemptyset(&sa.sa_mask);
   sa.sa_handler = OnSignal;
   sigaction(SIGINT, &sa, nullptr);

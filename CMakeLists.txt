@@ -33,7 +33,28 @@ option(CELER_WITH_SPDK_STORAGE
 option(CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
   "Enable detailed cross-core queue and wake latency tracing" OFF)
 
-find_program(CELER_CLANG_FORMAT NAMES clang-format-18 clang-format)
+set(CELER_CLANG_FORMAT_REQUIRED_VERSION "23.1.0")
+string(REPLACE "." "\\." CELER_CLANG_FORMAT_VERSION_REGEX
+  "${CELER_CLANG_FORMAT_REQUIRED_VERSION}")
+find_program(CELER_CLANG_FORMAT NAMES clang-format-23 clang-format)
+if (CELER_CLANG_FORMAT)
+  execute_process(
+    COMMAND ${CELER_CLANG_FORMAT} --version
+    RESULT_VARIABLE CELER_CLANG_FORMAT_VERSION_RESULT
+    OUTPUT_VARIABLE CELER_CLANG_FORMAT_VERSION_OUTPUT
+    ERROR_VARIABLE CELER_CLANG_FORMAT_VERSION_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+  )
+  # Repository-wide formatting must be deterministic across developer
+  # machines; other releases remain unavailable to the format targets.
+  if (NOT CELER_CLANG_FORMAT_VERSION_RESULT EQUAL 0 OR
+      NOT CELER_CLANG_FORMAT_VERSION_OUTPUT MATCHES
+        "clang-format version ${CELER_CLANG_FORMAT_VERSION_REGEX}([^0-9.]|$)")
+    unset(CELER_CLANG_FORMAT CACHE)
+    set(CELER_CLANG_FORMAT "")
+  endif()
+endif()
 file(GLOB_RECURSE CELER_FORMAT_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/example/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/include/celer/*.h
@@ -58,7 +79,9 @@ if (CELER_CLANG_FORMAT)
     add_custom_target(format-check DEPENDS celer-format-check)
   endif()
 else()
-  message(STATUS "clang-format not found; format targets are disabled")
+  message(STATUS
+    "clang-format ${CELER_CLANG_FORMAT_REQUIRED_VERSION} not found; "
+    "celer format targets are disabled")
 endif()
 
 set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
