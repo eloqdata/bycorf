@@ -152,6 +152,7 @@ add_library(celer
   src/net/server.cpp
   src/net/http_service.cpp
   src/net/tcp_service.cpp
+  src/runtime/foreign_executor.cpp
   src/runtime/worker.cpp
   src/runtime/runtime.cpp
   src/net/tcp_listener.cpp

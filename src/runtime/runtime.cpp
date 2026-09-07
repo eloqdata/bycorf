@@ -97,12 +97,17 @@ class Runtime::Impl {
     // Build the cross-core mailboxes and their wake eventfds BEFORE any worker
     // thread starts, so a worker can be woken the moment it exists.
     cross_core_ = CrossCore(thread_count);
+    foreign_executors_.reserve(thread_count);
     for (unsigned i = 0; i < thread_count; ++i) {
       const int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
       if (fd < 0) {
         throw std::runtime_error("failed to create worker wake eventfd");
       }
       cross_core_.mailbox(i).wake_fd_ = fd;
+      auto foreign = std::make_unique<detail::ForeignExecutorState>();
+      foreign->cross_core_ = &cross_core_;
+      foreign->worker_id_ = static_cast<WorkerId>(i);
+      foreign_executors_.push_back(std::move(foreign));
     }
 
     states_.reserve(thread_count);
@@ -125,6 +130,8 @@ class Runtime::Impl {
         if (local_exit_code == 0) {
           local_exit_code = main_fn(i, raw->worker_);
         }
+        foreign_executors_[i]->accepting_.store(false,
+                                                std::memory_order_release);
 
         if (local_exit_code != 0) {
           int expected = 0;
@@ -156,6 +163,9 @@ class Runtime::Impl {
     }
     if (stop_requested_.exchange(true, std::memory_order_acq_rel)) {
       return;
+    }
+    for (auto& foreign : foreign_executors_) {
+      foreign->accepting_.store(false, std::memory_order_release);
     }
     for (auto& state : states_) {
       state->worker_.RequestStop();
@@ -194,9 +204,22 @@ class Runtime::Impl {
 
   int completion_fd() const noexcept { return completion_fd_; }
 
+  detail::ForeignExecutorState* ForeignState(WorkerId worker_id) {
+    if (!started_) {
+      throw std::logic_error("foreign executor requires a started runtime");
+    }
+    if (worker_id >= cross_core_.size()) {
+      throw std::out_of_range("foreign executor worker id is out of range");
+    }
+    return foreign_executors_[worker_id].get();
+  }
+
  private:
   // Declared first so it outlives the workers that hold pointers into it.
   CrossCore cross_core_;
+  // Separate from WorkerMailbox so unused foreign ingress adds no work or
+  // cache-line traffic to normal data-plane workers.
+  std::vector<std::unique_ptr<detail::ForeignExecutorState>> foreign_executors_;
   std::vector<std::unique_ptr<State>> states_;
   std::atomic<unsigned> active_workers_{0};
   std::atomic<int> exit_code_{0};
@@ -237,5 +260,9 @@ bool Runtime::stopped() const noexcept { return impl_->stopped(); }
 int Runtime::exit_code() const noexcept { return impl_->exit_code(); }
 
 int Runtime::completion_fd() const noexcept { return impl_->completion_fd(); }
+
+celer::ForeignExecutor Runtime::GetForeignExecutor(WorkerId worker_id) {
+  return celer::ForeignExecutor(impl_->ForeignState(worker_id));
+}
 
 }  // namespace celer

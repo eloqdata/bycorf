@@ -21,6 +21,7 @@
 #include <functional>
 #include <memory>
 
+#include "celer/runtime/foreign_executor.h"
 #include "celer/runtime/worker.h"
 
 namespace celer {
@@ -45,6 +46,11 @@ class Runtime {
   bool stopped() const noexcept;
   int completion_fd() const noexcept;
   int exit_code() const noexcept;
+
+  // Returns a copyable, non-owning handle for posting to one worker from
+  // threads outside this Runtime. Start must have completed and worker_id must
+  // name an existing worker; misuse throws std::logic_error/out_of_range.
+  celer::ForeignExecutor GetForeignExecutor(WorkerId worker_id);
 
  private:
   class Impl;
