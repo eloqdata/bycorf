@@ -706,9 +706,10 @@ void Worker::RecordFdatasyncCompletion(FixedFile file,
 
 bool Worker::CanReclaim(const Connection& connection) const noexcept {
   return connection.state_ != ConnectionState::kActive &&
-         connection.inflight_ops_ == 0 && !connection.read_waiter_ &&
-         !connection.read_inflight_ && !connection.write_inflight_ &&
-         !connection.recv_armed_ && connection.received_buffers_.empty();
+         connection.inflight_ops_ == 0 && connection.storage_borrows_ == 0 &&
+         !connection.read_waiter_ && !connection.read_inflight_ &&
+         !connection.write_inflight_ && !connection.recv_armed_ &&
+         connection.received_buffers_.empty();
 }
 
 void Worker::ReclaimConnections() {

@@ -83,6 +83,13 @@ struct Connection {
   bool recv_paused_ = false;
 
   std::uint32_t inflight_ops_ = 0;
+  // Session coroutines borrow their Connection storage for their whole
+  // lifetime: BeginClose/RetireConnection still close the fd and wake waiters
+  // immediately, but ReclaimConnections skips storage while it is borrowed, so
+  // a session that resumes after an external close can never dereference
+  // reclaimed memory. Borrow and release run on the owning worker thread (or
+  // before the first await that could observe retirement).
+  std::uint32_t storage_borrows_ = 0;
   absl::Status last_error_ = absl::OkStatus();
 
   std::vector<std::byte> read_buffer_;
@@ -100,6 +107,24 @@ struct Connection {
   std::shared_ptr<TlsState> tls_state_;
   void* protocol_context_ = nullptr;
 };
+
+// Session storage borrow. A server that force-closes sessions from outside
+// their session coroutine (shutdown, demotion, watchdog) takes one borrow per
+// accepted session before spawning it and releases it only when the session
+// coroutine frame is destroyed. ReclaimConnections skips borrowed storage, so
+// every dereference of a borrowed Connection stays valid even after
+// BeginClose retired it; close operations themselves stay no-op-safe through
+// the normal state_ checks. Not thread-safe: the counters are touched only on
+// the owning worker thread.
+inline void BorrowConnectionStorage(Connection* connection) noexcept {
+  if (connection != nullptr) connection->storage_borrows_ += 1;
+}
+
+inline void ReleaseConnectionStorage(Connection* connection) noexcept {
+  if (connection != nullptr && connection->storage_borrows_ != 0) {
+    connection->storage_borrows_ -= 1;
+  }
+}
 
 }  // namespace celer
 
