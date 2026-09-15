@@ -186,7 +186,10 @@ class Worker {
   }
 
   bool RunOnce(bool wait_for_completion);
+  // Run until stopped, honoring requests made before entry. A stopped Worker
+  // is not restarted by calling Run again.
   void Run();
+  // Thread-safe and sticky for this Worker's lifetime, including startup.
   void RequestStop() noexcept;
   void Stop() noexcept { RequestStop(); }
   bool stop_requested() const noexcept {

@@ -59,8 +59,9 @@ is enabled. It defaults to off when Celer is included with `add_subdirectory`,
 so the parent project controls its own tests. Tests can be built independently
 of examples with `CELER_BUILD_TESTS=ON` and `CELER_BUILD_EXAMPLES=OFF`.
 
-The current suite registers `celer_connect_timer_check`, which runs eleven
-connection and timer scenarios: timer firing and cancellation, loopback TCP
+The current suite registers `celer_connect_timer_check`, which checks shutdown
+requests before worker initialization and between initialization and Run, plus
+eleven connection and timer scenarios: timer firing and cancellation, loopback TCP
 echo, refused connections, connection deadlines, numeric-address validation,
 and retirement of losing deadlines after successful or failed connections.
 It exits nonzero on a failed check, and CTest bounds the complete run to

@@ -39,6 +39,8 @@ class Runtime {
 
   void Start(unsigned thread_count, WorkerMain main_fn,
              bool pin_workers = true);
+  // Request shutdown after Start returns, even if a worker has not entered
+  // Init or Run yet. WorkerMain must eventually observe stop or return.
   void RequestStop() noexcept;
   void WaitUntilStopped();
 
