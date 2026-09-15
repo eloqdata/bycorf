@@ -59,6 +59,9 @@ constexpr unsigned kQueueSize = 8192;
 constexpr unsigned kMaxWorkers = 15;
 constexpr int kFirstHandle = 0x40000000;
 constexpr std::size_t kMaxFrame = 1518;
+// rte_ring_create reserves pointer-sized slots; the element API below stores
+// their address representation as the uint64_t type used by DPDK's copy code.
+static_assert(sizeof(void*) == sizeof(std::uint64_t));
 
 std::uint64_t ClockNs(clockid_t clock) {
   timespec time{};
@@ -133,9 +136,9 @@ int Destination(const unsigned char* frame, std::size_t length) {
 
 void FreeRing(rte_ring*& ring) {
   if (!ring) return;
-  void* packet;
-  while (!rte_ring_dequeue(ring, &packet))
-    rte_pktmbuf_free(static_cast<rte_mbuf*>(packet));
+  std::uint64_t address;
+  while (!rte_ring_dequeue_elem(ring, &address, sizeof(address)))
+    rte_pktmbuf_free(reinterpret_cast<rte_mbuf*>(address));
   rte_ring_free(ring);
   ring = nullptr;
 }
@@ -236,7 +239,12 @@ class DpdkBackend::Impl {
       backend.WakeRemote(lane.ring_fd);
   }
   bool Enqueue(rte_ring* ring, rte_mbuf* packet, unsigned target) {
-    if (rte_ring_enqueue(ring, packet)) {
+    // DPDK's inline ring copy accesses eight-byte elements as uint64_t. Passing
+    // a pointer object/array through its void** API violates C++ strict aliasing
+    // and lets optimized builds consume uninitialized packet pointers. Store
+    // integer addresses at this boundary; ownership still moves only on success.
+    std::uint64_t address = reinterpret_cast<std::uintptr_t>(packet);
+    if (rte_ring_enqueue_elem(ring, &address, sizeof(address))) {
       ++drops;
       rte_pktmbuf_free(packet);
       return false;
@@ -321,11 +329,13 @@ class DpdkBackend::Impl {
   }
   bool FlushTx() {
     if (id >= fabric.queues) return false;
-    void* items[kBurst];
-    const unsigned n =
-        rte_ring_dequeue_burst(fabric.lanes[id].tx, items, kBurst, nullptr);
+    std::uint64_t items[kBurst];
+    const unsigned n = rte_ring_dequeue_burst_elem(
+        fabric.lanes[id].tx, items, sizeof(items[0]), kBurst, nullptr);
     if (!n) return false;
-    auto** packets = reinterpret_cast<rte_mbuf**>(items);
+    rte_mbuf* packets[kBurst];
+    for (unsigned i = 0; i < n; ++i)
+      packets[i] = reinterpret_cast<rte_mbuf*>(items[i]);
     const unsigned sent = rte_eth_tx_burst(fabric.port, id, packets, n);
     tx += sent;
     // TX pressure is bounded. Unaccepted packets remain application-owned;
@@ -347,10 +357,10 @@ class DpdkBackend::Impl {
       for (unsigned i = 0; i < n; ++i) Route(packets[i]);
       work |= n != 0;
     }
-    void* items[kBurst];
-    const unsigned n =
-        rte_ring_dequeue_burst(fabric.lanes[id].rx, items, kBurst, nullptr);
-    for (unsigned i = 0; i < n; ++i) Input(static_cast<rte_mbuf*>(items[i]));
+    std::uint64_t items[kBurst];
+    const unsigned n = rte_ring_dequeue_burst_elem(
+        fabric.lanes[id].rx, items, sizeof(items[0]), kBurst, nullptr);
+    for (unsigned i = 0; i < n; ++i) Input(reinterpret_cast<rte_mbuf*>(items[i]));
     work |= n != 0;
     celer_bsd_poll();
     return FlushTx() || work;

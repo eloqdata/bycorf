@@ -68,16 +68,16 @@ def run(args, mode, directory):
     with path.open("w") as log:
         child = subprocess.Popen(
             ["taskset", "-c", args.server_cpus, str(args.binary.resolve()),
-             ADDRESS[0], str(ADDRESS[1]), "2"], env=env,
+             ADDRESS[0], str(ADDRESS[1]), str(args.workers)], env=env,
             stdout=log, stderr=subprocess.STDOUT)
         live = []
         try:
             until = time.monotonic() + 20
             while True:
                 text = path.read_text()
-                # PMD configuration changes the TAP MAC. Wait until both VNET
+                # PMD configuration changes the TAP MAC. Wait until all VNET
                 # interfaces exist before assigning the Linux-side address.
-                if text.count("celer0: Ethernet address:") == 2:
+                if text.count("celer0: Ethernet address:") == args.workers:
                     break
                 if child.poll() is not None:
                     raise RuntimeError(f"startup exited: {child.returncode}")
@@ -92,7 +92,7 @@ def run(args, mode, directory):
                 subprocess.run(["tc", "qdisc", "add", "dev", TAP, "root",
                                 "netem", "loss", "2%"], check=True)
             with concurrent.futures.ThreadPoolExecutor(8) as clients:
-                list(clients.map(exchange, range(100)))
+                list(clients.map(exchange, range(args.streams)))
             for _ in range(8):
                 live.append(socket.create_connection(ADDRESS, 8))
             # Existing flows must resume after the owner and RX worker sleep.
@@ -121,15 +121,17 @@ def run(args, mode, directory):
     stats = {int(worker): {name: int(value) for name, value in
                           re.findall(r"(\w+)=(\d+)", values)}
              for worker, values in statistics}
-    assert set(stats) == {0, 1}, stats
-    assert stats[0]["forward_rx"] > 0 and stats[1]["forward_tx"] > 0, stats
-    assert stats[0]["rx"] > 0 and stats[1]["rx"] > 0, stats
+    assert set(stats) == set(range(args.workers)), stats
+    assert stats[0]["forward_rx"] > 0, stats
+    assert sum(stats[i]["forward_tx"] for i in range(1, args.workers)) > 0, stats
+    assert all(s["rx"] > 0 for s in stats.values()), stats
     if mode == "adaptive":
         assert all(s["waits"] > 0 for s in stats.values()), stats
         assert stats[0]["arms"] > 0 and stats[0]["notifications"] > 0, stats
     else:
         assert all(s["waits"] == 0 for s in stats.values()), stats
-    print(f"PASS {mode}: 100 streams, half-close, 80 idle wakeups, "
+    print(f"PASS {mode}: {args.workers} workers, {args.streams} streams, "
+          "half-close, 80 idle wakeups, "
           "RX/TX forwarding, shutdown with live sockets", flush=True)
 
 
@@ -138,9 +140,15 @@ def main():
     parser.add_argument("binary", type=Path, help="DPDK-enabled celer_echo")
     parser.add_argument("--server-cpus", default="0,1")
     parser.add_argument("--client-cpus", default="2,3")
+    parser.add_argument("--workers", type=int, choices=range(2, 16), default=2,
+                        help="VNET owners sharing one RX/TX queue (default: 2)")
+    parser.add_argument("--streams", type=int, default=100,
+                        help="number of stream integrity exchanges (default: 100)")
     parser.add_argument("--mode", choices=("poll", "adaptive", "both"), default="both")
     parser.add_argument("--loss", action="store_true", help="exercise TCP retransmissions with 2%% TAP packet loss")
     args = parser.parse_args()
+    if args.streams < args.workers:
+        parser.error("--streams must be at least --workers")
     os.sched_setaffinity(0, {int(cpu) for cpu in args.client_cpus.split(",")})
     directory = Path(tempfile.mkdtemp(prefix="celer-dpdk-smoke-"))
     print(f"Logs: {directory}", flush=True)

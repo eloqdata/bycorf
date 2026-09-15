@@ -207,6 +207,19 @@ if (CELER_WITH_DPDK OR CELER_WITH_SPDK_STORAGE)
   endif()
   set(CELER_SPDK_PKG_CONFIG_PATH
     "${CELER_SPDK_SOURCE_DIR}/build/lib/pkgconfig:${CELER_DPDK_PREFIX}/lib/pkgconfig")
+  # DPDK's inline headers require the CPU features of its build (for example
+  # SSSE3 on x86). Include paths alone are insufficient when the application
+  # does not add native/aggressive optimization flags of its own.
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
+      "${CELER_PKG_CONFIG_EXECUTABLE}" --cflags-only-other libdpdk
+    OUTPUT_VARIABLE CELER_DPDK_COMPILE_FLAGS_RAW OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY
+  )
+  separate_arguments(CELER_DPDK_COMPILE_FLAGS NATIVE_COMMAND
+    "${CELER_DPDK_COMPILE_FLAGS_RAW}")
+  target_compile_options(celer PRIVATE ${CELER_DPDK_COMPILE_FLAGS})
   execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
       "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"

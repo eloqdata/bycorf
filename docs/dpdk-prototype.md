@@ -53,6 +53,10 @@ PMDs at configuration time for other hardware. SPDK currently builds in its
 submodule directory, so configure builds that use different DPDK prefixes
 serially and keep each executable's dependency provenance.
 
+Celer imports DPDK's non-include compiler flags from `libdpdk.pc`, including
+the CPU features needed by its inline headers. A non-IPO build does not need
+an extra manually supplied SSSE3 flag on x86.
+
 `CELER_WITH_SPDK_STORAGE=ON` additionally enables NVMe storage. Networking and
 SPDK share `EnsureDpdkEnvironment()` and one `spdk_env_init` call. EAL is DPDK's
 environment layer for memory, devices, and thread/lcore registration; SPDK
@@ -62,8 +66,8 @@ initializes it on Celer's behalf.
 
 The test owns an isolated TAP named `celerdp0` and refuses to alter it if it
 already exists. It uses CPUs 0 and 1 for the two server workers and CPUs 2 and 3
-for ordinary Linux TCP clients. Both workers share exactly one RX/TX queue
-pair. Root or equivalent network capabilities and `/dev/net/tun` are required.
+for ordinary Linux TCP clients by default. All workers share exactly one RX/TX
+queue pair. Root or equivalent network capabilities and `/dev/net/tun` are required.
 
 ```bash
 sudo python3 tests/dpdk_smoke.py build-dpdk-net/celer_echo
@@ -75,6 +79,15 @@ Both commands check stream contents, half-close, idle/resume, RX/TX forwarding,
 and shutdown with live connections, in poll and adaptive modes. They retain
 logs in a printed temporary directory. Change `--server-cpus` and
 `--client-cpus` if the machine has a different allowed CPU set.
+
+Run optimized builds too: the software RX/TX rings must preserve packet
+ownership and bytes with C++ strict aliasing enabled. On a 16-CPU host, exercise
+the full worker count and repeated ring turnover with:
+
+```bash
+sudo python3 tests/dpdk_smoke.py build-dpdk-net/celer_echo \
+  --workers 15 --server-cpus 0-14 --client-cpus 15 --streams 1000
+```
 
 The startup regression check uses an in-memory ring PMD and needs no TAP:
 
