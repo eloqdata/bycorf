@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <bit>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
@@ -284,13 +285,17 @@ void SpawnOnCurrentWorker(Task<absl::Status> task) {
 
 void Worker::RequestStop() noexcept {
   stop_requested_.store(true, std::memory_order_release);
-  // Runtime creates this descriptor before launch and closes it after join.
-  // Stop may race backend initialization/teardown, so do not read mutable
-  // backend state from the requesting thread.
-  if (cross_core_) {
-    const std::uint64_t wake = 1;
-    (void)::write(cross_core_->mailbox(id_).wake_fd_, &wake, sizeof(wake));
-  }
+  // Runtime owns this eventfd from before startup until after join. Backend
+  // initialization and teardown can race a foreign stop request, so do not
+  // read the backend's mutable copy of the descriptor here.
+  if (cross_core_ == nullptr) return;
+  const int wake_fd = cross_core_->mailbox(id_).wake_fd_;
+  if (wake_fd < 0) return;
+  const std::uint64_t wake = 1;
+  ssize_t result;
+  do {
+    result = ::write(wake_fd, &wake, sizeof(wake));
+  } while (result < 0 && errno == EINTR);
 }
 
 bool Worker::NotifyWake() noexcept {
@@ -714,9 +719,10 @@ void Worker::RecordFdatasyncCompletion(FixedFile file,
 
 bool Worker::CanReclaim(const Connection& connection) const noexcept {
   return connection.state_ != ConnectionState::kActive &&
-         connection.inflight_ops_ == 0 && !connection.read_waiter_ &&
-         !connection.read_inflight_ && !connection.write_inflight_ &&
-         !connection.recv_armed_ && connection.received_buffers_.empty();
+         connection.inflight_ops_ == 0 && connection.storage_borrows_ == 0 &&
+         !connection.read_waiter_ && !connection.read_inflight_ &&
+         !connection.write_inflight_ && !connection.recv_armed_ &&
+         connection.received_buffers_.empty();
 }
 
 void Worker::ReclaimConnections() {
@@ -1162,8 +1168,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
 
 void Worker::Run() {
   SetThisWorker(id_, cross_core_, this);
-  // A peer may fail, or the server may stop, while this worker initializes.
-  // Preserve that request instead of consuming its wake and restarting work.
+  // Runtime may request stop while the owner thread is still initializing.
+  // These flags belong to the worker lifetime; clearing them here loses that
+  // request after Runtime has already closed its foreign notification ingress.
   (void)NotifyWake();
   while (!stopping_.load(std::memory_order_acquire)) {
     if (!RunOnce(true)) [[unlikely]] {

@@ -24,6 +24,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(CELER_BUILD_EXAMPLES "Build example applications" ON)
+# Standalone builds expose CTest by default. Embedders own their test graph
+# and opt in explicitly, so adding Celer does not register tests for the parent.
+set(CELER_BUILD_TESTS_DEFAULT OFF)
+if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  include(CTest)
+  set(CELER_BUILD_TESTS_DEFAULT "${BUILD_TESTING}")
+endif()
+option(CELER_BUILD_TESTS "Build Celer regression tests"
+  ${CELER_BUILD_TESTS_DEFAULT})
 option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
 # These options include capabilities; applications select backends at startup.
 # DPDK networking uses a private FreeBSD IPv4/TCP stack.
@@ -33,7 +42,7 @@ option(CELER_WITH_SPDK_STORAGE
 option(CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
   "Enable detailed cross-core queue and wake latency tracing" OFF)
 
-set(CELER_CLANG_FORMAT_REQUIRED_VERSION "23.1.0")
+set(CELER_CLANG_FORMAT_REQUIRED_VERSION "23.1.1")
 string(REPLACE "." "\\." CELER_CLANG_FORMAT_VERSION_REGEX
   "${CELER_CLANG_FORMAT_REQUIRED_VERSION}")
 find_program(CELER_CLANG_FORMAT NAMES clang-format-23 clang-format)
@@ -370,7 +379,9 @@ if (CELER_BUILD_EXAMPLES)
     example/rpc_bench.cpp
   )
   target_link_libraries(rpc_bench PRIVATE celer::rpc)
+endif()
 
+if (CELER_BUILD_EXAMPLES OR CELER_BUILD_TESTS)
   add_executable(celer_connect_timer_check
     example/connect_timer_check.cpp
   )
@@ -398,4 +409,16 @@ if (CELER_BUILD_EXAMPLES)
     add_executable(celer_freebsd_tcp_sequence_check tests/freebsd_tcp_sequence_check.cpp)
     target_link_libraries(celer_freebsd_tcp_sequence_check PRIVATE celer_freebsd)
   endif()
+endif()
+
+if (CELER_BUILD_TESTS)
+  enable_testing()
+  add_test(NAME celer_connect_timer_check COMMAND celer_connect_timer_check)
+  add_test(NAME celer_connection_storage_check COMMAND celer_connection_storage_check)
+  add_test(NAME celer_backend_selection_check COMMAND celer_backend_selection_check)
+  set_tests_properties(celer_connection_storage_check celer_backend_selection_check
+    PROPERTIES TIMEOUT 90 LABELS "runtime;net;io_uring")
+  set_tests_properties(celer_connect_timer_check PROPERTIES
+    TIMEOUT 90 LABELS "runtime;net;io_uring"
+  )
 endif()

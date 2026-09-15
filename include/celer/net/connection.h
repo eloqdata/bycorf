@@ -84,10 +84,14 @@ struct Connection {
   // consuming bytes from the shared socket after the handoff.
   bool recv_paused_ = false;
 
-  // Reclamation holds include submitted I/O and explicit storage borrows. A
-  // session awaiting non-socket work must keep a hold even after its I/O
-  // drains.
   std::uint32_t inflight_ops_ = 0;
+  // Session coroutines borrow their Connection storage for their whole
+  // lifetime: BeginClose/RetireConnection still close the fd and wake waiters
+  // immediately, but ReclaimConnections skips storage while it is borrowed, so
+  // a session that resumes after an external close can never dereference
+  // reclaimed memory. Borrow and release run on the owning worker thread (or
+  // before the first await that could observe retirement).
+  std::uint32_t storage_borrows_ = 0;
   absl::Status last_error_ = absl::OkStatus();
 
   std::vector<std::byte> read_buffer_;
@@ -112,11 +116,11 @@ struct Connection {
 // keep the transport open or extend the lifetime of the worker itself. Null
 // pointers and counter overflow fail-stop rather than permit premature reclaim.
 inline void BorrowConnectionStorage(Connection* connection) noexcept {
-  if (connection == nullptr ||
-      connection->inflight_ops_ == std::numeric_limits<std::uint32_t>::max()) {
+  if (connection == nullptr || connection->storage_borrows_ ==
+                                   std::numeric_limits<std::uint32_t>::max()) {
     std::abort();
   }
-  ++connection->inflight_ops_;
+  ++connection->storage_borrows_;
 }
 
 // Release one storage borrow after all of its Connection users have unwound.
@@ -124,10 +128,10 @@ inline void BorrowConnectionStorage(Connection* connection) noexcept {
 // borrows and pending I/O must also drain. Null pointers and counter underflow
 // fail-stop. Calls must be balanced with BorrowConnectionStorage.
 inline void ReleaseConnectionStorage(Connection* connection) noexcept {
-  if (connection == nullptr || connection->inflight_ops_ == 0) {
+  if (connection == nullptr || connection->storage_borrows_ == 0) {
     std::abort();
   }
-  --connection->inflight_ops_;
+  --connection->storage_borrows_;
 }
 
 }  // namespace celer

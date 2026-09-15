@@ -52,10 +52,10 @@ void ShutdownSignalHandler(int signal) {
   (void)write(g_signal_event_fd, &wake, sizeof(wake));
 }
 
-Status InstallShutdownSignalHandler() {
+absl::Status InstallShutdownSignalHandler() {
   g_signal_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (g_signal_event_fd < 0) {
-    return Status(StatusCode::kInternal, "eventfd setup failed");
+    return absl::InternalError("eventfd setup failed");
   }
 
   struct sigaction action{};
@@ -65,7 +65,7 @@ Status InstallShutdownSignalHandler() {
       sigaction(SIGTERM, &action, nullptr) != 0) {
     close(g_signal_event_fd);
     g_signal_event_fd = -1;
-    return Status(StatusCode::kInternal, "sigaction setup failed");
+    return absl::InternalError("sigaction setup failed");
   }
   return absl::OkStatus();
 }
@@ -87,7 +87,7 @@ class EchoService final : public TcpService {
   explicit EchoService(std::uint16_t port) : TcpService(port) {}
 
  protected:
-  Task<Status> Serve(TcpStream stream) override {
+  Task<absl::Status> Serve(TcpStream stream) override {
     std::array<std::byte, 4096> buffer{};
     while (true) {
       auto read_result = co_await stream.ReadSome(buffer);

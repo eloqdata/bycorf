@@ -17,6 +17,7 @@
 // Verification harness for the NuRaft-adapter prerequisite primitives:
 //   - celer::ConnectTcp        (IORING_OP_CONNECT + deadline + loser cancel)
 //   - celer::CancellableSleepFor (one-shot timer with a thread-safe cancel)
+//   - celer::Runtime           (stop requests racing worker startup)
 // Runs every check on one celer worker and exits non-zero on any failure.
 
 #include <arpa/inet.h>
@@ -27,6 +28,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -52,6 +54,44 @@ void Check(bool condition, std::string_view name) {
     spdlog::error("[FAIL] {}", name);
     ++g_failures;
   }
+}
+
+void CheckStopDuringStartup(bool before_init) {
+  celer::Runtime runtime;
+  std::promise<absl::Status> parked;
+  auto ready = parked.get_future();
+  std::promise<void> release;
+  auto resume = release.get_future();
+  runtime.Start(
+      1,
+      [&](unsigned, celer::Worker& worker) {
+        // Hold startup at a known boundary so RequestStop wins the race on
+        // every run, including hosts that normally schedule the worker first.
+        if (before_init) {
+          parked.set_value(absl::OkStatus());
+          resume.wait();
+        }
+        celer::WorkerOptions options;
+        options.recv_buffer_count_ = 64;
+        const auto status = worker.Init(options);
+        if (!before_init) {
+          parked.set_value(status);
+          resume.wait();
+        }
+        if (!status.ok()) return 1;
+        worker.Run();
+        worker.Shutdown();
+        worker.DestroyDetachedTasks();
+        return 0;
+      },
+      /*pin_workers=*/false);
+  const auto initialized = ready.get();
+  runtime.RequestStop();
+  release.set_value();
+  runtime.WaitUntilStopped();
+  Check(initialized.ok() && runtime.exit_code() == 0,
+        before_init ? "startup stop: before Worker::Init"
+                    : "startup stop: after Init, before Run");
 }
 
 std::int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
@@ -376,6 +416,8 @@ celer::Task<absl::Status> RunAllChecks(celer::Worker& worker) {
 }  // namespace
 
 int main() {
+  CheckStopDuringStartup(/*before_init=*/true);
+  CheckStopDuringStartup(/*before_init=*/false);
   celer::Runtime runtime;
   runtime.Start(
       1,

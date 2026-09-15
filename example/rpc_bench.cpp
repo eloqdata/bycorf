@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "celer/rpc/rpc.h"
 #include "celer/runtime/runtime.h"
 #include "celer/runtime/worker.h"
