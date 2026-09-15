@@ -62,13 +62,16 @@ def run(args, mode, directory):
     # EAL settings so running a smoke test cannot accidentally select a NIC.
     env.pop("CELER_EAL_ARGS", None)
     env.pop("CELER_DPDK_GATEWAY", None)
+    # The fixture owns one queue; multi-worker forwarding uses hash steering.
+    env["CELER_DPDK_RX_STEERING"] = args.rx_steering
     env.update(CELER_DPDK_MODE=mode, CELER_DPDK_QUEUES="1",
                CELER_DPDK_IP=ADDRESS[0], CELER_DPDK_NETMASK="255.255.255.0")
     path = directory / f"{mode}.log"
     with path.open("w") as log:
         child = subprocess.Popen(
             ["taskset", "-c", args.server_cpus, str(args.binary.resolve()),
-             ADDRESS[0], str(ADDRESS[1]), str(args.workers)], env=env,
+             ADDRESS[0], str(ADDRESS[1]), str(args.workers), "-1", "dpdk",
+             *(["--no-pin-workers"] if args.no_pin_workers else [])], env=env,
             stdout=log, stderr=subprocess.STDOUT)
         live = []
         try:
@@ -122,8 +125,11 @@ def run(args, mode, directory):
                           re.findall(r"(\w+)=(\d+)", values)}
              for worker, values in statistics}
     assert set(stats) == set(range(args.workers)), stats
-    assert stats[0]["forward_rx"] > 0, stats
-    assert sum(stats[i]["forward_tx"] for i in range(1, args.workers)) > 0, stats
+    if args.workers > 1:
+        assert stats[0]["forward_rx"] > 0, stats
+        assert sum(stats[i]["forward_tx"] for i in range(1, args.workers)) > 0, stats
+    else:
+        assert stats[0]["forward_rx"] == stats[0]["forward_tx"] == 0, stats
     assert all(s["rx"] > 0 for s in stats.values()), stats
     if mode == "adaptive":
         assert all(s["waits"] > 0 for s in stats.values()), stats
@@ -140,13 +146,21 @@ def main():
     parser.add_argument("binary", type=Path, help="DPDK-enabled celer_echo")
     parser.add_argument("--server-cpus", default="0,1")
     parser.add_argument("--client-cpus", default="2,3")
-    parser.add_argument("--workers", type=int, choices=range(2, 16), default=2,
+    parser.add_argument("--workers", type=int, default=2,
                         help="VNET owners sharing one RX/TX queue (default: 2)")
+    parser.add_argument("--no-pin-workers", action="store_true",
+                        help="allow oversubscribed correctness tests on a small host")
+    parser.add_argument("--rx-steering", choices=("hash", "rss"), default="hash",
+                        help="RSS with this single-queue TAP requires --workers=1")
     parser.add_argument("--streams", type=int, default=100,
                         help="number of stream integrity exchanges (default: 100)")
     parser.add_argument("--mode", choices=("poll", "adaptive", "both"), default="both")
     parser.add_argument("--loss", action="store_true", help="exercise TCP retransmissions with 2%% TAP packet loss")
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("--workers must be positive; the binary checks its build capacity")
+    if args.rx_steering == "rss" and args.workers != 1:
+        parser.error("the single-queue TAP needs --workers=1 for RSS steering")
     if args.streams < args.workers:
         parser.error("--streams must be at least --workers")
     os.sched_setaffinity(0, {int(cpu) for cpu in args.client_cpus.split(",")})

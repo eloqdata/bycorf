@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -56,8 +57,14 @@ namespace {
 using BsdSocket = struct ::socket;
 constexpr unsigned kBurst = 32;
 constexpr unsigned kQueueSize = 8192;
-constexpr unsigned kMaxWorkers = 15;
+constexpr unsigned kMaxWorkers = CELER_DPDK_MAX_WORKERS;
+static_assert(kMaxWorkers > 0 && kMaxWorkers < RTE_MAX_LCORE);
 constexpr int kFirstHandle = 0x40000000;
+// Bit 30 distinguishes BSD handles from kernel fds; the remaining positive
+// bits partition the namespace by owner. Fixed 24-bit slots overflowed signed
+// handles at worker 64. Leave the last slot unused so increment never wraps.
+constexpr unsigned kHandleBits = 30 - std::bit_width(kMaxWorkers - 1);
+constexpr unsigned kHandleMask = (1U << kHandleBits) - 1;
 constexpr std::size_t kMaxFrame = 1518;
 // rte_ring_create reserves pointer-sized slots; the element API below stores
 // their address representation as the uint64_t type used by DPDK's copy code.
@@ -107,17 +114,19 @@ struct Fabric {
   std::uint16_t port = RTE_MAX_ETHPORTS;
   rte_mempool* pool = nullptr;
   celer_bsd_interface interface{};
-  bool adaptive = false, tap = false;
+  bool adaptive = false, tap = false, rss_owner = false;
 } fabric;
 
 std::uint16_t Read16(const unsigned char* p) {
   return (std::uint16_t(p[0]) << 8) | p[1];
 }
-// First SYN and every subsequent segment use the same tuple hash. Hardware RSS
-// may choose a different RX owner; that owner forwards the packet before TCP.
+// Hash steering assigns every segment to the same software owner. RSS steering
+// instead trusts the receiving queue: its mapping must stay fixed while any TCP
+// connection is live, because each worker owns an independent TCP stack.
 // Fragmented IP and VLAN frames are intentionally outside this MTU-1500 test
 // profile: guessing transport ports in a noninitial fragment would misroute it.
-int Destination(const unsigned char* frame, std::size_t length) {
+int Destination(const unsigned char* frame, std::size_t length,
+                unsigned rx_owner) {
   if (length < 14) return -1;
   const auto type = Read16(frame + 12);
   if (type == 0x0806) return -2;  // ARP updates every worker's neighbour cache.
@@ -126,6 +135,7 @@ int Destination(const unsigned char* frame, std::size_t length) {
   if (ihl < 20 || length < 14 + ihl || (Read16(frame + 20) & 0x3fff)) return -1;
   if (frame[23] == 1) return -2;  // ICMP errors can concern any local TCP flow.
   if (frame[23] != 6 || length < 14 + ihl + 20) return -1;
+  if (fabric.rss_owner) return static_cast<int>(rx_owner);
   std::uint32_t hash = 2166136261u;
   for (unsigned i = 26; i < 34; ++i) hash = (hash ^ frame[i]) * 16777619u;
   for (unsigned i = 14 + ihl; i < 18 + ihl; ++i)
@@ -217,7 +227,7 @@ class DpdkBackend::Impl {
     return found == sockets.end() ? nullptr : found->second;
   }
   int Own(BsdSocket* so) {
-    if ((next_handle & 0x00ffffff) == 0x00ffffff) {
+    if ((next_handle & kHandleMask) == kHandleMask) {
       celer_bsd_close(so);
       errno = EMFILE;
       return -1;
@@ -236,13 +246,14 @@ class DpdkBackend::Impl {
     // its rings, so work either prevents the wait or has a MSG_RING wake
     // queued.
     if (target != id && lane.parked.exchange(false, std::memory_order_acq_rel))
-      backend.WakeRemote(lane.ring_fd);
+      backend.kernel_.WakeRemote(lane.ring_fd);
   }
   bool Enqueue(rte_ring* ring, rte_mbuf* packet, unsigned target) {
     // DPDK's inline ring copy accesses eight-byte elements as uint64_t. Passing
-    // a pointer object/array through its void** API violates C++ strict aliasing
-    // and lets optimized builds consume uninitialized packet pointers. Store
-    // integer addresses at this boundary; ownership still moves only on success.
+    // a pointer object/array through its void** API violates C++ strict
+    // aliasing and lets optimized builds consume uninitialized packet pointers.
+    // Store integer addresses at this boundary; ownership still moves only on
+    // success.
     std::uint64_t address = reinterpret_cast<std::uintptr_t>(packet);
     if (rte_ring_enqueue_elem(ring, &address, sizeof(address))) {
       ++drops;
@@ -273,7 +284,7 @@ class DpdkBackend::Impl {
         length <= scratch.size()
             ? rte_pktmbuf_read(packet, 0, length, scratch.data())
             : nullptr);
-    const int target = bytes ? Destination(bytes, length) : -1;
+    const int target = bytes ? Destination(bytes, length, id) : -1;
     if (target == -2) {
       for (unsigned i = 0; i < fabric.workers; ++i) {
         if (i == id) continue;
@@ -360,7 +371,8 @@ class DpdkBackend::Impl {
     std::uint64_t items[kBurst];
     const unsigned n = rte_ring_dequeue_burst_elem(
         fabric.lanes[id].rx, items, sizeof(items[0]), kBurst, nullptr);
-    for (unsigned i = 0; i < n; ++i) Input(reinterpret_cast<rte_mbuf*>(items[i]));
+    for (unsigned i = 0; i < n; ++i)
+      Input(reinterpret_cast<rte_mbuf*>(items[i]));
     work |= n != 0;
     celer_bsd_poll();
     return FlushTx() || work;
@@ -481,7 +493,8 @@ class DpdkBackend::Impl {
 
 thread_local DpdkBackend::Impl* DpdkBackend::current_ = nullptr;
 
-DpdkBackend::DpdkBackend() : impl_(std::make_unique<Impl>(*this)) {}
+DpdkBackend::DpdkBackend(IoUringBackend& kernel)
+    : kernel_(kernel), impl_(std::make_unique<Impl>(*this)) {}
 DpdkBackend::~DpdkBackend() { Shutdown(); }
 
 absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
@@ -490,15 +503,40 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
     return absl::FailedPreconditionError(
         "DPDK prototype supports one Runtime per process");
   if (!workers || workers > kMaxWorkers)
-    return absl::InvalidArgumentError("DPDK prototype requires 1..15 workers");
+    return absl::InvalidArgumentError("DPDK build supports 1.." +
+                                      std::to_string(kMaxWorkers) + " workers");
+  if (workers > celer_bsd_max_workers())
+    return absl::FailedPreconditionError(
+        "FreeBSD worker capacity does not match the DPDK backend; rebuild");
   auto status = EnsureDpdkEnvironment();
   if (!status.ok()) return status;
+  // Main/control and other registered threads consume slots too. Check before
+  // configuring the port; registration still detects a concurrent claimant.
+  unsigned occupied = 0;
+  rte_lcore_iterate(
+      [](unsigned, void* count) {
+        ++*static_cast<unsigned*>(count);
+        return 0;
+      },
+      &occupied);
+  const unsigned available = RTE_MAX_LCORE - occupied;
+  if (workers > available)
+    return absl::ResourceExhaustedError(
+        "DPDK needs " + std::to_string(workers) + " worker lcore slots, but " +
+        std::to_string(available) +
+        " remain; increase build capacity or "
+        "release other EAL registrations");
   fabric.workers = workers;
   const char* mode = std::getenv("CELER_DPDK_MODE");
   if (mode && std::strcmp(mode, "poll") && std::strcmp(mode, "adaptive"))
     return absl::InvalidArgumentError(
         "CELER_DPDK_MODE must be poll or adaptive");
   fabric.adaptive = mode && std::string_view(mode) == "adaptive";
+  const char* steering = std::getenv("CELER_DPDK_RX_STEERING");
+  if (steering && std::strcmp(steering, "hash") && std::strcmp(steering, "rss"))
+    return absl::InvalidArgumentError(
+        "CELER_DPDK_RX_STEERING must be hash or rss");
+  fabric.rss_owner = steering && std::string_view(steering) == "rss";
   const char* address = std::getenv("CELER_DPDK_IP");
   const char* netmask = std::getenv("CELER_DPDK_NETMASK");
   const char* gateway = std::getenv("CELER_DPDK_GATEWAY");
@@ -512,7 +550,11 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
     return absl::FailedPreconditionError(
         "DPDK prototype requires exactly one allowlisted physical or virtual "
         "port");
-  fabric.port = rte_eth_find_next(0);
+  // Use the same unowned-port view as count_avail(). A netvsc port owns its
+  // accelerated VF, which may have a lower port ID; configuring that child
+  // directly bypasses the parent PMD's fallback and device lifecycle.
+  fabric.port = static_cast<std::uint16_t>(
+      rte_eth_find_next_owned_by(0, RTE_ETH_DEV_NO_OWNER));
   rte_eth_dev_info info{};
   int rc = rte_eth_dev_info_get(fabric.port, &info);
   if (rc) return DeviceError("ethdev info", rc);
@@ -534,6 +576,12 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   rte_eth_conf config{};
   config.intr_conf.rxq = fabric.adaptive;
   const auto rss = info.flow_type_rss_offloads & RTE_ETH_RSS_NONFRAG_IPV4_TCP;
+  // Do not silently collapse connections onto a subset of workers. RSS mode
+  // removes software redistribution and needs a stable TCP-aware queue owner.
+  // A single worker needs no hashing; multi-worker PMDs must provide TCP RSS.
+  if (fabric.rss_owner && (fabric.queues != workers || (workers > 1 && !rss)))
+    return absl::FailedPreconditionError(
+        "RSS steering requires one RX/TX pair per worker and IPv4 TCP RSS");
   if (fabric.queues > 1 && rss) {
     config.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
     config.rx_adv_conf.rss_conf.rss_hf = rss;
@@ -551,8 +599,21 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
     StopPort();
     return DeviceError("ethdev configure", rc);
   }
-  fabric.pool = rte_pktmbuf_pool_create(
-      "celer_packets", 65535, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, SOCKET_ID_ANY);
+  std::uint16_t rx_desc = 512, tx_desc = 512;
+  rc = rte_eth_dev_adjust_nb_rx_tx_desc(fabric.port, &rx_desc, &tx_desc);
+  if (rc) {
+    StopPort();
+    return DeviceError("ethdev descriptor counts", rc);
+  }
+  // Preserve the small-runtime pool size; larger queue sets must also fit
+  // posted descriptors and worker-local caches, with a burst left to forward.
+  constexpr unsigned kCacheSize = 256;
+  const unsigned needed = fabric.queues * (unsigned(rx_desc) + tx_desc) +
+                          workers * (kCacheSize + kBurst) + kBurst;
+  const unsigned packets = std::max(65535U, std::bit_ceil(needed + 1) - 1);
+  fabric.pool =
+      rte_pktmbuf_pool_create("celer_packets", packets, kCacheSize, 0,
+                              RTE_MBUF_DEFAULT_BUF_SIZE, SOCKET_ID_ANY);
   if (!fabric.pool) {
     StopPort();
     return DeviceError("packet pool", rte_errno);
@@ -569,8 +630,6 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
       return DeviceError("forwarding rings", rte_errno);
     }
   }
-  std::uint16_t rx_desc = 512, tx_desc = 512;
-  rte_eth_dev_adjust_nb_rx_tx_desc(fabric.port, &rx_desc, &tx_desc);
   for (unsigned q = 0; q < fabric.queues; ++q) {
     rc = rte_eth_rx_queue_setup(fabric.port, q, rx_desc, SOCKET_ID_ANY, nullptr,
                                 fabric.pool);
@@ -597,10 +656,12 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   std::memcpy(fabric.interface.mac, mac.addr_bytes, 6);
   fabric.interface.mtu = 1500;
   fabric.prepared = true;
-  std::fprintf(stderr, "DPDK %s: %u workers, %u RX/TX pairs, %s, IPv4 %s\n",
-               info.driver_name, workers, fabric.queues,
-               fabric.adaptive ? "adaptive" : "poll",
-               address ? address : "198.18.0.2");
+  std::fprintf(
+      stderr,
+      "DPDK %s: %u workers, %u RX/TX pairs, %s, IPv4 %s, RX steering %s\n",
+      info.driver_name, workers, fabric.queues,
+      fabric.adaptive ? "adaptive" : "poll", address ? address : "198.18.0.2",
+      fabric.rss_owner ? "rss" : "hash");
   return absl::OkStatus();
 }
 
@@ -624,7 +685,7 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
         "DPDK Runtime must prepare before worker initialization");
   auto kernel_options = options;
   kernel_options.recv_buffer_count_ = 0;
-  auto status = IoUringBackend::Init(kernel_options, worker, wake_fd);
+  auto status = kernel_.Init(kernel_options, worker, wake_fd);
   if (!status.ok()) {
     AbortStartup(status);
     return status;
@@ -634,12 +695,12 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
   impl_->buffer_size = options.recv_buffer_size_;
   // Embed the owner in the handle so an accidental transfer cannot alias an
   // unrelated socket that happens to occupy the same slot on another worker.
-  impl_->next_handle = kFirstHandle + (impl_->id << 24);
+  impl_->next_handle = kFirstHandle | (impl_->id << kHandleBits);
   current_ = impl_.get();
   if (rte_thread_register()) {
     status = DeviceError("register worker with EAL", rte_errno);
     AbortStartup(status);
-    IoUringBackend::Shutdown();
+    kernel_.Shutdown();
     current_ = nullptr;
     return status;
   }
@@ -669,10 +730,10 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
     fabric.attached.notify_all();
     rte_thread_unregister();
     current_ = nullptr;
-    IoUringBackend::Shutdown();
+    kernel_.Shutdown();
     return fabric.failure;
   }
-  fabric.lanes[id].ring_fd = WakeHandle();
+  fabric.lanes[id].ring_fd = kernel_.WakeHandle();
   impl_->notification.owner = impl_.get();
   impl_->rx_can_wait = id >= fabric.queues;
   if (fabric.adaptive && id < fabric.queues) {
@@ -709,7 +770,7 @@ void DpdkBackend::Shutdown() {
       (unsigned long long)impl_->forwarded_tx, (unsigned long long)impl_->drops,
       (unsigned long long)impl_->waits, (unsigned long long)impl_->arms,
       (unsigned long long)impl_->notifications);
-  IoUringBackend::Shutdown();
+  kernel_.Shutdown();
   rte_thread_unregister();
   current_ = nullptr;
   impl_->initialized = false;
@@ -717,7 +778,7 @@ void DpdkBackend::Shutdown() {
 bool DpdkBackend::Poll() {
   if (!impl_->initialized || impl_->polling) return false;
   impl_->polling = true;
-  const bool kernel = IoUringBackend::Poll();
+  const bool kernel = kernel_.Poll();
   const bool packets = impl_->Packets();
   const bool sockets = impl_->SocketCompletions();
   impl_->polling = false;
@@ -725,7 +786,7 @@ bool DpdkBackend::Poll() {
 }
 absl::Status DpdkBackend::Submit() {
   if (impl_->initialized) impl_->FlushTx();
-  return IoUringBackend::Submit();
+  return kernel_.Submit();
 }
 bool DpdkBackend::Wait(int timeout_ms) {
   if (!fabric.adaptive || !impl_->rx_can_wait ||
@@ -746,8 +807,8 @@ bool DpdkBackend::Wait(int timeout_ms) {
     }
     ++impl_->arms;
     if (!impl_->notification.armed) {
-      const auto submitted = IoUringBackend::SubmitPoll(
-          impl_->notification.fd, POLLIN, &impl_->notification);
+      const auto submitted = kernel_.SubmitPoll(impl_->notification.fd, POLLIN,
+                                                &impl_->notification);
       if (!submitted.ok()) {
         lane.parked.store(false);
         if (enabled) rte_eth_dev_rx_intr_disable(fabric.port, id);
@@ -761,7 +822,7 @@ bool DpdkBackend::Wait(int timeout_ms) {
   bool ok = true;
   if (!Poll() && rte_ring_empty(lane.rx) && rte_ring_empty(lane.tx) &&
       impl_->completions.empty()) {
-    const auto submitted = IoUringBackend::Submit();
+    const auto submitted = kernel_.Submit();
     if (!submitted.ok())
       ok = false;
     else {
@@ -779,7 +840,7 @@ bool DpdkBackend::Wait(int timeout_ms) {
       // Let the next worker round service it without a zero-timeout syscall.
       if (timeout_ms != 0) {
         ++impl_->waits;
-        ok = IoUringBackend::Wait(timeout_ms);
+        ok = kernel_.Wait(timeout_ms);
       }
     }
   }
@@ -792,7 +853,7 @@ absl::Status DpdkBackend::SubmitSend(const RegisteredFile& file,
                                      std::span<const std::byte> bytes,
                                      IoCompletion* tag) {
   if (!detail::IsDpdkSocket(file.fd_))
-    return IoUringBackend::SubmitSend(file, bytes, tag);
+    return kernel_.SubmitSend(file, bytes, tag);
   if (!tag) return absl::InvalidArgumentError("send completion is null");
   impl_->sends.push_back({file.fd_, tag, bytes});
   return absl::OkStatus();
@@ -801,15 +862,14 @@ absl::Status DpdkBackend::SubmitSendMsg(const RegisteredFile& file,
                                         const msghdr* message,
                                         IoCompletion* tag) {
   if (!detail::IsDpdkSocket(file.fd_))
-    return IoUringBackend::SubmitSendMsg(file, message, tag);
+    return kernel_.SubmitSendMsg(file, message, tag);
   if (!tag || !message || message->msg_control || message->msg_name)
     return absl::InvalidArgumentError("unsupported DPDK sendmsg request");
   impl_->sends.push_back({file.fd_, tag, {}, message});
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::SubmitAcceptMultishot(int fd, IoCompletion* tag) {
-  if (!detail::IsDpdkSocket(fd))
-    return IoUringBackend::SubmitAcceptMultishot(fd, tag);
+  if (!detail::IsDpdkSocket(fd)) return kernel_.SubmitAcceptMultishot(fd, tag);
   if (!tag || !impl_->Find(fd))
     return absl::InvalidArgumentError("invalid DPDK accept request");
   impl_->accepts.push_back({fd, tag, {}});
@@ -824,11 +884,11 @@ absl::Status DpdkBackend::SubmitCancel(IoCompletion* target) {
       return absl::OkStatus();
     }
   }
-  return IoUringBackend::SubmitCancel(target);
+  return kernel_.SubmitCancel(target);
 }
 absl::Status DpdkBackend::StartRecvMultishot(Connection* c) {
   if (!c || !detail::IsDpdkSocket(c->file_.fd_))
-    return IoUringBackend::StartRecvMultishot(c);
+    return kernel_.StartRecvMultishot(c);
   if (c->recv_armed_ || c->closed_ || c->closing_ || c->recv_paused_ ||
       !c->received_buffers_.empty())
     return absl::OkStatus();
@@ -841,7 +901,7 @@ absl::Status DpdkBackend::StartRecvMultishot(Connection* c) {
 }
 absl::Status DpdkBackend::SubmitCancelRecv(Connection* c, IoCompletion* tag) {
   const auto at = std::find(impl_->reads.begin(), impl_->reads.end(), c);
-  if (at == impl_->reads.end()) return IoUringBackend::SubmitCancelRecv(c, tag);
+  if (at == impl_->reads.end()) return kernel_.SubmitCancelRecv(c, tag);
   impl_->reads.erase(at);
   impl_->FinishRead(c);
   impl_->QueueCompletion(tag, 0);
@@ -849,7 +909,7 @@ absl::Status DpdkBackend::SubmitCancelRecv(Connection* c, IoCompletion* tag) {
 }
 absl::Status DpdkBackend::StartPeerDisconnectPoll(Connection* c) {
   if (!c || !detail::IsDpdkSocket(c->file_.fd_))
-    return IoUringBackend::StartPeerDisconnectPoll(c);
+    return kernel_.StartPeerDisconnectPoll(c);
   if (c->peer_disconnect_poll_armed_ || c->closed_ || c->closing_)
     return absl::OkStatus();
   c->peer_disconnect_poll_armed_ = true;
@@ -860,17 +920,17 @@ absl::Status DpdkBackend::StartPeerDisconnectPoll(Connection* c) {
 absl::Status DpdkBackend::CancelPeerDisconnectPoll(Connection* c) {
   if (std::find(impl_->disconnects.begin(), impl_->disconnects.end(), c) ==
       impl_->disconnects.end())
-    return IoUringBackend::CancelPeerDisconnectPoll(c);
+    return kernel_.CancelPeerDisconnectPoll(c);
   c->peer_disconnect_poll_cancel_requested_ = true;
   return absl::OkStatus();
 }
 std::span<const std::byte> DpdkBackend::ViewRecvBuffer(
     const Connection* c, std::uint16_t id, std::size_t offset,
     std::size_t length) const {
-  return IoUringBackend::ViewRecvBuffer(c, id, offset, length);
+  return kernel_.ViewRecvBuffer(c, id, offset, length);
 }
 void DpdkBackend::ReleaseRecvBuffer(Connection* c, std::uint16_t id) {
-  IoUringBackend::ReleaseRecvBuffer(c, id);
+  kernel_.ReleaseRecvBuffer(c, id);
 }
 
 int DpdkBackend::Listen(const sockaddr* address, socklen_t length,

@@ -102,6 +102,8 @@ static int initialize_context(unsigned worker) {
   return 0;
 }
 
+unsigned celer_bsd_max_workers(void) { return MAXCPU; }
+
 int celer_bsd_initialize(const struct celer_bsd_host* host, unsigned workers) {
   if (initialized) return EALREADY;
   if (!host || workers == 0 || workers > MAXCPU) return EINVAL;

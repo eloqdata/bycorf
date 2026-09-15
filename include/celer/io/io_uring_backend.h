@@ -43,8 +43,8 @@ struct IoBackendOptions {
   int idle_timeout_ms_ = -1;
 };
 
-// The io_uring network backend: a concrete (non-virtual) class selected at
-// compile time, so all calls inline — zero abstraction overhead. It owns the
+// The worker-owned kernel I/O backend, shared by networking and storage.
+// Concrete submissions avoid virtual dispatch. It owns the
 // ring, the provided buffer ring, the wake eventfd, SQE/CQE handling, multishot
 // recv + its re-arm, and cross-core MSG_RING wake. io_uring symbols live ONLY
 // here. The backend may touch Connection (celer-internal) and uses the Worker

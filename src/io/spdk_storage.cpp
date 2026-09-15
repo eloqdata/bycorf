@@ -31,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -140,6 +141,9 @@ void AttachCallback(void* context, const spdk_nvme_transport_id* trid,
 }
 
 absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
+  FreezeIoBackends();
+  if (!SpdkStorageEnabled())
+    return absl::FailedPreconditionError("SPDK storage is disabled");
   auto parsed = ParsePath(path);
   if (!parsed.ok()) {
     return parsed.status();
@@ -353,11 +357,18 @@ absl::Status WriteSpdkStorage(std::string_view path,
 }
 
 void* AllocateStorageBuffer(std::size_t bytes, std::size_t alignment) noexcept {
+  FreezeIoBackends();
+  if (!SpdkStorageEnabled())
+    return ::operator new[](bytes, std::align_val_t(alignment), std::nothrow);
+  if (!EnsureDpdkEnvironment().ok()) return nullptr;
   return spdk_dma_zmalloc(bytes, alignment, nullptr);
 }
 
-void FreeStorageBuffer(void* buffer, std::size_t) noexcept {
-  spdk_dma_free(buffer);
+void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept {
+  if (SpdkStorageEnabled())
+    spdk_dma_free(buffer);
+  else
+    ::operator delete[](buffer, std::align_val_t(alignment));
 }
 
 void SpdkStorageBackend::CompleteAsync(void* context,

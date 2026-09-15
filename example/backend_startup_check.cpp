@@ -25,6 +25,9 @@
 int main(int argc, char** argv) {
   const unsigned failed_worker = argc > 1 ? std::atoi(argv[1]) : 0;
   if (failed_worker > 1) return 2;
+#ifdef CELER_WITH_DPDK
+  if (!celer::ConfigureIoBackends({.dpdk_network = true}).ok()) return 1;
+#endif
   celer::Runtime runtime;
   std::atomic<unsigned> entered{0};
   std::atomic<bool> rejected{false};

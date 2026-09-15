@@ -167,6 +167,18 @@ int main(int argc, char** argv) {
     idle_timeout_ms = std::stoi(argv[4]);
   }
 
+  const std::string_view network = argc >= 6 ? argv[5] : "kernel";
+  if (network != "kernel" && network != "dpdk") return 2;
+  if (argc > 7 ||
+      (argc == 7 && std::string_view(argv[6]) != "--no-pin-workers"))
+    return 2;
+  const auto selected =
+      celer::ConfigureIoBackends({.dpdk_network = network == "dpdk"});
+  if (!selected.ok()) {
+    spdlog::error("{}", selected.message());
+    return 1;
+  }
+
   spdlog::info(
       "celer echo server listening on {}:{} threads={} idle_timeout_ms={}",
       bind_ip, port, thread_count, idle_timeout_ms);
@@ -180,6 +192,8 @@ int main(int argc, char** argv) {
   celer::ServerOptions options;
   options.bind_ip_ = std::string(bind_ip);
   options.thread_count_ = thread_count;
+  // Allows oversubscribed correctness tests; performance runs retain pinning.
+  options.pin_workers_ = argc < 7;
   options.idle_timeout_ms_ = idle_timeout_ms;
 
   celer::EchoService echo(port);

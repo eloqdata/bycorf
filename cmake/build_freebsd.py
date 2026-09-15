@@ -33,6 +33,34 @@ def run(args, **kwargs):
     return result.stdout
 
 
+def tcp_input_overlay(upstream, output):
+    """Keep ISS-check retirement current on both native TCP input paths.
+
+    Header prediction can acknowledge more than half the sequence space without
+    visiting slow ACK processing. Its later signed comparison against ISS then
+    treats a valid ACK as a ghost ACK. Latch retirement before either path can
+    return, while the sequence distance is still unambiguous. Keep the imported
+    source and manifest intact; fail closed if an upstream refresh changes the
+    exact code this narrowly scoped overlay replaces.
+    """
+    path = upstream / "sys/netinet/tcp_input.c"
+    text = path.read_text()
+    old = ("\tif (SEQ_GEQ(tp->snd_una, tp->iss + (TCP_MAXWIN << tp->snd_scale))) {\n"
+           "\t\t/* Checking SEG.ACK against ISS is definitely redundant. */\n"
+           "\t\ttp->t_flags2 |= TF2_NO_ISS_CHECK;\n\t}\n")
+    anchor = "\t/*\n\t * Header prediction: check for the two common cases\n"
+    if text.count(old) != 1 or text.count(anchor) != 1:
+        raise RuntimeError("FreeBSD TCP ISS-check overlay needs review")
+    replacement = (
+        "\t/* Retire the ISS guard before fast ACKs can bypass the slow path. */\n"
+        "\tif (!(tp->t_flags2 & TF2_NO_ISS_CHECK) &&\n"
+        "\t    SEQ_GEQ(tp->snd_una, tp->iss + (TCP_MAXWIN << tp->snd_scale)))\n"
+        "\t\ttp->t_flags2 |= TF2_NO_ISS_CHECK;\n\n")
+    generated = output / "tcp_input.c"
+    generated.write_text(text.replace(old, "").replace(anchor, replacement + anchor))
+    return path, generated
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
@@ -42,6 +70,8 @@ def main():
     for tool in ("ld", "nm", "objcopy", "ar"):
         parser.add_argument(f"--{tool}", help=f"Override the compiler-selected {tool}")
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--max-workers", type=int, default=128,
+                        help="capacity of private kernel per-worker state")
     args = parser.parse_args()
     compiler = [args.cc] + ([f"--target={args.target}"] if args.target else [])
     macros = run(compiler + ["-dM", "-E", "-x", "c", "-"], input="")
@@ -62,6 +92,8 @@ def main():
         for name in ("ld", "nm", "objcopy", "ar")}
     if args.jobs < 1:
         parser.error("--jobs must be positive")
+    if not 1 <= args.max_workers <= 1023:
+        parser.error("--max-workers must be between 1 and 1023")
     source = args.source.resolve()
     output = args.output.resolve()
     upstream = source / "third_party/freebsd"
@@ -109,7 +141,7 @@ def main():
     (include / "opt_inet.h").write_text("#define INET 1\n")
     (include / "opt_global.h").write_text(
         "#define INET 1\n#define VIMAGE 1\n#define SMP 1\n"
-        "#define MAXCPU 64\n#define CC_NEWRENO 1\n"
+        f"#define MAXCPU {args.max_workers}\n#define CC_NEWRENO 1\n"
     )
     for name in ("bus", "device"):
         run(["awk", "-f", str(kernel / "tools/makeobjops.awk"),
@@ -135,10 +167,12 @@ def main():
 
     sources = [upstream / line for line in (upstream / "SOURCES").read_text().splitlines() if line]
     sources += sorted(port.glob("*.c"))
+    tcp_input, patched_tcp_input = tcp_input_overlay(upstream, output)
 
     def compile_one(path):
         obj = output / (path.relative_to(source).as_posix().replace("/", "_") + ".o")
-        run(flags + ["-MD", "-MF", str(obj) + ".d", str(path), "-o", str(obj)])
+        compile_path = patched_tcp_input if path == tcp_input else path
+        run(flags + ["-MD", "-MF", str(obj) + ".d", str(compile_path), "-o", str(obj)])
         return obj
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:

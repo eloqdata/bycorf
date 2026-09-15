@@ -25,8 +25,12 @@ consume the stream abstraction.
 A connection allows one pending reader and one pending writer. Closure stops
 new operations and retires the connection only after buffers, completions, and
 coroutine references drain. Socket operations must execute in the owning
-worker. TCP service shutdown posts listener-close work through each worker's
-foreign executor when the DPDK backend is selected.
+worker. Sessions that can suspend on non-socket work explicitly borrow
+connection storage before spawning and release it after their final users
+unwind. These holds delay storage reclamation, not transport closure, and must
+drain before the owning worker is destroyed. TCP service shutdown posts
+listener-close work through each worker's foreign executor when the DPDK
+backend is selected.
 
 ## Kernel TCP
 
@@ -37,23 +41,49 @@ completions make received byte ranges available to the stream.
 
 ## DPDK and native FreeBSD TCP
 
-The optional backend configures one Ethernet port and a bounded number of
+The backend selected at process startup configures one Ethernet port and a bounded number of
 RX/TX queue pairs, capped by both device capabilities and the worker count.
 The first queue-count workers each own one queue pair. All workers own
 independent FreeBSD VNETs, listening on the configured shared IPv4 address.
 
-A receive owner hashes the TCP tuple before entering the stack. If another
-worker owns the flow, the receive owner publishes the packet to that worker's
-bounded software ring. The connection owner runs native Ethernet/ARP/IPv4/TCP
-processing, accepts the socket, parses application requests, and produces
-replies. Its outgoing packets enter the software TX ring of a queue owner.
+Build-time worker capacity is shared by the backend and private FreeBSD state.
+The DPDK environment provides registration slots for those workers plus its
+initializer; startup checks both build capacity and remaining EAL slots before
+configuring the port. This capacity is independent of physical queue count.
+The [runbook](../dpdk-prototype.md#worker-capacity) describes builds and limits.
+
+Port selection uses DPDK's application-available (unowned) port view. A parent
+PMD such as netvsc can own an accelerated VF beneath that single visible port;
+the parent controls child queues, datapath selection, fallback, and shutdown.
+Celer does not independently configure or close that owned child port.
+
+With default `hash` steering, a receive owner hashes the TCP tuple before
+entering the stack. If another worker owns the flow, the receive owner publishes
+the packet to that worker's bounded software ring. The connection owner runs
+native Ethernet/ARP/IPv4/TCP processing, accepts the socket, parses application
+requests, and produces replies. Its outgoing packets enter the software TX
+ring of a queue owner.
 Only that owner calls the device's TX burst API. Queue scarcity therefore does
 not reduce the number of workers that can own TCP connections.
+
+Optional `rss` steering keeps TCP packets on the receiving queue's worker and
+skips software tuple redistribution. It requires one queue pair per worker and
+IPv4 TCP RSS support for multiple workers. The PMD's RSS mapping must remain
+stable for the process lifetime so every segment reaches its existing VNET;
+live RSS remapping and socket migration are unsupported. Control traffic still
+fans out to every VNET, and outgoing packets retain the owner-local TX ring.
 
 ARP and ICMP control traffic reach every VNET so their neighbor and connection
 state can update. A single worker emits shared-address ARP and echo replies.
 TCP state, callouts, and BSD deferred tasks stay with their socket's worker;
 application key routing never changes this ownership.
+
+The private build verifies pinned upstream source digests and applies narrow
+host overlays. TCP retires its initial-sequence ACK guard before both fast and
+slow input processing, so long-lived streams cannot revive that guard after
+crossing half of the 32-bit sequence space. Ordinary ACK bounds checks remain
+active; `tests/freebsd_tcp_sequence_check.cpp` covers this invariant through
+the real stack and an in-process Ethernet peer.
 
 BSD sockets use private worker-encoded handles rather than Linux file
 descriptors. Celer's close and peer-address helpers dispatch these handles to
@@ -87,6 +117,6 @@ physical NIC interrupt behavior or predict kernel-bypass throughput. The TAP
 PMD additionally uses Linux realtime signals for its internal RX trigger in
 both modes; this is separate from Celer's worker sleep protocol.
 
-Sources: `src/net/tcp_service.cpp`, `src/net/tcp_listener.cpp`,
+Sources: `include/celer/net/connection.h`, `src/net/tcp_service.cpp`, `src/net/tcp_listener.cpp`,
 `src/net/tcp_stream.cpp`, `src/net/socket_ops.cpp`, `src/io/dpdk_backend.cpp`,
 `src/io/freebsd/abi.h`, `src/io/freebsd/`.

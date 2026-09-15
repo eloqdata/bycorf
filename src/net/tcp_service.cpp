@@ -72,19 +72,22 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection,
 
 void TcpService::Stop() noexcept {
 #ifdef CELER_WITH_DPDK
-  std::lock_guard lock(stop_mutex_);
-  stopping_ = true;
-  // Native BSD socket operations must execute in their owner's VNET. The
-  // existing foreign ingress handles both idle-ring wakeup and publication.
-  for (unsigned i = 0; i < control_executors_.size(); ++i) {
-    if (control_executors_[i].valid()) {
-      (void)control_executors_[i].Notify([this, i]() noexcept {
-        for (auto& bound : listeners_[i].values_)
-          if (bound.listener_) bound.listener_->Close().IgnoreError();
-      });
+  if (DpdkNetworkEnabled()) {
+    std::lock_guard lock(stop_mutex_);
+    stopping_ = true;
+    // Native BSD socket operations must execute in their owner's VNET. The
+    // existing foreign ingress handles both idle-ring wakeup and publication.
+    for (unsigned i = 0; i < control_executors_.size(); ++i) {
+      if (control_executors_[i].valid()) {
+        (void)control_executors_[i].Notify([this, i]() noexcept {
+          for (auto& bound : listeners_[i].values_)
+            if (bound.listener_) bound.listener_->Close().IgnoreError();
+        });
+      }
     }
+    return;
   }
-#else
+#endif
   // Called from the Server's thread at shutdown; closing the listeners unblocks
   // the accept loops (their multishot accept completes with -ECANCELED).
   for (auto& worker : listeners_) {
@@ -94,7 +97,6 @@ void TcpService::Stop() noexcept {
       }
     }
   }
-#endif
 }
 
 Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {

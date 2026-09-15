@@ -26,8 +26,11 @@ register access with TLS. The amd64 atomic overlay selects upstream userspace
 fences, and direct-map conversions fail explicitly because Linux owns the VM.
 
 `cmake/build_freebsd.py` generates option and interface headers, and changes
-three clock declarations to TLS in a private generated header overlay. That
-explicit host adaptation does not modify these imported files. Kernel symbols
+three clock declarations to TLS in a private generated header overlay. Its
+generated TCP input source also retires the initial-sequence ACK guard before
+header prediction can bypass slow ACK processing; the overlay checks its exact
+upstream anchors and retains ordinary ACK validation. These explicit overlays
+do not modify the imported files. Kernel symbols
 are localized into one private object; undefined symbols are checked against
 the host bridge's allowlist before archiving.
 

@@ -57,7 +57,8 @@ Celer imports DPDK's non-include compiler flags from `libdpdk.pc`, including
 the CPU features needed by its inline headers. A non-IPO build does not need
 an extra manually supplied SSSE3 flag on x86.
 
-`CELER_WITH_SPDK_STORAGE=ON` additionally enables NVMe storage. Networking and
+`CELER_WITH_SPDK_STORAGE=ON` additionally includes NVMe storage support.
+Select it through the startup API described below. Networking and
 SPDK share `EnsureDpdkEnvironment()` and one `spdk_env_init` call. EAL is DPDK's
 environment layer for memory, devices, and thread/lcore registration; SPDK
 initializes it on Celer's behalf.
@@ -89,6 +90,11 @@ sudo python3 tests/dpdk_smoke.py build-dpdk-net/celer_echo \
   --workers 15 --server-cpus 0-14 --client-cpus 15 --streams 1000
 ```
 
+The single-worker RSS path can also use the TAP fixture with
+`--workers 1 --rx-steering rss`. This checks stream handling and shutdown without
+software redistribution; it does not validate multi-queue RSS. Multi-worker RSS
+requires a TCP RSS-capable device and a separate physical-device test.
+
 The startup regression check uses an in-memory ring PMD and needs no TAP:
 
 ```bash
@@ -118,6 +124,16 @@ boundaries, half-close, idle/resume, retransmission, and live-socket shutdown.
 It exercises the architecture adaptation; use `dpdk_smoke.py` above to check
 production queue forwarding and adaptive wakeups.
 
+The sequence-space regression uses an in-process Ethernet peer and requires no
+root privileges or interfaces:
+
+```bash
+./build-dpdk-net/celer_freebsd_tcp_sequence_check
+```
+
+It rejects a forged ACK, acknowledges 3 GiB through native header prediction,
+then changes the receive window to verify that ordinary input still progresses.
+
 On an AArch64 Ubuntu host, the BSD library and this fixture can be cross-built
 and run as x86-64 code with `gcc-x86-64-linux-gnu`,
 `g++-x86-64-linux-gnu`, and `qemu-user` installed:
@@ -142,7 +158,7 @@ To run the echo server manually:
 
 ```bash
 sudo env CELER_DPDK_MODE=adaptive CELER_DPDK_QUEUES=1 \
-  taskset -c 0,1 ./build-dpdk-net/celer_echo 198.18.0.2 16390 2
+  taskset -c 0,1 ./build-dpdk-net/celer_echo 198.18.0.2 16390 2 -1 dpdk
 ```
 
 After both `celer0: Ethernet address:` messages appear, configure the Linux
@@ -164,6 +180,7 @@ owning process closes. No physical NIC needs rebinding for these tests.
 |---|---|---|
 | `CELER_DPDK_MODE` | `poll` | `poll` keeps polling; `adaptive` can arm RX notification and sleep on io_uring |
 | `CELER_DPDK_QUEUES` | worker count, capped by hardware | RX/TX pair count, between 1 and worker count |
+| `CELER_DPDK_RX_STEERING` | `hash` | `hash` redistributes TCP by software tuple hash; `rss` keeps it on the receiving queue's worker |
 | `CELER_DPDK_IP` | `198.18.0.2` | Stack's IPv4 address |
 | `CELER_DPDK_NETMASK` | `255.255.255.0` | IPv4 subnet mask |
 | `CELER_DPDK_GATEWAY` | none | Optional default gateway |
@@ -174,13 +191,91 @@ An unset/empty `CELER_EAL_ARGS` selects no hugepages, no PCI probing, and the
 TAP test device. Explicit arguments replace this virtual default; configure
 hugepages and the dedicated device allowlist for a physical run. Include the
 NVMe controller in that allowlist when using SPDK storage too. The prototype
-requires exactly one available Ethernet port and 1–15 workers. Changing the
-backend requires rebuilding; changing these settings requires process restart.
+requires exactly one available Ethernet port. Changing the
+selected backend or these settings requires process restart. The binary must
+include the requested capability; compilation alone does not activate it.
+
+### Worker capacity
+
+`CELER_DPDK_MAX_WORKERS` is a CMake capacity setting, default 128 (range
+1–1023). It sizes the backend and private FreeBSD per-worker state and builds
+DPDK with one additional lcore slot for the EAL initializer. SPDK uses that same
+DPDK capacity. This reserves registration/state capacity; it neither launches
+extra polling threads nor reserves an extra physical CPU. The runtime worker
+count remains an application startup setting. Pinned workers still need one
+allowed Linux CPU each.
+
+For example, a build with `-DCELER_DPDK_MAX_WORKERS=256` supports up to 256
+DPDK workers. When using `CELER_DPDK_PREFIX`, that existing DPDK must have at
+least 257 lcore slots. CMake rejects a smaller prefix instead of overriding
+its ABI-defining headers. Clear the prefix to let Celer rebuild its dependency:
+
+```sh
+cmake -S . -B build-dpdk-net -DCELER_WITH_DPDK=ON \
+  -DCELER_DPDK_MAX_WORKERS=256 -DCELER_DPDK_PREFIX=
+cmake --build build-dpdk-net
+```
+
+Capacity changes require rebuilding Celer, the private BSD stack, and SPDK
+against the matching DPDK headers. Runtime startup also checks available EAL
+registrations; other registered threads can consume slots. Packet pools grow
+with the configured queue descriptors and worker caches, so larger active
+configurations may need more hugepage/EAL memory. Software forwarding rings
+remain bounded per worker.
+
+On a small host, validate additional owners using one TAP queue and hash
+steering; oversubscribed workers test correctness, not throughput scaling:
+
+```sh
+sudo python3 tests/dpdk_smoke.py ./build-dpdk-net/celer_echo \
+  --workers 32 --no-pin-workers --server-cpus 0-14 --client-cpus 15 --streams 1000
+sudo env CELER_EAL_ARGS='--no-huge --no-pci --vdev=net_ring0' \
+  CELER_DPDK_QUEUES=1 ./build-dpdk-net/celer_backend_worker_check 128
+```
+
+The worker check creates a listener on every worker, verifies that handles stay
+distinct and reject use on another owner, then shuts down. The TAP smoke check
+covers stream integrity, forwarding, half-close and idle wakeups. Physical RSS
+scaling still requires enough RX/TX queue pairs for the requested workers.
+
+`rss` steering requires one RX/TX queue pair per worker and, with multiple
+workers, PMD support for IPv4 TCP RSS. Startup rejects unsupported configurations
+instead of silently leaving workers without connections. Keep the PMD's RSS
+mapping fixed while the process runs: remapping a live flow would send its
+segments to a different TCP stack. RSS does not guarantee equal connection
+counts or equal worker load. Packet validation, control-traffic fanout, TX
+batching, and partial-TX handling are the same in both steering modes.
 
 A PMD must support the selected queue/MTU configuration. Adaptive hardware
 sleep additionally needs per-queue interrupt control and an accessible RX
 notification descriptor. Unsupported notification paths fall back to polling.
 The TAP path tests descriptor readiness, not a physical MSI-X interrupt.
+
+For Azure netvsc with an mlx5 accelerated VF, build the pinned DPDK with
+`bus/auxiliary,bus/vmbus,common/mlx5,net/mlx5,net/netvsc` in the driver list
+(plus any virtual test drivers needed), and install the libibverbs/libmlx5
+development dependencies. Bind only the dedicated synthetic VMBus device to
+`uio_hv_generic`; mlx5 uses a bifurcated driver and its VF stays on `mlx5_core`.
+Allowlist the synthetic UUID and its matching VF PCI address, plus any SPDK
+controllers. Keep the management NIC and its VF outside this allowlist.
+Netvsc owns the VF and exposes one application-available parent port. Verify
+VF attachment and increasing VF packet counters before interpreting throughput
+as accelerated networking; a working synthetic fallback alone is insufficient.
+
+## Runtime selection
+
+Celer defaults to kernel networking and io_uring storage. Before starting any
+runtime or preparing storage, applications call `ConfigureIoBackends` with the
+requested `dpdk_network` and `spdk_storage` booleans. The first runtime, storage
+probe or storage-buffer allocation freezes the selection for the process
+lifetime. A different later selection fails. Both flags false leave EAL
+uninitialized; either flag true can initialize the same shared EAL environment.
+The complete device allowlist must be set before that first initialization.
+
+`celer_echo` accepts a final positional network selector after the idle timeout:
+`celer_echo ADDRESS PORT WORKERS IDLE_TIMEOUT_MS kernel|dpdk`.
+`dpdk_smoke.py` selects DPDK explicitly. `celer_backend_selection_check` checks
+ordinary allocation and immutable selection without touching physical devices.
 
 ## Application and Keylane integration
 
@@ -197,14 +292,15 @@ cmake -S /path/to/keylane -B /path/to/keylane/build-dpdk-net -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKEYLANE_ENABLE_OPT=OFF \
   -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
   -DKEYLANE_CELER_SOURCE_DIR=/path/to/celer \
-  -DCELER_WITH_DPDK=ON
+  -DKEYLANE_KERNEL_BYPASS=ON
 cmake --build /path/to/keylane/build-dpdk-net --target keylane -j4
 ```
 
 Use a fresh disposable data file for SET/GET runs, bind the server to the
 configured stack address, and configure the TAP after initialization as above.
 For two workers pinned to CPUs 0 and 1, pin memtier to other CPUs. Ordinary
-files continue through io_uring; `KEYLANE_WITH_SPDK=ON` enables SPDK paths.
+files use `--storage=uring`; `KEYLANE_KERNEL_BYPASS=ON` includes support for
+`--storage=spdk`. Keylane must explicitly select `--network=dpdk`.
 Keylane's replication handoff and any application path that operates directly
 on Linux descriptors have not been ported by this prototype.
 

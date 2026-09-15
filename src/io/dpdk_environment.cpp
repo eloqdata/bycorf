@@ -26,8 +26,14 @@
 #include <sstream>
 #include <string>
 
+#include "celer/io/backend_options.h"
+
 namespace celer {
 absl::Status EnsureDpdkEnvironment() {
+  FreezeIoBackends();
+  if (!DpdkNetworkEnabled() && !SpdkStorageEnabled())
+    return absl::FailedPreconditionError(
+        "DPDK network and SPDK storage are disabled");
   static std::once_flag once;
   static absl::Status result;
   std::call_once(once, [] {
@@ -54,7 +60,7 @@ absl::Status EnsureDpdkEnvironment() {
 #ifdef CELER_WITH_DPDK
     // Virtual-device testing is the explicit default. A physical-device run
     // supplies CELER_EAL_ARGS with its allowlist and hugepage configuration.
-    if (extra.empty()) {
+    if (DpdkNetworkEnabled() && extra.empty()) {
       options.no_huge = true;
       options.no_pci = true;
       options.mem_size = 512;

@@ -24,12 +24,15 @@
 namespace celer {
 // One instance per existing Worker. io_uring retains storage, timers and
 // MSG_RING wakeups; accepted IPv4 TCP streams run in the worker's FreeBSD VNET.
-class DpdkBackend : public IoUringBackend {
+class DpdkBackend {
  public:
-  DpdkBackend();
+  // Borrows the worker-owned ring; it must outlive this backend.
+  explicit DpdkBackend(IoUringBackend& kernel);
   ~DpdkBackend();
   // Called once before Runtime creates worker threads. Configures one DPDK
   // port and bounded software queues using CELER_DPDK_* environment settings.
+  // Rejects counts exceeding build capacity or available EAL registrations
+  // before configuring the port. RSS additionally requires one pair per worker.
   static absl::Status PrepareRuntime(unsigned workers);
   // Release peers waiting for worker 0 if any worker fails during startup.
   static void AbortStartup(const absl::Status& reason);
@@ -59,6 +62,7 @@ class DpdkBackend : public IoUringBackend {
   static int PeerName(int handle, sockaddr*, socklen_t*) noexcept;
 
  private:
+  IoUringBackend& kernel_;
   class Impl;
   static thread_local Impl* current_;
   std::unique_ptr<Impl> impl_;

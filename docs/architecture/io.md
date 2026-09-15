@@ -22,18 +22,33 @@ Registered storage buffers and network receive buffers have separate
 lifecycles. The default network backend uses Linux TCP and provided-buffer
 multishot receives, with a per-connection one-shot fallback.
 
-`CELER_WITH_SPDK_STORAGE` enables direct NVMe I/O through SPDK. File paths
-continue to use io_uring; SPDK paths select controllers and namespaces and
-worker-owned queue pairs. Completion polling stays in the worker loop.
-In-flight SPDK storage prevents that worker from sleeping before its storage
-completion can be polled.
+`CELER_WITH_DPDK` and `CELER_WITH_SPDK_STORAGE` include optional capabilities.
+Applications select network and storage independently through
+`ConfigureIoBackends` before workers or storage initialization. The defaults are
+kernel networking and io_uring storage, even when both capabilities are linked.
+Selection freezes at first use for the process lifetime; changing it after
+allocation or runtime startup fails. This preserves DMA allocator identity,
+registered-resource ownership and native TCP state. Unsupported capabilities
+fail explicitly rather than falling back.
 
-`CELER_WITH_DPDK` selects the native FreeBSD/DPDK network backend while retaining
-io_uring for the other I/O roles. These options share one process-wide EAL,
-initialized once through `spdk_env_init`. Saving and restoring the initializer's
-CPU affinity prevents EAL's control-lcore pin from changing the application's
-worker placement. Network workers register their existing native threads with
-EAL; networking does not start a second worker pool.
+`NetBackend` owns the worker's single `IoUringBackend`. Its optional DPDK adapter
+borrows this object; kernel sockets, storage, timers and MSG_RING use the same
+submission/completion queues. Network-specific operations dispatch to the
+selected backend. The worker drives completion polling and batching, and does
+not create a second ring or worker pool for either accelerator.
+
+SPDK storage uses DMA buffers, NVMe namespaces and worker-owned queue pairs.
+The io_uring selection uses ordinary aligned buffers and kernel file/block I/O.
+SPDK completion polling is inactive when storage uses io_uring; in-flight SPDK
+storage prevents sleeping before its completions can be polled.
+
+Either accelerator can initialize the one process-wide DPDK EAL, through the
+shared `spdk_env_init` wrapper. Calling this wrapper alone does not activate
+SPDK storage. The complete device allowlist and memory configuration must be
+supplied before the first user initializes EAL. With both backends disabled,
+EAL is not initialized. Saving and restoring the initializer's CPU affinity
+prevents EAL's control-lcore pin from changing worker placement. DPDK network
+workers register their existing native threads with EAL.
 
 SPDK and DPDK are direct, independently pinned Git submodules. SPDK is configured
 against the single DPDK installation selected by Celer; its nested DPDK is not
@@ -57,6 +72,7 @@ The prototype's kernel registries, VNETs, and EAL have process lifetime. It
 supports one runtime per process. Network I/O and descriptors stop on worker
 shutdown, but the complete BSD kernel subsystem teardown is not implemented.
 
-Sources: `include/celer/io/net_backend.h`, `src/io/io_uring_backend.cpp`,
+Sources: `include/celer/io/backend_options.h`, `src/io/backend_options.cpp`,
+`include/celer/io/net_backend.h`, `src/io/io_uring_backend.cpp`,
 `src/io/storage.cpp`, `src/io/spdk_storage.cpp`, `src/io/dpdk_environment.cpp`,
 `cmake/Dpdk.cmake`, `cmake/Freebsd.cmake`, `cmake/build_freebsd.py`.

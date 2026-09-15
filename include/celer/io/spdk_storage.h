@@ -29,6 +29,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "celer/io/backend_options.h"
 #include "celer/io/completion.h"
 #include "celer/io/storage.h"
 
@@ -64,8 +65,8 @@ absl::Status WriteSpdkStorage(std::string_view path,
 // metadata preparation and before allocating per-worker qpairs.
 void ReleaseSpdkStorageMetadataQpairs() noexcept;
 
-// Storage buffers are ordinary aligned allocations in the io_uring build and
-// pinned DMA allocations in the SPDK build.
+// Storage buffers use ordinary aligned memory or pinned DMA memory according
+// to the frozen process selection. Free must use the same allocation regime.
 void* AllocateStorageBuffer(std::size_t bytes, std::size_t alignment) noexcept;
 void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept;
 

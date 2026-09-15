@@ -342,14 +342,16 @@ absl::Status TcpListener::Bind(Worker* worker,
     return absl::InvalidArgumentError("unsupported bind address family");
   }
 #ifdef CELER_WITH_DPDK
-  const int handle =
-      DpdkBackend::Listen(reinterpret_cast<const sockaddr*>(&address.address_),
-                          address.length_, backlog);
-  if (handle < 0) return ErrnoToStatus(errno, "FreeBSD listen failed");
-  worker_ = worker;
-  fd_ = handle;
-  closed_ = false;
-  return absl::OkStatus();
+  if (DpdkNetworkEnabled()) {
+    const int handle = DpdkBackend::Listen(
+        reinterpret_cast<const sockaddr*>(&address.address_), address.length_,
+        backlog);
+    if (handle < 0) return ErrnoToStatus(errno, "FreeBSD listen failed");
+    worker_ = worker;
+    fd_ = handle;
+    closed_ = false;
+    return absl::OkStatus();
+  }
 #endif
   const int fd = ::socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {

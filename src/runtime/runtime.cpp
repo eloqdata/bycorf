@@ -93,9 +93,13 @@ class Runtime::Impl {
       }
     }
 
+    FreezeIoBackends();
 #ifdef CELER_WITH_DPDK
-    const auto network = DpdkBackend::PrepareRuntime(thread_count);
-    if (!network.ok()) throw std::runtime_error(std::string(network.message()));
+    if (DpdkNetworkEnabled()) {
+      const auto network = DpdkBackend::PrepareRuntime(thread_count);
+      if (!network.ok())
+        throw std::runtime_error(std::string(network.message()));
+    }
 #endif
     started_ = true;
 
@@ -151,12 +155,12 @@ class Runtime::Impl {
             local_exit_code = main_fn(i, raw->worker_);
           }
 #ifdef CELER_WITH_DPDK
-          if (local_exit_code != 0)
+          if (DpdkNetworkEnabled() && local_exit_code != 0)
             DpdkBackend::AbortStartup(
                 absl::InternalError("worker startup failed"));
           // FreeBSD sockets and EAL registrations belong to this native thread.
           // Teardown after main_fn must finish before the thread exits.
-          raw->worker_.Shutdown();
+          if (DpdkNetworkEnabled()) raw->worker_.Shutdown();
 #endif
           foreign_executors_[i]->accepting_.store(false,
                                                   std::memory_order_release);
@@ -228,7 +232,7 @@ class Runtime::Impl {
       }
     }
 #ifdef CELER_WITH_DPDK
-    DpdkBackend::StopRuntime();
+    if (DpdkNetworkEnabled()) DpdkBackend::StopRuntime();
 #endif
     stopped_ = true;
   }

@@ -54,6 +54,7 @@ absl::Status WriteSpdkStorage(std::string_view, std::span<const std::byte>,
 void ReleaseSpdkStorageMetadataQpairs() noexcept {}
 
 void* AllocateStorageBuffer(std::size_t bytes, std::size_t alignment) noexcept {
+  FreezeIoBackends();
   return ::operator new[](bytes, std::align_val_t(alignment), std::nothrow);
 }
 

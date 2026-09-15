@@ -25,11 +25,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(CELER_BUILD_EXAMPLES "Build example applications" ON)
 option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
-# Selects the network backend at compile time (see io/net_backend.h). Default OFF
-# = io_uring. DPDK uses a private FreeBSD IPv4/TCP stack.
-option(CELER_WITH_DPDK "Build with the DPDK net backend instead of io_uring" OFF)
+# These options include capabilities; applications select backends at startup.
+# DPDK networking uses a private FreeBSD IPv4/TCP stack.
+option(CELER_WITH_DPDK "Include the optional DPDK network backend" OFF)
 option(CELER_WITH_SPDK_STORAGE
-  "Use SPDK for storage with either network backend" OFF)
+  "Include the optional SPDK storage backend" OFF)
 option(CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
   "Enable detailed cross-core queue and wake latency tracing" OFF)
 
@@ -149,6 +149,7 @@ add_dependencies(celer_liburing celer_liburing_build)
 add_library(celer
   src/io/io.cpp
   src/io/storage.cpp
+  src/io/backend_options.cpp
   src/io/io_uring_backend.cpp
   src/net/server.cpp
   src/net/http_service.cpp
@@ -176,18 +177,25 @@ if (CELER_WITH_DPDK OR CELER_WITH_SPDK_STORAGE)
   find_program(CELER_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
   find_package(OpenSSL REQUIRED)
   set(CELER_SPDK_CONFIGURED_DPDK "")
+  set(CELER_SPDK_CONFIGURED_LCORES "")
   if (EXISTS "${CELER_SPDK_SOURCE_DIR}/mk/config.mk")
     file(STRINGS "${CELER_SPDK_SOURCE_DIR}/mk/config.mk" CELER_SPDK_CONFIGURED_DPDK
       REGEX "^CONFIG_DPDK_DIR")
     string(REGEX REPLACE "^[^=]*=" "" CELER_SPDK_CONFIGURED_DPDK "${CELER_SPDK_CONFIGURED_DPDK}")
+    file(STRINGS "${CELER_SPDK_SOURCE_DIR}/mk/config.mk" CELER_SPDK_CONFIGURED_LCORES
+      REGEX "^CONFIG_MAX_LCORES")
+    string(REGEX REPLACE "^[^=]*=" "" CELER_SPDK_CONFIGURED_LCORES "${CELER_SPDK_CONFIGURED_LCORES}")
   endif()
-  # Reconfigure when switching between the nested build and our shared prefix.
-  if (NOT CELER_SPDK_CONFIGURED_DPDK STREQUAL CELER_DPDK_PREFIX)
+  # A capacity change can rebuild DPDK at the same prefix. Reconfigure SPDK
+  # too, so its own capacity and all rebuilt consumers use compatible headers.
+  if (NOT CELER_SPDK_CONFIGURED_DPDK STREQUAL CELER_DPDK_PREFIX OR
+      NOT CELER_SPDK_CONFIGURED_LCORES STREQUAL CELER_DPDK_LCORE_CAPACITY)
     execute_process(
       COMMAND "${CELER_SPDK_SOURCE_DIR}/configure"
         --disable-tests --disable-unit-tests --disable-examples --disable-apps
         --without-crypto --without-vhost --without-virtio --without-nvme-cuse
-        --without-fsdev --without-shared --max-lcores=16
+        --without-fsdev --without-shared
+        "--max-lcores=${CELER_DPDK_LCORE_CAPACITY}"
         "--with-dpdk=${CELER_DPDK_PREFIX}"
       WORKING_DIRECTORY "${CELER_SPDK_SOURCE_DIR}"
       RESULT_VARIABLE CELER_SPDK_CONFIGURE_RESULT
@@ -368,13 +376,26 @@ if (CELER_BUILD_EXAMPLES)
   )
   target_link_libraries(celer_connect_timer_check PRIVATE celer::core)
 
+  add_executable(celer_connection_storage_check example/connection_storage_check.cpp)
+  target_link_libraries(celer_connection_storage_check PRIVATE celer::core)
+
+  add_executable(celer_backend_selection_check example/backend_selection_check.cpp)
+  target_link_libraries(celer_backend_selection_check PRIVATE celer::core)
+
   add_executable(celer_backend_startup_check example/backend_startup_check.cpp)
   target_link_libraries(celer_backend_startup_check PRIVATE celer::core)
+
+  if (CELER_WITH_DPDK)
+    add_executable(celer_backend_worker_check example/backend_worker_check.cpp)
+    target_link_libraries(celer_backend_worker_check PRIVATE celer::core)
+  endif()
 
   if (CELER_WITH_DPDK)
     find_package(Threads REQUIRED)
     add_executable(celer_freebsd_port_check tests/freebsd_port_check.cpp)
     target_link_libraries(celer_freebsd_port_check PRIVATE
       celer_freebsd Threads::Threads)
+    add_executable(celer_freebsd_tcp_sequence_check tests/freebsd_tcp_sequence_check.cpp)
+    target_link_libraries(celer_freebsd_tcp_sequence_check PRIVATE celer_freebsd)
   endif()
 endif()

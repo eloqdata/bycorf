@@ -170,6 +170,7 @@ absl::Status Worker::Init(const WorkerOptions& options) {
         "worker scheduler budgets must be positive and background "
         "warrant must be <= 100%");
   }
+  FreezeIoBackends();
   options_ = options;
   cycle_frequency_ = CycleFrequency();
   LogCycleCounterInfo(cycle_frequency_);
@@ -194,7 +195,7 @@ absl::Status Worker::Init(const WorkerOptions& options) {
     return status;
   }
 #ifdef CELER_WITH_SPDK_STORAGE
-  status = storage_backend_.Init(this);
+  if (SpdkStorageEnabled()) status = storage_backend_.Init(this);
   if (!status.ok()) {
     backend_.Shutdown();
     return status;
@@ -1000,6 +1001,7 @@ bool Worker::BusyPoll() {
 
 #ifdef CELER_WITH_SPDK_STORAGE
 bool Worker::PollStorage() {
+  if (!SpdkStorageEnabled()) return false;
   const std::int64_t start = CycleNow();
   const SpdkPollResult result =
       storage_backend_.Poll(options_.spdk_max_completions_per_poll_);
@@ -1041,7 +1043,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
   did_work |= DrainCrossCore();
   did_work |= backend_.Poll();
 #ifdef CELER_WITH_SPDK_STORAGE
-  if (options_.spdk_foreground_pre_poll_us_ != 0 &&
+  if (SpdkStorageEnabled() && options_.spdk_foreground_pre_poll_us_ != 0 &&
       (!ready_.empty() || !next_ready_.empty() ||
        !foreground_remote_work_.empty())) {
     MergeDeferred();

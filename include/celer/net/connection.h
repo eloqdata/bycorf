@@ -19,7 +19,9 @@
 
 #include <coroutine>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -82,6 +84,9 @@ struct Connection {
   // consuming bytes from the shared socket after the handoff.
   bool recv_paused_ = false;
 
+  // Reclamation holds include submitted I/O and explicit storage borrows. A
+  // session awaiting non-socket work must keep a hold even after its I/O
+  // drains.
   std::uint32_t inflight_ops_ = 0;
   absl::Status last_error_ = absl::OkStatus();
 
@@ -100,6 +105,30 @@ struct Connection {
   std::shared_ptr<TlsState> tls_state_;
   void* protocol_context_ = nullptr;
 };
+
+// Keep an already-live Connection's storage valid across coroutine suspension.
+// Call on its owning worker before spawning/suspending the borrower, and pair
+// every borrow with ReleaseConnectionStorage on that same worker. This does not
+// keep the transport open or extend the lifetime of the worker itself. Null
+// pointers and counter overflow fail-stop rather than permit premature reclaim.
+inline void BorrowConnectionStorage(Connection* connection) noexcept {
+  if (connection == nullptr ||
+      connection->inflight_ops_ == std::numeric_limits<std::uint32_t>::max()) {
+    std::abort();
+  }
+  ++connection->inflight_ops_;
+}
+
+// Release one storage borrow after all of its Connection users have unwound.
+// Reclamation remains deferred to the worker's retired-connection sweep; other
+// borrows and pending I/O must also drain. Null pointers and counter underflow
+// fail-stop. Calls must be balanced with BorrowConnectionStorage.
+inline void ReleaseConnectionStorage(Connection* connection) noexcept {
+  if (connection == nullptr || connection->inflight_ops_ == 0) {
+    std::abort();
+  }
+  --connection->inflight_ops_;
+}
 
 }  // namespace celer
 

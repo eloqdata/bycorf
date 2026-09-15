@@ -54,6 +54,8 @@ struct celer_bsd_interface {
 
 // Initialize process-wide kernel services on worker 0 before other workers
 // attach. Each API below must run on the thread that owns its stack/socket.
+// Capacity may be queried before initialization, without a worker context.
+unsigned celer_bsd_max_workers(void);
 int celer_bsd_initialize(const struct celer_bsd_host* host, unsigned workers);
 int celer_bsd_attach_worker(unsigned worker);
 int celer_bsd_attach_interface(const struct celer_bsd_interface* config);

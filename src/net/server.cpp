@@ -118,7 +118,7 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   if (!init_status.ok()) [[unlikely]] {
     spdlog::error("worker[{}] init failed: {}", index, init_status.message());
 #ifdef CELER_WITH_DPDK
-    DpdkBackend::AbortStartup(init_status);
+    if (DpdkNetworkEnabled()) DpdkBackend::AbortStartup(init_status);
 #endif
     // Failed workers own no coroutine frames, but must still participate in
     // both teardown barriers so successfully initialized peers can leave.

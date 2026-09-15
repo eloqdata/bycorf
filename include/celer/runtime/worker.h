@@ -267,11 +267,15 @@ class Worker {
   }
 
   absl::Status RegisterFixedFiles(unsigned count) {
+    absl::Status status;
 #ifdef CELER_WITH_SPDK_STORAGE
-    absl::Status status = storage_backend_.RegisterFixedFiles(count);
-#else
-    absl::Status status = backend_.RegisterFixedFiles(count);
+    if (SpdkStorageEnabled()) {
+      status = storage_backend_.RegisterFixedFiles(count);
+    } else
 #endif
+    {
+      status = backend_.RegisterFixedFiles(count);
+    }
     if (status.ok()) {
       storage_file_io_stats_.assign(count, StorageFileIoStats{});
     }
@@ -279,50 +283,58 @@ class Worker {
   }
   absl::Status RegisterBuffers(std::span<const iovec> buffers) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.RegisterBuffers(buffers);
-#else
-    return backend_.RegisterBuffers(buffers);
+    if (SpdkStorageEnabled()) {
+      return storage_backend_.RegisterBuffers(buffers);
+    }
 #endif
+    return backend_.RegisterBuffers(buffers);
   }
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                                 FixedFile file, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.SubmitOpenDirect(path, flags, mode, file, tag);
-#else
-    return backend_.SubmitOpenDirect(path, flags, mode, file, tag);
+    if (SpdkStorageEnabled()) {
+      return storage_backend_.SubmitOpenDirect(path, flags, mode, file, tag);
+    }
 #endif
+    return backend_.SubmitOpenDirect(path, flags, mode, file, tag);
   }
   absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.SubmitCloseDirect(file, tag);
-#else
-    return backend_.SubmitCloseDirect(file, tag);
+    if (SpdkStorageEnabled()) {
+      return storage_backend_.SubmitCloseDirect(file, tag);
+    }
 #endif
+    return backend_.SubmitCloseDirect(file, tag);
   }
   absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                                std::uint64_t offset, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.SubmitReadFixed(file, buffer, offset, tag);
-#else
-    return backend_.SubmitReadFixed(file, buffer, offset, tag);
+    if (SpdkStorageEnabled()) {
+      return storage_backend_.SubmitReadFixed(file, buffer, offset, tag);
+    }
 #endif
+    return backend_.SubmitReadFixed(file, buffer, offset, tag);
   }
   absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                           std::uint64_t offset, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.SubmitRead(file, buffer, offset, tag);
-#else
-    return backend_.SubmitRead(file, buffer, offset, tag);
+    if (SpdkStorageEnabled()) {
+      return storage_backend_.SubmitRead(file, buffer, offset, tag);
+    }
 #endif
+    return backend_.SubmitRead(file, buffer, offset, tag);
   }
   absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                            std::uint64_t offset, IoCompletion* tag) {
+    absl::Status status;
 #ifdef CELER_WITH_SPDK_STORAGE
-    absl::Status status =
-        storage_backend_.SubmitWrite(file, buffer, offset, tag);
-#else
-    absl::Status status = backend_.SubmitWrite(file, buffer, offset, tag);
+    if (SpdkStorageEnabled()) {
+      status = storage_backend_.SubmitWrite(file, buffer, offset, tag);
+    } else
 #endif
+    {
+      status = backend_.SubmitWrite(file, buffer, offset, tag);
+    }
     if (status.ok() && file.index_ < storage_file_io_stats_.size()) {
       storage_file_io_stats_[file.index_].submitted_write_bytes_ +=
           buffer.size();
@@ -331,12 +343,15 @@ class Worker {
   }
   absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                                 std::uint64_t offset, IoCompletion* tag) {
+    absl::Status status;
 #ifdef CELER_WITH_SPDK_STORAGE
-    absl::Status status =
-        storage_backend_.SubmitWriteFixed(file, buffer, offset, tag);
-#else
-    absl::Status status = backend_.SubmitWriteFixed(file, buffer, offset, tag);
+    if (SpdkStorageEnabled()) {
+      status = storage_backend_.SubmitWriteFixed(file, buffer, offset, tag);
+    } else
 #endif
+    {
+      status = backend_.SubmitWriteFixed(file, buffer, offset, tag);
+    }
     if (status.ok() && file.index_ < storage_file_io_stats_.size()) {
       storage_file_io_stats_[file.index_].submitted_write_bytes_ +=
           buffer.size_;
@@ -345,10 +360,11 @@ class Worker {
   }
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
 #ifdef CELER_WITH_SPDK_STORAGE
-    return storage_backend_.SubmitFdatasync(file, tag);
-#else
-    return backend_.SubmitFdatasync(file, tag);
+    if (SpdkStorageEnabled()) {
+      return storage_backend_.SubmitFdatasync(file, tag);
+    }
 #endif
+    return backend_.SubmitFdatasync(file, tag);
   }
   absl::Status SubmitTimeout(const __kernel_timespec& timeout,
                              IoCompletion* tag) {

@@ -31,6 +31,7 @@ add_custom_command(OUTPUT "${CELER_FREEBSD_ARCHIVE}"
     --source "${CMAKE_CURRENT_SOURCE_DIR}"
     --output "${CMAKE_CURRENT_BINARY_DIR}/freebsd" --cc "${CELER_FREEBSD_CC}"
     --target "${CELER_FREEBSD_TARGET}"
+    --max-workers "${CELER_DPDK_MAX_WORKERS}"
   DEPENDS ${CELER_FREEBSD_INPUTS} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_freebsd.py"
   COMMENT "Building the private FreeBSD IPv4/TCP stack" VERBATIM)
 add_custom_target(celer_freebsd_build DEPENDS "${CELER_FREEBSD_ARCHIVE}")
