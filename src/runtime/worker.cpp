@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "absl/base/internal/cycleclock.h"
+#include "celer/net/socket_ops.h"
 #include "celer/runtime/cycle_clock.h"
 #if defined(__x86_64__)
 #include "absl/base/internal/sysinfo.h"
@@ -282,7 +283,13 @@ void SpawnOnCurrentWorker(Task<absl::Status> task) {
 
 void Worker::RequestStop() noexcept {
   stop_requested_.store(true, std::memory_order_release);
-  backend_.WakeSelf();
+  // Runtime creates this descriptor before launch and closes it after join.
+  // Stop may race backend initialization/teardown, so do not read mutable
+  // backend state from the requesting thread.
+  if (cross_core_) {
+    const std::uint64_t wake = 1;
+    (void)::write(cross_core_->mailbox(id_).wake_fd_, &wake, sizeof(wake));
+  }
 }
 
 bool Worker::NotifyWake() noexcept {
@@ -335,7 +342,7 @@ void Worker::BeginClose(Connection* connection, absl::Status reason,
     const int fd = connection->file_.fd_;
     connection->file_.fd_ = -1;
     connection->closed_ = true;
-    ::close(fd);
+    detail::CloseSocket(fd);
   } else {
     connection->closed_ = true;
   }
@@ -1153,8 +1160,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
 
 void Worker::Run() {
   SetThisWorker(id_, cross_core_, this);
-  stop_requested_.store(false, std::memory_order_release);
-  stopping_.store(false, std::memory_order_release);
+  // A peer may fail, or the server may stop, while this worker initializes.
+  // Preserve that request instead of consuming its wake and restarting work.
+  (void)NotifyWake();
   while (!stopping_.load(std::memory_order_acquire)) {
     if (!RunOnce(true)) [[unlikely]] {
       spdlog::error("worker loop exiting because RunOnce returned false");
@@ -1171,10 +1179,9 @@ void Worker::Run() {
   }
   while (!connections_.empty() && RunOnce(false)) {
   }
-  // Frames of still-suspended detached tasks are reclaimed by the runtime
-  // after every worker thread has joined (DestroyDetachedTasks): destroying
-  // them here could race with another worker still holding cross-core
-  // references into those frames.
+  // Server reclaims still-suspended frames on their owning threads after all
+  // workers leave their loops. Reclaiming them here could race with a peer
+  // that still holds cross-core references into those frames.
 }
 
 }  // namespace celer

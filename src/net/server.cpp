@@ -16,6 +16,7 @@
 
 #include "celer/net/server.h"
 
+#include <exception>
 #include <thread>
 
 #include "spdlog/spdlog.h"
@@ -57,7 +58,15 @@ absl::Status Server::Start(const ServerOptions& options) {
 
   started_ = true;
   auto fn = [this](unsigned i, Worker& worker) { return RunWorker(i, worker); };
-  runtime_.Start(options_.thread_count_, std::move(fn), options_.pin_workers_);
+  try {
+    runtime_.Start(options_.thread_count_, std::move(fn),
+                   options_.pin_workers_);
+  } catch (const std::exception& error) {
+    runtime_.RequestStop();
+    runtime_.WaitUntilStopped();
+    started_ = false;
+    return absl::FailedPreconditionError(error.what());
+  }
   return absl::OkStatus();
 }
 
@@ -108,12 +117,21 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   auto init_status = worker.Init(worker_options);
   if (!init_status.ok()) [[unlikely]] {
     spdlog::error("worker[{}] init failed: {}", index, init_status.message());
+#ifdef CELER_WITH_DPDK
+    DpdkBackend::AbortStartup(init_status);
+#endif
+    // Failed workers own no coroutine frames, but must still participate in
+    // both teardown barriers so successfully initialized peers can leave.
+    drained_workers_.fetch_add(1, std::memory_order_acq_rel);
+    reclaimed_workers_.fetch_add(1, std::memory_order_acq_rel);
+    runtime_.RequestStop();
     return 1;
   }
 
   ServiceContext ctx{
       .bind_addresses_ = options_.bind_addresses_,
       .reuse_port_ = options_.reuse_port_ && options_.thread_count_ > 1,
+      .control_executor_ = runtime_.GetForeignExecutor(index),
   };
   for (Service* service : services_) {
     worker.SpawnRoot(service->Run(worker, ctx));

@@ -21,6 +21,7 @@
 #include <string>
 
 #include "absl/status/statusor.h"
+#include "celer/runtime/foreign_executor.h"
 #include "celer/runtime/task.h"
 
 namespace celer {
@@ -31,6 +32,8 @@ class Worker;
 struct ServiceContext {
   std::span<const std::string> bind_addresses_;
   bool reuse_port_ = false;
+  // Allows control-thread shutdown to schedule socket work on its owner.
+  ForeignExecutor control_executor_;
 };
 
 // A unit of work hosted by a Server across all workers. The Server owns the

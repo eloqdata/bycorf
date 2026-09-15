@@ -390,7 +390,7 @@ bool IoUringBackend::InitMultishotRecv() {
   if (options_.recv_buffer_count_ == 0) {
     recv_multishot_enabled_ = false;
     spdlog::info(
-        "provided-buffer ring disabled; using per-connection io_uring recv");
+        "provided-buffer ring disabled; using per-connection receive buffers");
     return true;
   }
 
@@ -836,6 +836,17 @@ bool IoUringBackend::Poll() {
     DrainRecvRearm();
   }
   return processed;
+}
+
+absl::Status IoUringBackend::SubmitPoll(int fd, unsigned events,
+                                        IoCompletion* tag) {
+  if (fd < 0 || tag == nullptr)
+    return absl::InvalidArgumentError("invalid poll request");
+  auto* sqe = AcquireSqe();
+  if (!sqe) return absl::UnavailableError("failed to acquire poll sqe");
+  io_uring_prep_poll_add(sqe, fd, events);
+  io_uring_sqe_set_data(sqe, tag);
+  return absl::OkStatus();
 }
 
 bool IoUringBackend::Wait(int timeout_ms) {

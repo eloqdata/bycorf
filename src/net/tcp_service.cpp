@@ -21,6 +21,7 @@
 #include <unordered_set>
 
 #include "absl/cleanup/cleanup.h"
+#include "celer/net/socket_ops.h"
 #include "celer/runtime/cross_core.h"
 #include "celer/runtime/worker.h"
 #include "spdlog/spdlog.h"
@@ -39,6 +40,10 @@ void TcpService::Prepare(unsigned thread_count) {
   next_connection_worker_.store(0, std::memory_order_relaxed);
   listeners_.clear();
   listeners_.resize(thread_count);
+#ifdef CELER_WITH_DPDK
+  stopping_ = false;
+  control_executors_.resize(thread_count);
+#endif
 }
 
 absl::Status TcpService::StartSession(Worker& worker, Connection connection,
@@ -49,7 +54,7 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection,
                         "accepted connection has an invalid fd");
   }
   if (worker.stop_requested()) {
-    ::close(fd);
+    detail::CloseSocket(fd);
     return absl::Status(absl::StatusCode::kCancelled,
                         "target worker is stopping");
   }
@@ -57,7 +62,7 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection,
   connection.worker_ = &worker;
   Connection* registered = worker.AddConnection(std::move(connection));
   if (registered == nullptr) {
-    ::close(fd);
+    detail::CloseSocket(fd);
     return absl::Status(absl::StatusCode::kInternal,
                         "failed to register accepted connection");
   }
@@ -66,6 +71,20 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection,
 }
 
 void TcpService::Stop() noexcept {
+#ifdef CELER_WITH_DPDK
+  std::lock_guard lock(stop_mutex_);
+  stopping_ = true;
+  // Native BSD socket operations must execute in their owner's VNET. The
+  // existing foreign ingress handles both idle-ring wakeup and publication.
+  for (unsigned i = 0; i < control_executors_.size(); ++i) {
+    if (control_executors_[i].valid()) {
+      (void)control_executors_[i].Notify([this, i]() noexcept {
+        for (auto& bound : listeners_[i].values_)
+          if (bound.listener_) bound.listener_->Close().IgnoreError();
+      });
+    }
+  }
+#else
   // Called from the Server's thread at shutdown; closing the listeners unblocks
   // the accept loops (their multishot accept completes with -ECANCELED).
   for (auto& worker : listeners_) {
@@ -75,9 +94,17 @@ void TcpService::Stop() noexcept {
       }
     }
   }
+#endif
 }
 
 Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
+#ifdef CELER_WITH_DPDK
+  {
+    std::lock_guard lock(stop_mutex_);
+    if (stopping_) co_return absl::OkStatus();
+    control_executors_[worker.id()] = ctx.control_executor_;
+  }
+#endif
   WorkerListeners& owned = listeners_[worker.id()];
   std::unordered_set<std::string> seen;
   for (const Endpoint& endpoint : endpoints_) {
@@ -140,14 +167,19 @@ Task<absl::Status> TcpService::AcceptLoop(Worker& worker,
 
     const int fd = accepted->file_.fd_;
     if (!AdmitConnection(fd, bound->tls_ != nullptr)) {
-      ::close(fd);
+      detail::CloseSocket(fd);
       accepted->file_.fd_ = -1;
       continue;
     }
 
-    const unsigned target = static_cast<unsigned>(
-        next_connection_worker_.fetch_add(1, std::memory_order_relaxed) %
-        thread_count_);
+    // DPDK packet steering already chooses a stable connection owner. A BSD
+    // socket cannot follow the kernel backend's accept-time fd redistribution.
+    const unsigned target =
+        detail::IsDpdkSocket(fd)
+            ? worker.id()
+            : static_cast<unsigned>(next_connection_worker_.fetch_add(
+                                        1, std::memory_order_relaxed) %
+                                    thread_count_);
     absl::Status started = co_await SubmitTo(
         target,
         [this, connection = std::move(*accepted),

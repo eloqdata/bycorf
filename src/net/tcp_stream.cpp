@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "celer/io/completion.h"
+#include "celer/net/socket_ops.h"
 #include "celer/net/tls.h"
 #include "celer/runtime/worker.h"
 
@@ -65,8 +66,8 @@ absl::Status ErrnoToStatus(int err, const char* operation) {
 absl::StatusOr<std::string> FormatPeerAddress(int fd) {
   sockaddr_storage address{};
   socklen_t address_size = sizeof(address);
-  if (::getpeername(fd, reinterpret_cast<sockaddr*>(&address), &address_size) !=
-      0) {
+  if (detail::SocketPeerName(fd, reinterpret_cast<sockaddr*>(&address),
+                             &address_size) != 0) {
     return ErrnoToStatus(errno, "getpeername failed");
   }
   char host[NI_MAXHOST];
@@ -729,7 +730,7 @@ Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
   int one = 1;
   if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
     const int error = errno;
-    ::close(fd);
+    detail::CloseSocket(fd);
     co_return ErrnoToStatus(error, "setsockopt(TCP_NODELAY) failed");
   }
 
@@ -740,7 +741,7 @@ Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
   if (!connected.ok()) {
     // The operation retired fully (both CQEs consumed), so the ring no longer
     // references the fd and a plain close is deterministic cleanup.
-    ::close(fd);
+    detail::CloseSocket(fd);
     co_return connected;
   }
 
@@ -752,7 +753,7 @@ Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
   connection.closed_ = false;
   Connection* registered = worker.AddConnection(std::move(connection));
   if (registered == nullptr) {
-    ::close(fd);
+    detail::CloseSocket(fd);
     co_return absl::Status(absl::StatusCode::kInternal,
                            "failed to register outbound connection");
   }

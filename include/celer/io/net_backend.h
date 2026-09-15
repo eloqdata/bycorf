@@ -19,13 +19,14 @@
 
 // The network backend is chosen at compile time, so every call through
 // `backend_` inlines with zero abstraction overhead (no virtual dispatch).
-// io_uring is the default. A future DPDK backend slots in here by exposing the
-// same interface as IoUringBackend
+// io_uring is the default. DPDK exposes the same interface as IoUringBackend
 // (Init/Shutdown/Submit/Poll/Wait/SubmitSend/SubmitAcceptMultishot/
 // StartRecvMultishot/ViewRecvBuffer/ReleaseRecvBuffer/WakeRemote/WakeSelf/...).
 #ifdef CELER_WITH_DPDK
-#error \
-    "CELER_WITH_DPDK is reserved for a future DPDK backend; not implemented yet"
+#include "celer/io/dpdk_backend.h"
+namespace celer {
+using NetBackend = DpdkBackend;
+}
 #else
 #include "celer/io/io_uring_backend.h"
 

@@ -186,6 +186,7 @@ class Worker {
   }
 
   bool RunOnce(bool wait_for_completion);
+  // Run until stopped, honoring stop requests received during initialization.
   void Run();
   void RequestStop() noexcept;
   void Stop() noexcept { RequestStop(); }

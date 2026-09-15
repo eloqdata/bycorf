@@ -35,6 +35,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "celer/io/dpdk_environment.h"
 #include "celer/runtime/worker.h"
 
 namespace celer {
@@ -74,7 +75,6 @@ struct ProbeContext {
 };
 
 std::mutex g_spdk_mutex;
-bool g_spdk_initialized = false;
 std::unordered_map<std::string, std::unique_ptr<SpdkDevice>> g_spdk_devices;
 std::unordered_map<std::string, std::unique_ptr<SpdkController>>
     g_spdk_controllers;
@@ -117,45 +117,6 @@ absl::StatusOr<ParsedPath> ParsePath(std::string_view path) {
   return result;
 }
 
-absl::Status EnsureEnvironment() {
-  if (g_spdk_initialized) {
-    return absl::OkStatus();
-  }
-  spdk_env_opts options{};
-  options.opts_size = sizeof(options);
-  spdk_env_opts_init(&options);
-  options.name = "keylane";
-  options.core_mask = "0x1";
-  options.unlink_hugepage = true;
-  // DPDK pins the calling thread to its main lcore.  Keylane starts the
-  // runtime workers after storage probing, so leaving that affinity in place
-  // would make every worker inherit CPU 0 even when the process was launched
-  // with a wider taskset mask.
-  cpu_set_t original_affinity;
-  const bool saved_affinity =
-      pthread_getaffinity_np(pthread_self(), sizeof(original_affinity),
-                             &original_affinity) == 0;
-  const int init_result = spdk_env_init(&options);
-  const int restore_result =
-      saved_affinity
-          ? pthread_setaffinity_np(pthread_self(), sizeof(original_affinity),
-                                   &original_affinity)
-          : 0;
-  if (init_result < 0) {
-    return absl::Status(
-        absl::StatusCode::kFailedPrecondition,
-        "spdk_env_init failed; reserve hugepages and bind the NVMe controller "
-        "to vfio-pci or uio_pci_generic");
-  }
-  if (!saved_affinity || restore_result != 0) {
-    return absl::Status(absl::StatusCode::kFailedPrecondition,
-                        "SPDK initialized but failed to restore the process "
-                        "CPU affinity");
-  }
-  g_spdk_initialized = true;
-  return absl::OkStatus();
-}
-
 bool ProbeCallback(void* context, const spdk_nvme_transport_id* trid,
                    spdk_nvme_ctrlr_opts* options) {
   auto* probe = static_cast<ProbeContext*>(context);
@@ -188,7 +149,7 @@ absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
   if (existing != g_spdk_devices.end()) {
     return existing->second.get();
   }
-  absl::Status initialized = EnsureEnvironment();
+  absl::Status initialized = EnsureDpdkEnvironment();
   if (!initialized.ok()) {
     return initialized;
   }

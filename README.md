@@ -16,6 +16,12 @@ limitations under the License.
 
 # celer
 
+Linux C++23 coroutine runtime with io_uring, optional SPDK storage, and an
+optional native FreeBSD/DPDK TCP backend.
+
+- [Architecture](docs/architecture/README.md)
+- [DPDK prototype build and tests](docs/dpdk-prototype.md)
+
 ## Development
 
 Celer uses Google-style C++23 formatting and pins clang-format 23.1.0 through

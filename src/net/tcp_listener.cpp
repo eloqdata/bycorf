@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "celer/io/completion.h"
+#include "celer/net/socket_ops.h"
 #include "celer/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
@@ -237,7 +238,7 @@ void ListenerAcceptState::Complete(Worker& worker, int result, unsigned flags) {
 
 void ListenerAcceptState::CloseAllAcceptedFds() noexcept {
   while (!accepted_fds_.empty()) {
-    ::close(accepted_fds_.front());
+    detail::CloseSocket(accepted_fds_.front());
     accepted_fds_.pop_front();
   }
 }
@@ -295,7 +296,8 @@ absl::StatusOr<Connection> AcceptUnregisteredAwaitable::await_resume() {
   int domain = AF_UNSPEC;
   socklen_t domain_length = sizeof(domain);
   int one = 1;
-  if (::getsockopt(*accepted, SOL_SOCKET, SO_DOMAIN, &domain, &domain_length) ==
+  if (!detail::IsDpdkSocket(*accepted) &&
+      ::getsockopt(*accepted, SOL_SOCKET, SO_DOMAIN, &domain, &domain_length) ==
           0 &&
       (domain == AF_INET || domain == AF_INET6) &&
       ::setsockopt(*accepted, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) !=
@@ -339,6 +341,16 @@ absl::Status TcpListener::Bind(Worker* worker,
   if (family != AF_INET && family != AF_INET6) {
     return absl::InvalidArgumentError("unsupported bind address family");
   }
+#ifdef CELER_WITH_DPDK
+  const int handle =
+      DpdkBackend::Listen(reinterpret_cast<const sockaddr*>(&address.address_),
+                          address.length_, backlog);
+  if (handle < 0) return ErrnoToStatus(errno, "FreeBSD listen failed");
+  worker_ = worker;
+  fd_ = handle;
+  closed_ = false;
+  return absl::OkStatus();
+#endif
   const int fd = ::socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
     return ErrnoToStatus(errno, "socket failed");
@@ -347,13 +359,13 @@ absl::Status TcpListener::Bind(Worker* worker,
   int reuse = 1;
   if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0) {
     const auto status = ErrnoToStatus(errno, "setsockopt(SO_REUSEADDR) failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     return status;
   }
   if (reuse_port &&
       ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) != 0) {
     const auto status = ErrnoToStatus(errno, "setsockopt(SO_REUSEPORT) failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     return status;
   }
 
@@ -363,7 +375,7 @@ absl::Status TcpListener::Bind(Worker* worker,
                      sizeof(ipv6_only)) != 0) {
       const auto status =
           ErrnoToStatus(errno, "setsockopt(IPV6_V6ONLY) failed");
-      ::close(fd);
+      detail::CloseSocket(fd);
       return status;
     }
   }
@@ -371,13 +383,13 @@ absl::Status TcpListener::Bind(Worker* worker,
   if (::bind(fd, reinterpret_cast<const sockaddr*>(&address.address_),
              address.length_) != 0) {
     const auto status = ErrnoToStatus(errno, "bind failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     return status;
   }
 
   if (::listen(fd, backlog) != 0) {
     const auto status = ErrnoToStatus(errno, "listen failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     return status;
   }
 
@@ -385,7 +397,7 @@ absl::Status TcpListener::Bind(Worker* worker,
   if (current_flags < 0 ||
       ::fcntl(fd, F_SETFL, current_flags | O_NONBLOCK) != 0) {
     const auto status = ErrnoToStatus(errno, "fcntl(O_NONBLOCK) failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     return status;
   }
 
@@ -426,7 +438,7 @@ absl::Status TcpListener::BindUnix(Worker* worker, std::string_view path,
     const int connected = ::connect(
         probe, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
     const int connect_error = errno;
-    ::close(probe);
+    detail::CloseSocket(probe);
     if (connected == 0) {
       return absl::AlreadyExistsError("Unix listener is already active");
     }
@@ -449,29 +461,29 @@ absl::Status TcpListener::BindUnix(Worker* worker, std::string_view path,
   if (::bind(fd, reinterpret_cast<const sockaddr*>(&address),
              sizeof(address)) != 0) {
     const absl::Status status = ErrnoToStatus(errno, "Unix bind failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     return status;
   }
   struct stat bound{};
   if (::lstat(address.sun_path, &bound) != 0) {
     const int inspect_error = errno;
-    ::close(fd);
+    detail::CloseSocket(fd);
     return ErrnoToStatus(inspect_error, "inspect bound Unix listener failed");
   }
   if (!S_ISSOCK(bound.st_mode)) {
-    ::close(fd);
+    detail::CloseSocket(fd);
     return absl::FailedPreconditionError(
         "Unix bind pathname was replaced before initialization");
   }
   if (::chmod(address.sun_path, static_cast<mode_t>(mode)) != 0) {
     const absl::Status status = ErrnoToStatus(errno, "Unix chmod failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     (void)UnlinkSocketIfSame(std::string(path), bound);
     return status;
   }
   if (::listen(fd, backlog) != 0) {
     const absl::Status status = ErrnoToStatus(errno, "Unix listen failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     (void)UnlinkSocketIfSame(std::string(path), bound);
     return status;
   }
@@ -480,7 +492,7 @@ absl::Status TcpListener::BindUnix(Worker* worker, std::string_view path,
       ::fcntl(fd, F_SETFL, current_flags | O_NONBLOCK) != 0) {
     const absl::Status status =
         ErrnoToStatus(errno, "fcntl(O_NONBLOCK) failed");
-    ::close(fd);
+    detail::CloseSocket(fd);
     (void)UnlinkSocketIfSame(std::string(path), bound);
     return status;
   }
@@ -510,7 +522,7 @@ Task<absl::StatusOr<Connection*>> TcpListener::Accept() {
   connection.worker_ = worker_;
   Connection* registered = worker_->AddConnection(std::move(connection));
   if (registered == nullptr) {
-    ::close(fd);
+    detail::CloseSocket(fd);
     co_return absl::Status(absl::StatusCode::kInternal,
                            "failed to register accepted connection");
   }
@@ -527,7 +539,7 @@ absl::Status TcpListener::Close() noexcept {
   fd_ = -1;
   accept_state_.CloseAllAcceptedFds();
   absl::Status result = absl::OkStatus();
-  if (fd >= 0 && ::close(fd) != 0) {
+  if (fd >= 0 && detail::CloseSocket(fd) != 0) {
     result = ErrnoToStatus(errno, "close listener failed");
   }
   if (!unix_path_.empty()) {

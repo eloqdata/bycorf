@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -92,6 +93,11 @@ class TcpService : public Service {
   std::vector<WorkerListeners> listeners_;  // one collection per worker
   unsigned thread_count_ = 0;
   std::atomic<std::uint64_t> next_connection_worker_{0};
+#ifdef CELER_WITH_DPDK
+  std::mutex stop_mutex_;
+  bool stopping_ = false;
+  std::vector<ForeignExecutor> control_executors_;
+#endif
 
   // TODO: If long-lived connections develop uneven workloads after this
   // accept-time placement, add request-boundary live migration. It must first

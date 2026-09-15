@@ -63,3 +63,6 @@ vgcore.*
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Python build and test helpers
+__pycache__/

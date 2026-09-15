@@ -117,6 +117,9 @@ class IoUringBackend {
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
   absl::Status SubmitTimeout(const __kernel_timespec& timeout,
                              IoCompletion* tag);
+  // Observe a host descriptor (e.g. a DPDK RX notification) through the same
+  // CQ as storage and MSG_RING. The caller retains tag until completion/cancel.
+  absl::Status SubmitPoll(int fd, unsigned events, IoCompletion* tag);
 
   // Event loop.
   absl::Status Submit();

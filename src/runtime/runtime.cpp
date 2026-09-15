@@ -24,6 +24,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <latch>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -92,6 +93,10 @@ class Runtime::Impl {
       }
     }
 
+#ifdef CELER_WITH_DPDK
+    const auto network = DpdkBackend::PrepareRuntime(thread_count);
+    if (!network.ok()) throw std::runtime_error(std::string(network.message()));
+#endif
     started_ = true;
 
     // Build the cross-core mailboxes and their wake eventfds BEFORE any worker
@@ -111,50 +116,81 @@ class Runtime::Impl {
     }
 
     states_.reserve(thread_count);
-    active_workers_.store(thread_count, std::memory_order_release);
     for (unsigned i = 0; i < thread_count; ++i) {
       auto state = std::make_unique<State>();
-      State* raw = state.get();
-      raw->worker_.BindCrossCore(static_cast<WorkerId>(i), &cross_core_);
-      raw->thread_ = std::thread([this, i, raw, main_fn, worker_cpus] {
-        int local_exit_code = 0;
-        if (!worker_cpus.empty()) {
-          cpu_set_t affinity;
-          CPU_ZERO(&affinity);
-          CPU_SET(worker_cpus[i], &affinity);
-          if (pthread_setaffinity_np(pthread_self(), sizeof(affinity),
-                                     &affinity) != 0) {
-            local_exit_code = 1;
-          }
-        }
-        if (local_exit_code == 0) {
-          local_exit_code = main_fn(i, raw->worker_);
-        }
-        foreign_executors_[i]->accepting_.store(false,
-                                                std::memory_order_release);
-
-        if (local_exit_code != 0) {
-          int expected = 0;
-          exit_code_.compare_exchange_strong(expected, local_exit_code,
-                                             std::memory_order_acq_rel);
-          RequestStop();
-        }
-
-        if (active_workers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-          const std::uint64_t ready = 1;
-          const ssize_t result = write(completion_fd_, &ready, sizeof(ready));
-          (void)result;
-          std::lock_guard<std::mutex> lk(mu_);
-          stopped_ = true;
-          cv_.notify_all();
-          return;
-        }
-
-        std::lock_guard<std::mutex> lk(mu_);
-        cv_.notify_all();
-      });
+      state->worker_.BindCrossCore(static_cast<WorkerId>(i), &cross_core_);
       states_.push_back(std::move(state));
     }
+    // Publish the complete worker table before a worker can fail and stop its
+    // peers. The launch barrier also makes affinity failure an all-worker
+    // startup failure, before a service enters any initialization barrier.
+    active_workers_.store(thread_count, std::memory_order_release);
+    auto launch = std::make_shared<std::latch>(thread_count + 1);
+    auto affinity_failed = std::make_shared<std::atomic<bool>>(false);
+    unsigned launched = 0;
+    try {
+      for (unsigned i = 0; i < thread_count; ++i) {
+        State* raw = states_[i].get();
+        raw->thread_ = std::thread([this, i, raw, main_fn, worker_cpus, launch,
+                                    affinity_failed] {
+          int local_exit_code = 0;
+          if (!worker_cpus.empty()) {
+            cpu_set_t affinity;
+            CPU_ZERO(&affinity);
+            CPU_SET(worker_cpus[i], &affinity);
+            if (pthread_setaffinity_np(pthread_self(), sizeof(affinity),
+                                       &affinity) != 0) {
+              local_exit_code = 1;
+              affinity_failed->store(true, std::memory_order_relaxed);
+            }
+          }
+          launch->arrive_and_wait();
+          if (affinity_failed->load(std::memory_order_relaxed)) {
+            local_exit_code = 1;
+          } else {
+            local_exit_code = main_fn(i, raw->worker_);
+          }
+#ifdef CELER_WITH_DPDK
+          if (local_exit_code != 0)
+            DpdkBackend::AbortStartup(
+                absl::InternalError("worker startup failed"));
+          // FreeBSD sockets and EAL registrations belong to this native thread.
+          // Teardown after main_fn must finish before the thread exits.
+          raw->worker_.Shutdown();
+#endif
+          foreign_executors_[i]->accepting_.store(false,
+                                                  std::memory_order_release);
+
+          if (local_exit_code != 0) {
+            int expected = 0;
+            exit_code_.compare_exchange_strong(expected, local_exit_code,
+                                               std::memory_order_acq_rel);
+            RequestStop();
+          }
+
+          if (active_workers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            const std::uint64_t ready = 1;
+            const ssize_t result = write(completion_fd_, &ready, sizeof(ready));
+            (void)result;
+            std::lock_guard<std::mutex> lk(mu_);
+            stopped_ = true;
+            cv_.notify_all();
+            return;
+          }
+
+          std::lock_guard<std::mutex> lk(mu_);
+          cv_.notify_all();
+        });
+        ++launched;
+      }
+    } catch (...) {
+      affinity_failed->store(true, std::memory_order_relaxed);
+      active_workers_.fetch_sub(thread_count - launched,
+                                std::memory_order_acq_rel);
+      launch->count_down(thread_count - launched + 1);
+      throw;
+    }
+    launch->count_down();
   }
 
   void RequestStop() noexcept {
@@ -191,6 +227,9 @@ class Runtime::Impl {
         state->thread_.join();
       }
     }
+#ifdef CELER_WITH_DPDK
+    DpdkBackend::StopRuntime();
+#endif
     stopped_ = true;
   }
 
