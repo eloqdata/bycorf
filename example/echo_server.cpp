@@ -28,7 +28,7 @@
 #include <string>
 #include <string_view>
 
-#include "celer/base/status.h"
+#include "absl/status/status.h"
 #include "celer/net/server.h"
 #include "celer/net/tcp_service.h"
 #include "spdlog/spdlog.h"
@@ -50,10 +50,10 @@ void ShutdownSignalHandler(int signal) {
   (void)write(g_signal_event_fd, &wake, sizeof(wake));
 }
 
-Status InstallShutdownSignalHandler() {
+absl::Status InstallShutdownSignalHandler() {
   g_signal_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (g_signal_event_fd < 0) {
-    return Status(StatusCode::kInternal, "eventfd setup failed");
+    return absl::InternalError("eventfd setup failed");
   }
 
   struct sigaction action{};
@@ -63,9 +63,9 @@ Status InstallShutdownSignalHandler() {
       sigaction(SIGTERM, &action, nullptr) != 0) {
     close(g_signal_event_fd);
     g_signal_event_fd = -1;
-    return Status(StatusCode::kInternal, "sigaction setup failed");
+    return absl::InternalError("sigaction setup failed");
   }
-  return Status::Ok();
+  return absl::OkStatus();
 }
 
 void CleanupShutdownSignalHandler() noexcept {
@@ -85,7 +85,7 @@ class EchoService final : public TcpService {
   explicit EchoService(std::uint16_t port) : TcpService(port) {}
 
  protected:
-  Task<Status> Serve(TcpStream stream) override {
+  Task<absl::Status> Serve(TcpStream stream) override {
     std::array<std::byte, 4096> buffer{};
     while (true) {
       auto read_result = co_await stream.ReadSome(buffer);
@@ -93,7 +93,7 @@ class EchoService final : public TcpService {
         co_return read_result.status();
       }
       if (*read_result == 0) [[unlikely]] {
-        co_return Status::Ok();
+        co_return absl::OkStatus();
       }
       auto write_status = co_await stream.WriteAll(
           std::span<const std::byte>(buffer.data(), *read_result));
@@ -176,9 +176,9 @@ int main(int argc, char** argv) {
   }
 
   celer::ServerOptions options;
-  options.bind_ip = std::string(bind_ip);
-  options.thread_count = thread_count;
-  options.idle_timeout_ms = idle_timeout_ms;
+  options.bind_ip_ = std::string(bind_ip);
+  options.thread_count_ = thread_count;
+  options.idle_timeout_ms_ = idle_timeout_ms;
 
   celer::EchoService echo(port);
   celer::Server server;

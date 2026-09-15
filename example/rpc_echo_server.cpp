@@ -64,8 +64,8 @@ int main(int argc, char** argv) {
   });
 
   celer::ServerOptions options;
-  options.bind_ip = bind_ip;
-  options.thread_count = threads;
+  options.bind_ip_ = bind_ip;
+  options.thread_count_ = threads;
 
   celer::Server server;
   server.AddService(&rpc);

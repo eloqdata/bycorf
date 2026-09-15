@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "celer/rpc/rpc.h"
 #include "celer/runtime/runtime.h"
 #include "celer/runtime/worker.h"
@@ -47,7 +48,7 @@ std::vector<Stat> g_stats;
 
 using namespace celer;
 
-Task<Status> Caller(rpc::RpcClient* client, unsigned wid) {
+Task<absl::Status> Caller(rpc::RpcClient* client, unsigned wid) {
   rpc::Bytes payload(g_payload, std::byte{'x'});
   while (!g_stop.load(std::memory_order_acquire)) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -61,10 +62,10 @@ Task<Status> Caller(rpc::RpcClient* client, unsigned wid) {
     g_stats[wid].latency_ns += static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count());
   }
-  co_return Status::Ok();
+  co_return absl::OkStatus();
 }
 
-Task<Status> Setup(Worker& worker) {
+Task<absl::Status> Setup(Worker& worker) {
   const unsigned wid = worker.id();
   for (unsigned c = 0; c < g_conns; ++c) {
     auto* client =
@@ -78,7 +79,7 @@ Task<Status> Setup(Worker& worker) {
       worker.Spawn(Caller(client, wid));
     }
   }
-  co_return Status::Ok();
+  co_return absl::OkStatus();
 }
 
 }  // namespace
