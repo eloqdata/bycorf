@@ -14,6 +14,7 @@
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(CELER_FREEBSD_CC NAMES clang-18 clang REQUIRED)
+find_program(CELER_FREEBSD_PATCH NAMES patch REQUIRED)
 # Use the application's target even when the private kernel compiler is a
 # different Clang binary. Host uname cannot select headers in a cross build.
 set(CELER_FREEBSD_TARGET "${CMAKE_C_COMPILER_TARGET}")
@@ -30,9 +31,11 @@ add_custom_command(OUTPUT "${CELER_FREEBSD_ARCHIVE}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_freebsd.py"
     --source "${CMAKE_CURRENT_SOURCE_DIR}"
     --output "${CMAKE_CURRENT_BINARY_DIR}/freebsd" --cc "${CELER_FREEBSD_CC}"
+    --patch "${CELER_FREEBSD_PATCH}"
     --target "${CELER_FREEBSD_TARGET}"
     --max-workers "${CELER_DPDK_MAX_WORKERS}"
   DEPENDS ${CELER_FREEBSD_INPUTS} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_freebsd.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/freebsd-tcp-iss-retirement.patch"
   COMMENT "Building the private FreeBSD IPv4/TCP stack" VERBATIM)
 add_custom_target(celer_freebsd_build DEPENDS "${CELER_FREEBSD_ARCHIVE}")
 add_library(celer_freebsd STATIC IMPORTED GLOBAL)

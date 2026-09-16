@@ -79,11 +79,11 @@ TCP state, callouts, and BSD deferred tasks stay with their socket's worker;
 application key routing never changes this ownership.
 
 The private build verifies pinned upstream source digests and applies narrow
-host overlays. TCP retires its initial-sequence ACK guard before both fast and
-slow input processing, so long-lived streams cannot revive that guard after
-crossing half of the 32-bit sequence space. Ordinary ACK bounds checks remain
-active; `tests/freebsd_tcp_sequence_check.cpp` covers this invariant through
-the real stack and an in-process Ethernet peer.
+host overlays. Both TCP ACK processing paths retire the initial-sequence guard
+while sequence comparisons remain unambiguous, so long-lived streams cannot
+revive that guard after crossing half of the 32-bit sequence space. Ordinary ACK
+bounds checks remain active; `tests/freebsd_tcp_sequence_check.cpp` covers this
+invariant through the real stack and an in-process Ethernet peer.
 
 BSD sockets use private worker-encoded handles rather than Linux file
 descriptors. Celer's close and peer-address helpers dispatch these handles to

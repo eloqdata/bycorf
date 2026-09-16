@@ -33,31 +33,19 @@ def run(args, **kwargs):
     return result.stdout
 
 
-def tcp_input_overlay(upstream, output):
-    """Keep ISS-check retirement current on both native TCP input paths.
+def tcp_input_overlay(upstream, output, patch_tool="patch"):
+    """Apply the TCP fix to a fresh build-directory copy of the pinned source.
 
-    Header prediction can acknowledge more than half the sequence space without
-    visiting slow ACK processing. Its later signed comparison against ISS then
-    treats a valid ACK as a ghost ACK. Latch retirement before either path can
-    return, while the sequence distance is still unambiguous. Keep the imported
-    source and manifest intact; fail closed if an upstream refresh changes the
-    exact code this narrowly scoped overlay replaces.
+    The caller verifies upstream digests before applying the patch without
+    fuzzy context matching or reversal. Refresh the copy on every build so an
+    incremental rebuild never applies the fix twice or edits imported files.
     """
     path = upstream / "sys/netinet/tcp_input.c"
-    text = path.read_text()
-    old = ("\tif (SEQ_GEQ(tp->snd_una, tp->iss + (TCP_MAXWIN << tp->snd_scale))) {\n"
-           "\t\t/* Checking SEG.ACK against ISS is definitely redundant. */\n"
-           "\t\ttp->t_flags2 |= TF2_NO_ISS_CHECK;\n\t}\n")
-    anchor = "\t/*\n\t * Header prediction: check for the two common cases\n"
-    if text.count(old) != 1 or text.count(anchor) != 1:
-        raise RuntimeError("FreeBSD TCP ISS-check overlay needs review")
-    replacement = (
-        "\t/* Retire the ISS guard before fast ACKs can bypass the slow path. */\n"
-        "\tif (!(tp->t_flags2 & TF2_NO_ISS_CHECK) &&\n"
-        "\t    SEQ_GEQ(tp->snd_una, tp->iss + (TCP_MAXWIN << tp->snd_scale)))\n"
-        "\t\ttp->t_flags2 |= TF2_NO_ISS_CHECK;\n\n")
+    patch = Path(__file__).resolve().parent / "patches/freebsd-tcp-iss-retirement.patch"
     generated = output / "tcp_input.c"
-    generated.write_text(text.replace(old, "").replace(anchor, replacement + anchor))
+    generated.write_bytes(path.read_bytes())
+    run([patch_tool, "--batch", "--forward", "--fuzz=0", "--no-backup-if-mismatch",
+         str(generated), str(patch)])
     return path, generated
 
 
@@ -66,6 +54,7 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cc", default="clang")
+    parser.add_argument("--patch", default="patch", help="GNU patch executable")
     parser.add_argument("--target", help="Clang target triple (default: compiler's native target)")
     for tool in ("ld", "nm", "objcopy", "ar"):
         parser.add_argument(f"--{tool}", help=f"Override the compiler-selected {tool}")
@@ -167,7 +156,7 @@ def main():
 
     sources = [upstream / line for line in (upstream / "SOURCES").read_text().splitlines() if line]
     sources += sorted(port.glob("*.c"))
-    tcp_input, patched_tcp_input = tcp_input_overlay(upstream, output)
+    tcp_input, patched_tcp_input = tcp_input_overlay(upstream, output, args.patch)
 
     def compile_one(path):
         obj = output / (path.relative_to(source).as_posix().replace("/", "_") + ".o")

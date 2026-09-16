@@ -24,8 +24,8 @@ library or F-Stack-derived host adaptation.
 ## Build
 
 Prerequisites include Clang 18, CMake, Ninja, Meson, Python 3/pyelftools,
-pkg-config, GNU binutils/awk, OpenSSL development files, NUMA/UUID development
-files, and DPDK/SPDK's normal build dependencies. Both AArch64 and x86-64
+pkg-config, GNU patch/binutils/awk, OpenSSL and NUMA/UUID development files,
+and DPDK/SPDK's normal build dependencies. Both AArch64 and x86-64
 (Intel/AMD, called `amd64` by FreeBSD) use the same native build commands.
 CMake's C++ compiler may be Clang or GCC, but the private kernel build requires
 Clang. Headers and structure offsets follow the application's compiler target.

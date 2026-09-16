@@ -26,13 +26,15 @@ register access with TLS. The amd64 atomic overlay selects upstream userspace
 fences, and direct-map conversions fail explicitly because Linux owns the VM.
 
 `cmake/build_freebsd.py` generates option and interface headers, and changes
-three clock declarations to TLS in a private generated header overlay. Its
-generated TCP input source also retires the initial-sequence ACK guard before
-header prediction can bypass slow ACK processing; the overlay checks its exact
-upstream anchors and retains ordinary ACK validation. These explicit overlays
-do not modify the imported files. Kernel symbols
-are localized into one private object; undefined symbols are checked against
-the host bridge's allowlist before archiving.
+three clock declarations to TLS in a private generated header overlay. It applies
+the [TCP ISS retirement patch](../../cmake/patches/freebsd-tcp-iss-retirement.patch)
+to a fresh build-directory copy of `tcp_input.c`, after source verification and
+with fuzzy context matching and patch reversal disabled. The patch shares an
+inline helper between fast and general ACK processing, leaving fast data input
+unchanged and retaining ordinary ACK validation. These overlays do not modify
+the imported files. Kernel symbols are localized into one private object;
+undefined symbols are checked against the host bridge's allowlist before
+archiving.
 
 See the [prototype runbook](../../docs/dpdk-prototype.md) for configuration,
 tests, and the limits of the host port.
