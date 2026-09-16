@@ -22,7 +22,8 @@ Registered storage buffers and network receive buffers have separate
 lifecycles. The default network backend uses Linux TCP and provided-buffer
 multishot receives, with a per-connection one-shot fallback.
 
-`CELER_WITH_DPDK` and `CELER_WITH_SPDK_STORAGE` include optional capabilities.
+`CELER_KERNEL_BYPASS` is the single build option for DPDK networking and SPDK
+storage. It defaults to off; enabling it compiles and links both capabilities.
 Applications select network and storage independently through
 `ConfigureIoBackends` before workers or storage initialization. The defaults are
 kernel networking and io_uring storage, even when both capabilities are linked.

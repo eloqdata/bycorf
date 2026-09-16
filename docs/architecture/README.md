@@ -34,8 +34,10 @@ worker before that coroutine uses its stream again.
 
 `celer::core`, `celer::celer`, and `celer::io` alias the core library;
 `celer::rpc` is a separate optional consumer of its public network primitives.
-Build choices include optional capabilities; startup selection independently
-activates network and storage backends and remains fixed for the process lifetime.
+`CELER_KERNEL_BYPASS=ON` includes DPDK networking and SPDK storage together.
+Startup selection independently activates network and storage backends and
+remains fixed for the process lifetime. Both default to io_uring even in a
+bypass-capable build.
 The [prototype runbook](../dpdk-prototype.md) describes the DPDK configuration.
 
 Architecture documents describe the current core model and stable tradeoffs.

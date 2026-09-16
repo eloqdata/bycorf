@@ -83,7 +83,7 @@ jobs:
             -DBUILD_TESTING=ON \
             -DCELER_BUILD_TESTS=ON \
             -DCELER_BUILD_EXAMPLES=ON \
-            -DCELER_WITH_SPDK_STORAGE=OFF
+            -DCELER_KERNEL_BYPASS=OFF
       - name: Build all targets
         run: cmake --build build-ci --parallel "$(nproc)"
       - name: Run regression tests

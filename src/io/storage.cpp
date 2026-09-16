@@ -35,7 +35,7 @@ bool IsSpdkStoragePath(std::string_view path) noexcept {
 
 absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(std::string_view path) {
   return absl::Status(absl::StatusCode::kUnimplemented,
-                      "SPDK storage path requires CELER_WITH_SPDK_STORAGE: " +
+                      "SPDK storage path requires CELER_KERNEL_BYPASS=ON: " +
                           std::string(path));
 }
 

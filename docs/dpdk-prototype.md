@@ -40,7 +40,7 @@ git -C third_party/spdk submodule update --init isa-l isa-l-crypto
 cmake -S . -B build-dpdk-net -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
-  -DCELER_WITH_DPDK=ON -DCELER_BUILD_EXAMPLES=ON
+  -DCELER_KERNEL_BYPASS=ON -DCELER_BUILD_EXAMPLES=ON
 cmake --build build-dpdk-net -j4
 ```
 
@@ -57,8 +57,8 @@ Celer imports DPDK's non-include compiler flags from `libdpdk.pc`, including
 the CPU features needed by its inline headers. A non-IPO build does not need
 an extra manually supplied SSSE3 flag on x86.
 
-`CELER_WITH_SPDK_STORAGE=ON` additionally includes NVMe storage support.
-Select it through the startup API described below. Networking and
+`CELER_KERNEL_BYPASS=ON` includes both DPDK networking and SPDK NVMe storage.
+It leaves both inactive until selected through the startup API described below. Networking and
 SPDK share `EnsureDpdkEnvironment()` and one `spdk_env_init` call. EAL is DPDK's
 environment layer for memory, devices, and thread/lcore registration; SPDK
 initializes it on Celer's behalf.
@@ -211,7 +211,7 @@ least 257 lcore slots. CMake rejects a smaller prefix instead of overriding
 its ABI-defining headers. Clear the prefix to let Celer rebuild its dependency:
 
 ```sh
-cmake -S . -B build-dpdk-net -DCELER_WITH_DPDK=ON \
+cmake -S . -B build-dpdk-net -DCELER_KERNEL_BYPASS=ON \
   -DCELER_DPDK_MAX_WORKERS=256 -DCELER_DPDK_PREFIX=
 cmake --build build-dpdk-net
 ```

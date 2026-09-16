@@ -34,11 +34,11 @@ endif()
 option(CELER_BUILD_TESTS "Build Celer regression tests"
   ${CELER_BUILD_TESTS_DEFAULT})
 option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
-# These options include capabilities; applications select backends at startup.
-# DPDK networking uses a private FreeBSD IPv4/TCP stack.
-option(CELER_WITH_DPDK "Include the optional DPDK network backend" OFF)
-option(CELER_WITH_SPDK_STORAGE
-  "Include the optional SPDK storage backend" OFF)
+# One dependency boundary includes both accelerators; applications still select
+# network and storage independently at startup. DPDK uses private FreeBSD TCP.
+option(CELER_KERNEL_BYPASS
+  "Include DPDK networking and SPDK storage (selected independently at startup)"
+  OFF)
 option(CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
   "Enable detailed cross-core queue and wake latency tracing" OFF)
 
@@ -175,7 +175,7 @@ target_compile_definitions(celer PUBLIC
   CELER_ENABLE_CROSS_CORE_LATENCY_TRACE=$<BOOL:${CELER_ENABLE_CROSS_CORE_LATENCY_TRACE}>
 )
 
-if (CELER_WITH_DPDK OR CELER_WITH_SPDK_STORAGE)
+if (CELER_KERNEL_BYPASS)
   include(cmake/Dpdk.cmake)
   set(CELER_SPDK_SOURCE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/spdk")
@@ -253,22 +253,20 @@ if (CELER_WITH_DPDK OR CELER_WITH_SPDK_STORAGE)
     "${CELER_SPDK_LINK_FLAGS_RAW}")
   list(FILTER CELER_SPDK_LINK_FLAGS EXCLUDE REGEX
     "^(-pthread|-lm|-ldl|-lnuma)$")
-  if (CELER_WITH_DPDK)
-    # SPDK's pkg-config selects only its EAL/storage dependencies, omitting
-    # network PMD constructors. Replace that subset with one complete DPDK
-    # archive list; linking both under whole-archive duplicates EAL symbols.
-    execute_process(COMMAND "${CMAKE_COMMAND}" -E env
-      "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
-      "${CELER_PKG_CONFIG_EXECUTABLE}" --libs --static libdpdk
-      OUTPUT_VARIABLE CELER_DPDK_FLAGS_RAW OUTPUT_STRIP_TRAILING_WHITESPACE
-      COMMAND_ERROR_IS_FATAL ANY)
-    separate_arguments(CELER_DPDK_FLAGS NATIVE_COMMAND "${CELER_DPDK_FLAGS_RAW}")
-    list(FILTER CELER_SPDK_LINK_FLAGS EXCLUDE REGEX "^-lrte_")
-    set(CELER_DPDK_SYSTEM_FLAGS ${CELER_DPDK_FLAGS})
-    list(FILTER CELER_DPDK_FLAGS INCLUDE REGEX "^-l:librte_.*\\.a$")
-    list(FILTER CELER_DPDK_SYSTEM_FLAGS EXCLUDE REGEX "^(-l:?lib?rte_|-lrte_|-Wl,|-L)")
-    list(APPEND CELER_SPDK_LINK_FLAGS ${CELER_DPDK_FLAGS})
-  endif()
+  # SPDK's pkg-config selects only its EAL/storage dependencies, omitting
+  # network PMD constructors. Replace that subset with one complete DPDK
+  # archive list; linking both under whole-archive duplicates EAL symbols.
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E env
+    "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
+    "${CELER_PKG_CONFIG_EXECUTABLE}" --libs --static libdpdk
+    OUTPUT_VARIABLE CELER_DPDK_FLAGS_RAW OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  separate_arguments(CELER_DPDK_FLAGS NATIVE_COMMAND "${CELER_DPDK_FLAGS_RAW}")
+  list(FILTER CELER_SPDK_LINK_FLAGS EXCLUDE REGEX "^-lrte_")
+  set(CELER_DPDK_SYSTEM_FLAGS ${CELER_DPDK_FLAGS})
+  list(FILTER CELER_DPDK_FLAGS INCLUDE REGEX "^-l:librte_.*\\.a$")
+  list(FILTER CELER_DPDK_SYSTEM_FLAGS EXCLUDE REGEX "^(-l:?lib?rte_|-lrte_|-Wl,|-L)")
+  list(APPEND CELER_SPDK_LINK_FLAGS ${CELER_DPDK_FLAGS})
   # spdk_nvme/spdk_env_dpdk do not propagate the ISA-L archives from
   # spdk_syslibs.pc. They provide CRC/XOR symbols used by libspdk_util, so
   # retain the non-`-l` archive entries without pulling OpenSSL and other
@@ -288,11 +286,14 @@ if (CELER_WITH_DPDK OR CELER_WITH_SPDK_STORAGE)
   separate_arguments(CELER_SPDK_SYSTEM_ARCHIVES NATIVE_COMMAND
     "${CELER_SPDK_SYSTEM_ARCHIVES_RAW}")
   list(FILTER CELER_SPDK_SYSTEM_ARCHIVES EXCLUDE REGEX "^-pthread$")
-  target_sources(celer PRIVATE src/io/dpdk_environment.cpp)
-  if (CELER_WITH_SPDK_STORAGE)
-    target_sources(celer PRIVATE src/io/spdk_storage.cpp)
-    target_compile_definitions(celer PUBLIC CELER_WITH_SPDK_STORAGE=1)
-  endif()
+  include(cmake/Freebsd.cmake)
+  target_sources(celer PRIVATE
+    src/io/dpdk_environment.cpp src/io/spdk_storage.cpp
+    src/io/dpdk_backend.cpp src/net/socket_ops.cpp)
+  # Preserve the public header feature macros for consumers. They are derived
+  # together from this option, never independent CMake configuration switches.
+  target_compile_definitions(celer PUBLIC
+    CELER_WITH_DPDK=1 CELER_WITH_SPDK_STORAGE=1)
   target_include_directories(celer SYSTEM PUBLIC
     "${CELER_SPDK_SOURCE_DIR}/include"
     "${CELER_SPDK_SOURCE_DIR}/build/include"
@@ -319,12 +320,6 @@ if (CELER_WITH_DPDK OR CELER_WITH_SPDK_STORAGE)
     dl
     m
   )
-endif()
-
-if (CELER_WITH_DPDK)
-  include(cmake/Freebsd.cmake)
-  target_compile_definitions(celer PUBLIC CELER_WITH_DPDK=1)
-  target_sources(celer PRIVATE src/io/dpdk_backend.cpp src/net/socket_ops.cpp)
 endif()
 
 add_library(celer::celer ALIAS celer)
@@ -396,12 +391,10 @@ if (CELER_BUILD_EXAMPLES OR CELER_BUILD_TESTS)
   add_executable(celer_backend_startup_check example/backend_startup_check.cpp)
   target_link_libraries(celer_backend_startup_check PRIVATE celer::core)
 
-  if (CELER_WITH_DPDK)
+  if (CELER_KERNEL_BYPASS)
     add_executable(celer_backend_worker_check example/backend_worker_check.cpp)
     target_link_libraries(celer_backend_worker_check PRIVATE celer::core)
-  endif()
 
-  if (CELER_WITH_DPDK)
     find_package(Threads REQUIRED)
     add_executable(celer_freebsd_port_check tests/freebsd_port_check.cpp)
     target_link_libraries(celer_freebsd_port_check PRIVATE
