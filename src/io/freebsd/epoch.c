@@ -29,7 +29,7 @@ epoch_t epoch_alloc(const char* name, int flags) {
   (void)flags;
   struct epoch* e = malloc(sizeof(*e), M_TEMP, M_WAITOK | M_ZERO);
   ck_epoch_init(&e->state);
-  for (unsigned i = 0; i < celer_bsd_worker_count; ++i)
+  for (unsigned i = 0; i < bycorf_bsd_worker_count; ++i)
     ck_epoch_register(&e->state, &e->records[i], NULL);
   // Epoch domains are created during serialized stack initialization. Each
   // worker subsequently owns its record and runs its own deferred callbacks.
@@ -63,7 +63,7 @@ void epoch_call(epoch_t e, epoch_callback_t callback, epoch_context_t context) {
   ck_epoch_call(&e->records[PCPU_GET(cpuid)], (ck_epoch_entry_t*)context,
                 (ck_epoch_cb_t*)callback);
 }
-void celer_bsd_epoch_poll(void) {
+void bycorf_bsd_epoch_poll(void) {
   for (struct epoch* e = epochs; e; e = e->next)
     ck_epoch_poll(&e->records[PCPU_GET(cpuid)]);
 }

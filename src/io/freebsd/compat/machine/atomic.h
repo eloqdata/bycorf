@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef CELER_FREEBSD_MACHINE_ATOMIC_H_
-#define CELER_FREEBSD_MACHINE_ATOMIC_H_
+#ifndef BYCORF_FREEBSD_MACHINE_ATOMIC_H_
+#define BYCORF_FREEBSD_MACHINE_ATOMIC_H_
 
 #if defined(__x86_64__)
 // The pinned amd64 header's kernel Store/Load fence accesses a private %gs

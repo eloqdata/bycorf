@@ -81,9 +81,9 @@ jobs:
             -DCMAKE_CXX_COMPILER=clang++-18 \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTING=ON \
-            -DCELER_BUILD_TESTS=ON \
-            -DCELER_BUILD_EXAMPLES=ON \
-            -DCELER_KERNEL_BYPASS=OFF
+            -DBYCORF_BUILD_TESTS=ON \
+            -DBYCORF_BUILD_EXAMPLES=ON \
+            -DBYCORF_KERNEL_BYPASS=OFF
       - name: Build all targets
         run: cmake --build build-ci --parallel "$(nproc)"
       - name: Run regression tests

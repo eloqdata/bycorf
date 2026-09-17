@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/net/tls.h"
+#include "bycorf/net/tls.h"
 
 #include <arpa/inet.h>
 #include <openssl/err.h>
@@ -31,10 +31,10 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-#include "celer/net/tcp_stream.h"
-#include "celer/runtime/sync.h"
+#include "bycorf/net/tcp_stream.h"
+#include "bycorf/runtime/sync.h"
 
-namespace celer {
+namespace bycorf {
 namespace {
 
 constexpr std::size_t kTlsIoBufferBytes = 16 * 1024;
@@ -433,4 +433,4 @@ Task<absl::Status> TlsState::Shutdown(TcpStream& stream) {
   co_return TlsError("TLS shutdown failed");
 }
 
-}  // namespace celer
+}  // namespace bycorf

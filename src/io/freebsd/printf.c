@@ -418,20 +418,20 @@ int kvprintf(char const* fmt, void (*func)(int, void*), void* arg, int radix,
 #undef PCHAR
 }
 
-struct celer_format_buffer {
+struct bycorf_format_buffer {
   char* next;
   size_t remaining;
 };
-static void celer_format_char(int value, void* context) {
-  struct celer_format_buffer* b = context;
+static void bycorf_format_char(int value, void* context) {
+  struct bycorf_format_buffer* b = context;
   if (b->remaining > 1) {
     *b->next++ = value;
     --b->remaining;
   }
 }
 int vsnprintf(char* str, size_t size, const char* format, va_list args) {
-  struct celer_format_buffer b = {str, size};
-  int count = kvprintf(format, celer_format_char, &b, 10, args);
+  struct bycorf_format_buffer b = {str, size};
+  int count = kvprintf(format, bycorf_format_char, &b, 10, args);
   if (size) *b.next = 0;
   return count;
 }
@@ -455,14 +455,14 @@ int printf(const char* format, ...) {
   va_start(args, format);
   int count = vsnprintf(buffer, sizeof(buffer), format, args);
   va_end(args);
-  celer_bsd_host.log(buffer, strnlen(buffer, sizeof(buffer)));
+  bycorf_bsd_host.log(buffer, strnlen(buffer, sizeof(buffer)));
   return count;
 }
 void vlog(int level, const char* format, va_list args) {
   (void)level;
   char buffer[2048];
   vsnprintf(buffer, sizeof(buffer), format, args);
-  celer_bsd_host.log(buffer, strnlen(buffer, sizeof(buffer)));
+  bycorf_bsd_host.log(buffer, strnlen(buffer, sizeof(buffer)));
 }
 void log(int level, const char* format, ...) {
   va_list args;
@@ -475,7 +475,7 @@ void panic(const char* format, ...) {
   va_start(args, format);
   vlog(0, format, args);
   va_end(args);
-  celer_bsd_host.log("\n", 1);
-  celer_bsd_host.abort_process();
+  bycorf_bsd_host.log("\n", 1);
+  bycorf_bsd_host.abort_process();
   __builtin_trap();
 }

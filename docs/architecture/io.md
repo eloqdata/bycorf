@@ -22,7 +22,7 @@ Registered storage buffers and network receive buffers have separate
 lifecycles. The default network backend uses Linux TCP and provided-buffer
 multishot receives, with a per-connection one-shot fallback.
 
-`CELER_KERNEL_BYPASS` is the single build option for DPDK networking and SPDK
+`BYCORF_KERNEL_BYPASS` is the single build option for DPDK networking and SPDK
 storage. It defaults to off; enabling it compiles and links both capabilities.
 Applications select network and storage independently through
 `ConfigureIoBackends` before workers or storage initialization. The defaults are
@@ -52,14 +52,14 @@ prevents EAL's control-lcore pin from changing worker placement. DPDK network
 workers register their existing native threads with EAL.
 
 SPDK and DPDK are direct, independently pinned Git submodules. SPDK is configured
-against the single DPDK installation selected by Celer; its nested DPDK is not
+against the single DPDK installation selected by Bycorf; its nested DPDK is not
 part of the build. Static linking retains network and storage driver
 constructors without introducing another EAL instance.
 
 The native FreeBSD source subset is copied into `third_party/freebsd` with
 upstream license notices, a revision, and file hashes. It is compiled with
 private kernel headers and partially linked into an isolated symbol namespace.
-Only the explicit `celer_bsd_*` bridge is exposed; kernel malloc, sockets, and
+Only the explicit `bycorf_bsd_*` bridge is exposed; kernel malloc, sockets, and
 other ABI-incompatible symbols cannot interpose host libc. The build checks
 import hashes and rejects unimplemented kernel dependencies. The header
 overlay changes legacy kernel clock declarations to worker-local TLS snapshots.
@@ -73,7 +73,7 @@ The prototype's kernel registries, VNETs, and EAL have process lifetime. It
 supports one runtime per process. Network I/O and descriptors stop on worker
 shutdown, but the complete BSD kernel subsystem teardown is not implemented.
 
-Sources: `include/celer/io/backend_options.h`, `src/io/backend_options.cpp`,
-`include/celer/io/net_backend.h`, `src/io/io_uring_backend.cpp`,
+Sources: `include/bycorf/io/backend_options.h`, `src/io/backend_options.cpp`,
+`include/bycorf/io/net_backend.h`, `src/io/io_uring_backend.cpp`,
 `src/io/storage.cpp`, `src/io/spdk_storage.cpp`, `src/io/dpdk_environment.cpp`,
 `cmake/Dpdk.cmake`, `cmake/Freebsd.cmake`, `cmake/build_freebsd.py`.

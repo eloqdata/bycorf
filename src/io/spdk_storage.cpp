@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
-#include "celer/io/spdk_storage.h"
+#include "bycorf/io/spdk_storage.h"
 
-#ifdef CELER_WITH_SPDK_STORAGE
+#if BYCORF_KERNEL_BYPASS
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -36,10 +36,10 @@
 #include <unordered_map>
 #include <utility>
 
-#include "celer/io/dpdk_environment.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/io/dpdk_environment.h"
+#include "bycorf/runtime/worker.h"
 
-namespace celer {
+namespace bycorf {
 namespace {
 
 constexpr std::string_view kSpdkPrefix = "spdk://";
@@ -677,6 +677,6 @@ SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
   return result;
 }
 
-}  // namespace celer
+}  // namespace bycorf
 
-#endif  // CELER_WITH_SPDK_STORAGE
+#endif  // BYCORF_KERNEL_BYPASS

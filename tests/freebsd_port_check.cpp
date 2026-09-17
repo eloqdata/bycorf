@@ -83,7 +83,7 @@ struct Lane {
   uint64_t echoed = 0;
 
   void Attach() {
-    celer_bsd_interface interface{};
+    bycorf_bsd_interface interface{};
     interface.address = htonl(0xc6130002 + (worker << 8));
     interface.netmask = inet_addr("255.255.255.0");
     interface.mac[0] = 2;
@@ -101,9 +101,9 @@ struct Lane {
       // must recover; never retain an mbuf's borrowed bytes across callbacks.
       return n == static_cast<ssize_t>(length) ? 0 : 55;  // BSD ENOBUFS
     };
-    int error = celer_bsd_attach_interface(&interface);
+    int error = bycorf_bsd_attach_interface(&interface);
     Check(error == 0, "attach interface", error);
-    error = celer_bsd_listen(interface.address, 16390, 128, &listener);
+    error = bycorf_bsd_listen(interface.address, 16390, 128, &listener);
     Check(error == 0, "listen", error);
     std::fprintf(stderr, "READY worker %u\n", worker);
   }
@@ -116,12 +116,12 @@ struct Lane {
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && errno == EAGAIN) break;
         Check(n > 0, "TAP read", errno);
-        celer_bsd_input(frame.data(), n);
+        bycorf_bsd_input(frame.data(), n);
       }
-      celer_bsd_poll();
+      bycorf_bsd_poll();
       for (unsigned i = 0; i < 16 && sessions.size() < 128; ++i) {
         struct socket* socket = nullptr;
-        int error = celer_bsd_accept(listener, &socket);
+        int error = bycorf_bsd_accept(listener, &socket);
         if (error == kBsdWouldBlock) break;
         Check(error == 0, "accept", error);
         sessions.push_back(Session{socket, {}});
@@ -129,8 +129,8 @@ struct Lane {
       }
       for (auto it = sessions.begin(); it != sessions.end();) {
         if (it->offset == it->size) {
-          int error = celer_bsd_receive(it->socket, it->bytes.data(),
-                                        it->bytes.size(), &it->size);
+          int error = bycorf_bsd_receive(it->socket, it->bytes.data(),
+                                         it->bytes.size(), &it->size);
           it->offset = 0;
           if (error == kBsdWouldBlock) {
             ++it;
@@ -138,14 +138,14 @@ struct Lane {
           }
           Check(error == 0, "receive", error);
           if (it->size == 0) {
-            Check(celer_bsd_close(it->socket) == 0, "close session");
+            Check(bycorf_bsd_close(it->socket) == 0, "close session");
             it = sessions.erase(it);
             continue;
           }
         }
         size_t sent = 0;
-        int error = celer_bsd_send(it->socket, it->bytes.data() + it->offset,
-                                   it->size - it->offset, &sent);
+        int error = bycorf_bsd_send(it->socket, it->bytes.data() + it->offset,
+                                    it->size - it->offset, &sent);
         Check(error == 0 || error == kBsdWouldBlock, "send", error);
         it->offset += sent;
         echoed += sent;
@@ -157,8 +157,8 @@ struct Lane {
       poll(&notification, 1, 1);
     }
     for (auto& session : sessions)
-      Check(celer_bsd_close(session.socket) == 0, "close live session");
-    Check(celer_bsd_close(listener) == 0, "close listener");
+      Check(bycorf_bsd_close(session.socket) == 0, "close live session");
+    Check(bycorf_bsd_close(listener) == 0, "close listener");
     std::fprintf(stderr, "DONE worker %u: accepted=%lu echoed=%lu\n", worker,
                  accepted, echoed);
   }
@@ -168,16 +168,16 @@ struct Lane {
 int main(int argc, char** argv) {
   Check(argc == 3, "usage: freebsd_port_check TAP_FD_0 TAP_FD_1");
   signal(SIGTERM, [](int) { stopping.store(true, std::memory_order_relaxed); });
-  celer_bsd_host host{Allocate,
-                      std::free,
-                      [] { return Now(CLOCK_MONOTONIC); },
-                      [] { return Now(CLOCK_REALTIME); },
-                      Random,
-                      [](const char* bytes, size_t length) {
-                        std::fwrite(bytes, 1, length, stderr);
-                      },
-                      std::abort};
-  int error = celer_bsd_initialize(&host, 2);
+  bycorf_bsd_host host{Allocate,
+                       std::free,
+                       [] { return Now(CLOCK_MONOTONIC); },
+                       [] { return Now(CLOCK_REALTIME); },
+                       Random,
+                       [](const char* bytes, size_t length) {
+                         std::fwrite(bytes, 1, length, stderr);
+                       },
+                       std::abort};
+  int error = bycorf_bsd_initialize(&host, 2);
   Check(error == 0, "initialize", error);
   Lane first{0, std::atoi(argv[1])};
   Lane second{1, std::atoi(argv[2])};
@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
   std::promise<void> attached;
   auto ready = attached.get_future();
   std::thread peer([&] {
-    int attach_error = celer_bsd_attach_worker(1);
+    int attach_error = bycorf_bsd_attach_worker(1);
     Check(attach_error == 0, "attach worker", attach_error);
     second.Attach();
     attached.set_value();

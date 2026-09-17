@@ -30,10 +30,10 @@
 #include <netinet/in_var.h>
 
 static _Thread_local if_t interface;
-static _Thread_local struct celer_bsd_interface config;
+static _Thread_local struct bycorf_bsd_interface config;
 
 static int transmit(if_t ifp, struct mbuf* m) {
-  struct celer_bsd_interface* cfg = if_getsoftc(ifp);
+  struct bycorf_bsd_interface* cfg = if_getsoftc(ifp);
   // The first version deliberately uses copied, MTU-sized frames and software
   // checksums. No BSD mbuf or stack-local pointer crosses to a queue owner.
   unsigned char frame[ETHER_MAX_LEN];
@@ -59,14 +59,14 @@ static void initialize(void* arg) {
 }
 static void flush(if_t ifp) {}
 
-int celer_bsd_attach_interface(const struct celer_bsd_interface* value) {
+int bycorf_bsd_attach_interface(const struct bycorf_bsd_interface* value) {
   if (interface) return EALREADY;
   if (!value || !value->transmit || value->mtu < 576 || value->mtu > ETHERMTU)
     return EINVAL;
   config = *value;
   interface = if_alloc(IFT_ETHER);
   if (!interface) return ENOMEM;
-  if_initname(interface, "celer", 0);
+  if_initname(interface, "bycorf", 0);
   if_setsoftc(interface, &config);
   if_setflags(interface, IFF_UP | IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST);
   if_setdrvflags(interface, IFF_DRV_RUNNING);
@@ -110,7 +110,7 @@ int celer_bsd_attach_interface(const struct celer_bsd_interface* value) {
   }
   return error;
 }
-void celer_bsd_input(const void* bytes, size_t length) {
+void bycorf_bsd_input(const void* bytes, size_t length) {
   if (!interface || length < ETHER_HDR_LEN || length > ETHER_MAX_LEN) return;
   struct mbuf* m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
   if (!m) {

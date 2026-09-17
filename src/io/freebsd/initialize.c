@@ -27,10 +27,10 @@
 #include <net/vnet.h>
 #include <vm/uma.h>
 
-struct celer_bsd_host celer_bsd_host;
-unsigned celer_bsd_worker_count;
-_Thread_local struct pcpu* celer_bsd_pcpu;
-_Thread_local struct thread* celer_bsd_curthread;
+struct bycorf_bsd_host bycorf_bsd_host;
+unsigned bycorf_bsd_worker_count;
+_Thread_local struct pcpu* bycorf_bsd_pcpu;
+_Thread_local struct thread* bycorf_bsd_curthread;
 // Native lock words encode flags in the low five bits of the thread pointer.
 // Kernel UMA normally supplies this alignment; host object layout must do so.
 struct thread0_storage thread0_st __aligned(64);
@@ -74,8 +74,8 @@ static int initialize_context(unsigned worker) {
   contexts[worker] =
       malloc(sizeof(*contexts[worker]), M_TEMP, M_WAITOK | M_ZERO);
   __typeof__(contexts[0]) c = contexts[worker];
-  celer_bsd_pcpu = &c->pcpu;
-  celer_bsd_curthread = worker ? &c->thread : &thread0;
+  bycorf_bsd_pcpu = &c->pcpu;
+  bycorf_bsd_curthread = worker ? &c->thread : &thread0;
   c->pcpu.pc_curthread = curthread;
   c->pcpu.pc_cpuid = worker;
   // The TLS pcpu overlay uses the generic UMA per-CPU accessor on both
@@ -97,27 +97,28 @@ static int initialize_context(unsigned worker) {
     c->limits.pl_rlimit[i] = (struct rlimit){RLIM_INFINITY, RLIM_INFINITY};
   c->cred.cr_ref = 1;
   c->cred.cr_prison = worker ? &c->prison : &prison0;
-  mtx_init(&c->thread_lock, "celer thread", NULL, MTX_DEF | MTX_RECURSE);
+  mtx_init(&c->thread_lock, "bycorf thread", NULL, MTX_DEF | MTX_RECURSE);
   curthread->td_lock = &c->thread_lock;
   return 0;
 }
 
-unsigned celer_bsd_max_workers(void) { return MAXCPU; }
+unsigned bycorf_bsd_max_workers(void) { return MAXCPU; }
 
-int celer_bsd_initialize(const struct celer_bsd_host* host, unsigned workers) {
+int bycorf_bsd_initialize(const struct bycorf_bsd_host* host,
+                          unsigned workers) {
   if (initialized) return EALREADY;
   if (!host || workers == 0 || workers > MAXCPU) return EINVAL;
-  celer_bsd_host = *host;
-  celer_bsd_worker_count = workers;
+  bycorf_bsd_host = *host;
+  bycorf_bsd_worker_count = workers;
   mp_ncpus = workers;
   mp_maxid = workers - 1;
   for (unsigned i = 0; i < workers; ++i) CPU_SET(i, &all_cpus);
   initialize_context(0);
-  celer_bsd_clock_update();
+  bycorf_bsd_clock_update();
   mtx_init(&prison0.pr_mtx, "root prison", NULL, MTX_DEF | MTX_RECURSE);
   sx_init(&allprison_lock, "prison list");
   prison0.pr_ref = 1;
-  pcpu_zone_8 = uma_zcreate("celer counters", sizeof(uint64_t), NULL, NULL,
+  pcpu_zone_8 = uma_zcreate("bycorf counters", sizeof(uint64_t), NULL, NULL,
                             NULL, NULL, UMA_ALIGN_CACHE, UMA_ZONE_PCPU);
   smr_init();
 
@@ -150,12 +151,12 @@ int celer_bsd_initialize(const struct celer_bsd_host* host, unsigned workers) {
   return 0;
 }
 
-int celer_bsd_attach_worker(unsigned worker) {
-  if (!initialized || worker == 0 || worker >= celer_bsd_worker_count)
+int bycorf_bsd_attach_worker(unsigned worker) {
+  if (!initialized || worker == 0 || worker >= bycorf_bsd_worker_count)
     return EINVAL;
   int error = initialize_context(worker);
   if (error) return error;
-  celer_bsd_clock_update();
+  bycorf_bsd_clock_update();
   // Runtime serializes attachment. Constructors touch global registries while
   // allocating each worker's independent VNET and credentials.
   struct prison* pr = curthread->td_ucred->cr_prison;
@@ -174,9 +175,9 @@ void module_register_init(const void* arg) {
   if (error)
     panic("FreeBSD module %s initialization failed: %d", module->name, error);
 }
-void celer_bsd_poll(void) {
-  celer_bsd_clock_update();
-  celer_bsd_callout_poll();
-  celer_bsd_tasks_poll();
-  celer_bsd_epoch_poll();
+void bycorf_bsd_poll(void) {
+  bycorf_bsd_clock_update();
+  bycorf_bsd_callout_poll();
+  bycorf_bsd_tasks_poll();
+  bycorf_bsd_epoch_poll();
 }

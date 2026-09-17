@@ -18,5 +18,5 @@ repos:
     hooks:
       - id: clang-format
         name: clang-format 23.1.1
-        files: '^(example/|include/celer/|src/|tests/).*\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$'
-        exclude: '^include/celer/runtime/concurrentqueue\.h$'
+        files: '^(example/|include/bycorf/|src/|tests/).*\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$'
+        exclude: '^include/bycorf/runtime/concurrentqueue\.h$'

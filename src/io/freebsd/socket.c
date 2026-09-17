@@ -30,8 +30,8 @@ static void assert_owner(struct socket* so) {
   if (so->so_vnet != curvnet)
     panic("FreeBSD socket used from a different worker");
 }
-int celer_bsd_listen(uint32_t address, uint16_t port, int backlog,
-                     struct socket** out) {
+int bycorf_bsd_listen(uint32_t address, uint16_t port, int backlog,
+                      struct socket** out) {
   *out = NULL;
   struct socket* so;
   int error = socreate(AF_INET, &so, SOCK_STREAM, IPPROTO_TCP,
@@ -52,7 +52,7 @@ int celer_bsd_listen(uint32_t address, uint16_t port, int backlog,
   *out = so;
   return 0;
 }
-int celer_bsd_accept(struct socket* listener, struct socket** out) {
+int bycorf_bsd_accept(struct socket* listener, struct socket** out) {
   assert_owner(listener);
   *out = NULL;
   struct socket* so;
@@ -65,7 +65,7 @@ int celer_bsd_accept(struct socket* listener, struct socket** out) {
     soclose(so);
     return error;
   }
-  // Match Celer's kernel sockets: small Redis replies are sent immediately.
+  // Match Bycorf's kernel sockets: small Redis replies are sent immediately.
   int enabled = 1;
   struct sockopt option = {.sopt_dir = SOPT_SET,
                            .sopt_level = IPPROTO_TCP,
@@ -81,8 +81,8 @@ int celer_bsd_accept(struct socket* listener, struct socket** out) {
   *out = so;
   return 0;
 }
-int celer_bsd_receive(struct socket* so, void* buffer, size_t size,
-                      size_t* received) {
+int bycorf_bsd_receive(struct socket* so, void* buffer, size_t size,
+                       size_t* received) {
   assert_owner(so);
   *received = 0;
   if (size > INT_MAX) return EINVAL;
@@ -99,8 +99,8 @@ int celer_bsd_receive(struct socket* so, void* buffer, size_t size,
   // The native API can return EWOULDBLOCK after consuming part of a stream.
   return *received ? 0 : error;
 }
-int celer_bsd_send(struct socket* so, const void* buffer, size_t size,
-                   size_t* sent) {
+int bycorf_bsd_send(struct socket* so, const void* buffer, size_t size,
+                    size_t* sent) {
   assert_owner(so);
   *sent = 0;
   if (size > INT_MAX) return EINVAL;
@@ -116,11 +116,11 @@ int celer_bsd_send(struct socket* so, const void* buffer, size_t size,
   *sent = size - uio.uio_resid;
   return *sent ? 0 : error;
 }
-int celer_bsd_close(struct socket* so) {
+int bycorf_bsd_close(struct socket* so) {
   assert_owner(so);
   return soclose(so);
 }
-int celer_bsd_peer(struct socket* so, uint32_t* address, uint16_t* port) {
+int bycorf_bsd_peer(struct socket* so, uint32_t* address, uint16_t* port) {
   assert_owner(so);
   struct sockaddr_in peer = {.sin_len = sizeof(peer)};
   int error = sopeeraddr(so, (struct sockaddr*)&peer);
@@ -130,7 +130,7 @@ int celer_bsd_peer(struct socket* so, uint32_t* address, uint16_t* port) {
   }
   return error;
 }
-int celer_bsd_disconnected(struct socket* so) {
+int bycorf_bsd_disconnected(struct socket* so) {
   assert_owner(so);
   return so->so_error || (so->so_rcv.sb_state & SBS_CANTRCVMORE);
 }

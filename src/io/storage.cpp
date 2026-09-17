@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/io/storage.h"
+#include "bycorf/io/storage.h"
 
 #include <cerrno>
 #include <chrono>
@@ -23,11 +23,11 @@
 #include <string>
 #include <utility>
 
-#include "celer/io/spdk_storage.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/io/spdk_storage.h"
+#include "bycorf/runtime/worker.h"
 
-namespace celer {
-#ifndef CELER_WITH_SPDK_STORAGE
+namespace bycorf {
+#if !BYCORF_KERNEL_BYPASS
 
 bool IsSpdkStoragePath(std::string_view path) noexcept {
   return path.starts_with("spdk://");
@@ -35,7 +35,7 @@ bool IsSpdkStoragePath(std::string_view path) noexcept {
 
 absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(std::string_view path) {
   return absl::Status(absl::StatusCode::kUnimplemented,
-                      "SPDK storage path requires CELER_KERNEL_BYPASS=ON: " +
+                      "SPDK storage path requires BYCORF_KERNEL_BYPASS=ON: " +
                           std::string(path));
 }
 
@@ -62,7 +62,7 @@ void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept {
   ::operator delete[](buffer, std::align_val_t(alignment));
 }
 
-#endif  // CELER_WITH_SPDK_STORAGE
+#endif  // !BYCORF_KERNEL_BYPASS
 
 namespace {
 
@@ -387,4 +387,4 @@ CancellableTimerAwaitable CancellableSleepFor(
   return CancellableTimerAwaitable(worker, duration);
 }
 
-}  // namespace celer
+}  // namespace bycorf

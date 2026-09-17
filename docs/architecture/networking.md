@@ -55,7 +55,7 @@ The [runbook](../dpdk-prototype.md#worker-capacity) describes builds and limits.
 Port selection uses DPDK's application-available (unowned) port view. A parent
 PMD such as netvsc can own an accelerated VF beneath that single visible port;
 the parent controls child queues, datapath selection, fallback, and shutdown.
-Celer does not independently configure or close that owned child port.
+Bycorf does not independently configure or close that owned child port.
 
 With default `hash` steering, a receive owner hashes the TCP tuple before
 entering the stack. If another worker owns the flow, the receive owner publishes
@@ -86,7 +86,7 @@ bounds checks remain active; `tests/freebsd_tcp_sequence_check.cpp` covers this
 invariant through the real stack and an in-process Ethernet peer.
 
 BSD sockets use private worker-encoded handles rather than Linux file
-descriptors. Celer's close and peer-address helpers dispatch these handles to
+descriptors. Bycorf's close and peer-address helpers dispatch these handles to
 the stack. Applications that directly pass stream handles to Linux syscalls or
 transfer a live socket to another worker need explicit adaptation. Accepted
 IPv4 TCP uses BSD; outgoing `ConnectTcp` and Unix sockets currently retain the
@@ -115,8 +115,8 @@ cannot provide the required notification capability, its queue owner keeps
 polling. Virtual-device tests cover this wake protocol but do not validate
 physical NIC interrupt behavior or predict kernel-bypass throughput. The TAP
 PMD additionally uses Linux realtime signals for its internal RX trigger in
-both modes; this is separate from Celer's worker sleep protocol.
+both modes; this is separate from Bycorf's worker sleep protocol.
 
-Sources: `include/celer/net/connection.h`, `src/net/tcp_service.cpp`, `src/net/tcp_listener.cpp`,
+Sources: `include/bycorf/net/connection.h`, `src/net/tcp_service.cpp`, `src/net/tcp_listener.cpp`,
 `src/net/tcp_stream.cpp`, `src/net/socket_ops.cpp`, `src/io/dpdk_backend.cpp`,
 `src/io/freebsd/abi.h`, `src/io/freebsd/`.

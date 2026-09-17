@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Closed-loop RPC echo benchmark for celer::rpc.
+// Closed-loop RPC echo benchmark for bycorf::rpc.
 //   rpc_bench [server_ip] [port] [threads] [conns_per_thread]
 //   [concurrency_per_conn]
 //             [payload_bytes] [duration_sec]
@@ -26,9 +26,9 @@
 #include <vector>
 
 #include "absl/status/status.h"
-#include "celer/rpc/rpc.h"
-#include "celer/runtime/runtime.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/rpc/rpc.h"
+#include "bycorf/runtime/runtime.h"
+#include "bycorf/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
 namespace {
@@ -46,7 +46,7 @@ struct alignas(64) Stat {
 };
 std::vector<Stat> g_stats;
 
-using namespace celer;
+using namespace bycorf;
 
 Task<absl::Status> Caller(rpc::RpcClient* client, unsigned wid) {
   rpc::Bytes payload(g_payload, std::byte{'x'});

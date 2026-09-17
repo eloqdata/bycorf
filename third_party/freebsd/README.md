@@ -6,7 +6,7 @@ and SHA-256 digest of each imported file; `SOURCES` selects translation units.
 Each source file retains its upstream copyright and license. `COPYRIGHT`
 contains the upstream project's general notices.
 
-Celer's Linux host adaptation is maintained separately in `src/io/freebsd/`.
+Bycorf's Linux host adaptation is maintained separately in `src/io/freebsd/`.
 Kernel headers are private to that adaptation and are never added to an
 application's include path. The build verifies every imported file against its recorded digest. Keep host
 adaptation outside this directory; an upstream refresh must update the complete

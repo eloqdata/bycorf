@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef CELER_FREEBSD_MACHINE_VMPARAM_H_
-#define CELER_FREEBSD_MACHINE_VMPARAM_H_
+#ifndef BYCORF_FREEBSD_MACHINE_VMPARAM_H_
+#define BYCORF_FREEBSD_MACHINE_VMPARAM_H_
 
 #include_next <machine/vmparam.h>
 #include <sys/types.h>
@@ -24,10 +24,10 @@
 // their direct-map branches. A Linux process has no FreeBSD physical map.
 // Reject accidental entry instead of providing dummy kernel address globals
 // or allowing physical addresses to become host pointers.
-_Noreturn uintptr_t celer_bsd_no_direct_map(uintptr_t address);
+_Noreturn uintptr_t bycorf_bsd_no_direct_map(uintptr_t address);
 #undef PHYS_TO_DMAP
 #undef DMAP_TO_PHYS
-#define PHYS_TO_DMAP(address) celer_bsd_no_direct_map((uintptr_t)(address))
-#define DMAP_TO_PHYS(address) celer_bsd_no_direct_map((uintptr_t)(address))
+#define PHYS_TO_DMAP(address) bycorf_bsd_no_direct_map((uintptr_t)(address))
+#define DMAP_TO_PHYS(address) bycorf_bsd_no_direct_map((uintptr_t)(address))
 
 #endif

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/net/http_service.h"
+#include "bycorf/net/http_service.h"
 
 #include <array>
 #include <cstddef>
@@ -25,10 +25,10 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-#include "celer/net/tcp_stream.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/net/tcp_stream.h"
+#include "bycorf/runtime/worker.h"
 
-namespace celer {
+namespace bycorf {
 namespace {
 
 std::span<const std::byte> Bytes(std::string_view value) {
@@ -161,4 +161,4 @@ Task<absl::Status> HttpService::WriteResponse(TcpStream& stream,
   co_return co_await stream.WriteAll(Bytes(response.body_));
 }
 
-}  // namespace celer
+}  // namespace bycorf

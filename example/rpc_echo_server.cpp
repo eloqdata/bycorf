@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Minimal RPC echo server for benchmarking celer::rpc.
+// Minimal RPC echo server for benchmarking bycorf::rpc.
 //   rpc_echo_server [bind_ip] [port] [threads]
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -27,8 +27,8 @@
 #include <string>
 #include <string_view>
 
-#include "celer/net/server.h"
-#include "celer/rpc/rpc.h"
+#include "bycorf/net/server.h"
+#include "bycorf/rpc/rpc.h"
 #include "spdlog/spdlog.h"
 
 namespace {
@@ -58,16 +58,16 @@ int main(int argc, char** argv) {
   sigaction(SIGINT, &sa, nullptr);
   sigaction(SIGTERM, &sa, nullptr);
 
-  celer::rpc::RpcServer rpc(port);
-  rpc.OnVerb(1, [](celer::rpc::BytesView req) {
-    return celer::rpc::Bytes(req.begin(), req.end());  // echo
+  bycorf::rpc::RpcServer rpc(port);
+  rpc.OnVerb(1, [](bycorf::rpc::BytesView req) {
+    return bycorf::rpc::Bytes(req.begin(), req.end());  // echo
   });
 
-  celer::ServerOptions options;
+  bycorf::ServerOptions options;
   options.bind_ip_ = bind_ip;
   options.thread_count_ = threads;
 
-  celer::Server server;
+  bycorf::Server server;
   server.AddService(&rpc);
   auto status = server.Start(options);
   if (!status.ok()) {

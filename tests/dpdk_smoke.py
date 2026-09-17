@@ -31,7 +31,7 @@ import time
 
 
 ADDRESS = ("198.18.0.2", 16390)
-TAP = "celerdp0"
+TAP = "bycorfdp0"
 
 
 def receive(sock, size):
@@ -60,12 +60,12 @@ def run(args, mode, directory):
     env = os.environ.copy()
     # The harness exclusively owns this TAP. Ignore a caller's physical-device
     # EAL settings so running a smoke test cannot accidentally select a NIC.
-    env.pop("CELER_EAL_ARGS", None)
-    env.pop("CELER_DPDK_GATEWAY", None)
+    env.pop("BYCORF_EAL_ARGS", None)
+    env.pop("BYCORF_DPDK_GATEWAY", None)
     # The fixture owns one queue; multi-worker forwarding uses hash steering.
-    env["CELER_DPDK_RX_STEERING"] = args.rx_steering
-    env.update(CELER_DPDK_MODE=mode, CELER_DPDK_QUEUES="1",
-               CELER_DPDK_IP=ADDRESS[0], CELER_DPDK_NETMASK="255.255.255.0")
+    env["BYCORF_DPDK_RX_STEERING"] = args.rx_steering
+    env.update(BYCORF_DPDK_MODE=mode, BYCORF_DPDK_QUEUES="1",
+               BYCORF_DPDK_IP=ADDRESS[0], BYCORF_DPDK_NETMASK="255.255.255.0")
     path = directory / f"{mode}.log"
     with path.open("w") as log:
         child = subprocess.Popen(
@@ -80,7 +80,7 @@ def run(args, mode, directory):
                 text = path.read_text()
                 # PMD configuration changes the TAP MAC. Wait until all VNET
                 # interfaces exist before assigning the Linux-side address.
-                if text.count("celer0: Ethernet address:") == args.workers:
+                if text.count("bycorf0: Ethernet address:") == args.workers:
                     break
                 if child.poll() is not None:
                     raise RuntimeError(f"startup exited: {child.returncode}")
@@ -143,7 +143,7 @@ def run(args, mode, directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", type=Path, help="DPDK-enabled celer_echo")
+    parser.add_argument("binary", type=Path, help="DPDK-enabled bycorf_echo")
     parser.add_argument("--server-cpus", default="0,1")
     parser.add_argument("--client-cpus", default="2,3")
     parser.add_argument("--workers", type=int, default=2,
@@ -164,7 +164,7 @@ def main():
     if args.streams < args.workers:
         parser.error("--streams must be at least --workers")
     os.sched_setaffinity(0, {int(cpu) for cpu in args.client_cpus.split(",")})
-    directory = Path(tempfile.mkdtemp(prefix="celer-dpdk-smoke-"))
+    directory = Path(tempfile.mkdtemp(prefix="bycorf-dpdk-smoke-"))
     print(f"Logs: {directory}", flush=True)
     for mode in (("poll", "adaptive") if args.mode == "both" else (args.mode,)):
         run(args, mode, directory)

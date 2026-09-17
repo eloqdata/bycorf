@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-#include "celer/net/socket_ops.h"
+#include "bycorf/net/socket_ops.h"
 
-#include "celer/io/dpdk_backend.h"
+#include "bycorf/io/dpdk_backend.h"
 
-namespace celer::detail {
+namespace bycorf::detail {
 bool IsDpdkSocket(int handle) noexcept { return handle >= 0x40000000; }
 int CloseSocket(int handle) noexcept {
   return IsDpdkSocket(handle) ? DpdkBackend::Close(handle) : ::close(handle);
@@ -27,4 +27,4 @@ int SocketPeerName(int handle, sockaddr* address, socklen_t* length) noexcept {
   return IsDpdkSocket(handle) ? DpdkBackend::PeerName(handle, address, length)
                               : ::getpeername(handle, address, length);
 }
-}  // namespace celer::detail
+}  // namespace bycorf::detail

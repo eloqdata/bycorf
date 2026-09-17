@@ -79,7 +79,7 @@ def main():
             existing = ipaddress.ip_network(destination, strict=False)
             if existing.version == 4 and subnet.overlaps(existing):
                 raise RuntimeError(f"test subnet {subnet} overlaps route {existing}")
-    directory = Path(tempfile.mkdtemp(prefix="celer-bsd-port-"))
+    directory = Path(tempfile.mkdtemp(prefix="bycorf-bsd-port-"))
     path = directory / "server.log"
     print(f"Logs: {directory}", flush=True)
     fds, live = [], []

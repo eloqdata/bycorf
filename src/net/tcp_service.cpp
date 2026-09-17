@@ -14,19 +14,19 @@
  * limitations under the License.
  */
 
-#include "celer/net/tcp_service.h"
+#include "bycorf/net/tcp_service.h"
 
 #include <unistd.h>
 
 #include <unordered_set>
 
 #include "absl/cleanup/cleanup.h"
-#include "celer/net/socket_ops.h"
-#include "celer/runtime/cross_core.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/net/socket_ops.h"
+#include "bycorf/runtime/cross_core.h"
+#include "bycorf/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
-namespace celer {
+namespace bycorf {
 
 void TcpService::AddTlsEndpoint(std::uint16_t port,
                                 std::shared_ptr<TlsContext> context) {
@@ -40,7 +40,7 @@ void TcpService::Prepare(unsigned thread_count) {
   next_connection_worker_.store(0, std::memory_order_relaxed);
   listeners_.clear();
   listeners_.resize(thread_count);
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
   stopping_ = false;
   control_executors_.resize(thread_count);
 #endif
@@ -71,7 +71,7 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection,
 }
 
 void TcpService::Stop() noexcept {
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
   if (DpdkNetworkEnabled()) {
     std::lock_guard lock(stop_mutex_);
     stopping_ = true;
@@ -100,7 +100,7 @@ void TcpService::Stop() noexcept {
 }
 
 Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
   {
     std::lock_guard lock(stop_mutex_);
     if (stopping_) co_return absl::OkStatus();
@@ -234,4 +234,4 @@ Task<absl::Status> TcpService::RunSession(Worker& worker,
   co_return status;
 }
 
-}  // namespace celer
+}  // namespace bycorf

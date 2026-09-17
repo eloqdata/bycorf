@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/net/tcp_listener.h"
+#include "bycorf/net/tcp_listener.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -33,12 +33,12 @@
 #include <utility>
 #include <vector>
 
-#include "celer/io/completion.h"
-#include "celer/net/socket_ops.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/io/completion.h"
+#include "bycorf/net/socket_ops.h"
+#include "bycorf/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
-namespace celer {
+namespace bycorf {
 
 namespace {
 
@@ -341,7 +341,7 @@ absl::Status TcpListener::Bind(Worker* worker,
   if (family != AF_INET && family != AF_INET6) {
     return absl::InvalidArgumentError("unsupported bind address family");
   }
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
   if (DpdkNetworkEnabled()) {
     const int handle = DpdkBackend::Listen(
         reinterpret_cast<const sockaddr*>(&address.address_), address.length_,
@@ -563,4 +563,4 @@ absl::Status TcpListener::Close() noexcept {
   return result;
 }
 
-}  // namespace celer
+}  // namespace bycorf

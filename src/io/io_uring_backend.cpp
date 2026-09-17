@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/io/io_uring_backend.h"
+#include "bycorf/io/io_uring_backend.h"
 
 #include <linux/io_uring.h>
 #include <poll.h>
@@ -27,10 +27,10 @@
 #include <cstdint>
 #include <cstring>
 
-#include "celer/runtime/worker.h"
+#include "bycorf/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
-namespace celer {
+namespace bycorf {
 
 namespace {
 
@@ -897,4 +897,4 @@ void IoUringBackend::WakeSelf() noexcept {
   (void)result;
 }
 
-}  // namespace celer
+}  // namespace bycorf

@@ -23,7 +23,7 @@
 // Retain FreeBSD's inline lock encoding. Global initialization/registries are
 // actually shared, so even the prototype must not turn kernel locks into
 // no-ops.
-enum { CELER_MTX = 1, CELER_RW = 2, CELER_SX = 3 };
+enum { BYCORF_MTX = 1, BYCORF_RW = 2, BYCORF_SX = 3 };
 
 static void init_lock(struct lock_object* lo, const char* name, int kind,
                       int recurse) {
@@ -40,13 +40,13 @@ static bool cas(volatile uintptr_t* p, uintptr_t old, uintptr_t value) {
   return __atomic_compare_exchange_n(p, &old, value, false, __ATOMIC_ACQUIRE,
                                      __ATOMIC_RELAXED);
 }
-static void spin(void) { celer_bsd_spinwait(); }
+static void spin(void) { bycorf_bsd_spinwait(); }
 
 void _mtx_init(volatile uintptr_t* p, const char* name, const char* type,
                int opts) {
   (void)type;
   struct mtx* m = __containerof(p, struct mtx, mtx_lock);
-  init_lock(&m->lock_object, name, CELER_MTX, opts & MTX_RECURSE);
+  init_lock(&m->lock_object, name, BYCORF_MTX, opts & MTX_RECURSE);
   *p = MTX_UNOWNED;
 }
 void _mtx_destroy(volatile uintptr_t* p) {
@@ -128,7 +128,7 @@ static void release_reader(volatile uintptr_t* p) {
 
 void _rw_init_flags(volatile uintptr_t* p, const char* name, int opts) {
   init_lock(&__containerof(p, struct rwlock, rw_lock)->lock_object, name,
-            CELER_RW, opts & RW_RECURSE);
+            BYCORF_RW, opts & RW_RECURSE);
   *p = RW_UNLOCKED;
 }
 void _rw_destroy(volatile uintptr_t* p) {
@@ -177,7 +177,7 @@ _Static_assert(SX_LOCK_UNLOCKED == RW_UNLOCKED &&
                    SX_ONE_SHARER == RW_ONE_READER,
                "shared lock encoding changed");
 void sx_init_flags(struct sx* s, const char* name, int opts) {
-  init_lock(&s->lock_object, name, CELER_SX, opts & SX_RECURSE);
+  init_lock(&s->lock_object, name, BYCORF_SX, opts & SX_RECURSE);
   s->sx_lock = SX_LOCK_UNLOCKED;
 }
 void sx_destroy(struct sx* s) {
@@ -227,32 +227,32 @@ void _rm_runlock(struct rmlock* r, struct rm_priotracker* t) {
   mtx_unlock(&r->rm_lock_mtx);
 }
 
-void celer_bsd_lock(struct lock_object* lo) {
+void bycorf_bsd_lock(struct lock_object* lo) {
   if (!lo) return;
   switch (LO_CLASSINDEX(lo)) {
-    case CELER_MTX:
+    case BYCORF_MTX:
       mtx_lock((struct mtx*)lo);
       break;
-    case CELER_RW:
+    case BYCORF_RW:
       rw_wlock((struct rwlock*)lo);
       break;
-    case CELER_SX:
+    case BYCORF_SX:
       sx_xlock((struct sx*)lo);
       break;
     default:
       panic("unsupported FreeBSD callout lock class");
   }
 }
-void celer_bsd_unlock(struct lock_object* lo) {
+void bycorf_bsd_unlock(struct lock_object* lo) {
   if (!lo) return;
   switch (LO_CLASSINDEX(lo)) {
-    case CELER_MTX:
+    case BYCORF_MTX:
       mtx_unlock((struct mtx*)lo);
       break;
-    case CELER_RW:
+    case BYCORF_RW:
       rw_wunlock((struct rwlock*)lo);
       break;
-    case CELER_SX:
+    case BYCORF_SX:
       sx_xunlock((struct sx*)lo);
       break;
     default:

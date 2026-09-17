@@ -29,11 +29,11 @@
 #include <string_view>
 
 #include "absl/status/status.h"
-#include "celer/net/server.h"
-#include "celer/net/tcp_service.h"
+#include "bycorf/net/server.h"
+#include "bycorf/net/tcp_service.h"
 #include "spdlog/spdlog.h"
 
-namespace celer {
+namespace bycorf {
 using absl::Status;
 using absl::StatusCode;
 
@@ -142,7 +142,7 @@ WaitResult WaitForSignalOrServerStop(const Server& server) {
 
 }  // namespace
 
-}  // namespace celer
+}  // namespace bycorf
 
 int main(int argc, char** argv) {
   std::string_view bind_ip = "127.0.0.1";
@@ -173,43 +173,43 @@ int main(int argc, char** argv) {
       (argc == 7 && std::string_view(argv[6]) != "--no-pin-workers"))
     return 2;
   const auto selected =
-      celer::ConfigureIoBackends({.dpdk_network = network == "dpdk"});
+      bycorf::ConfigureIoBackends({.dpdk_network = network == "dpdk"});
   if (!selected.ok()) {
     spdlog::error("{}", selected.message());
     return 1;
   }
 
   spdlog::info(
-      "celer echo server listening on {}:{} threads={} idle_timeout_ms={}",
+      "bycorf echo server listening on {}:{} threads={} idle_timeout_ms={}",
       bind_ip, port, thread_count, idle_timeout_ms);
 
-  const auto signal_status = celer::InstallShutdownSignalHandler();
+  const auto signal_status = bycorf::InstallShutdownSignalHandler();
   if (!signal_status.ok()) [[unlikely]] {
     spdlog::error("signal setup failed: {}", signal_status.message());
     return 1;
   }
 
-  celer::ServerOptions options;
+  bycorf::ServerOptions options;
   options.bind_ip_ = std::string(bind_ip);
   options.thread_count_ = thread_count;
   // Allows oversubscribed correctness tests; performance runs retain pinning.
   options.pin_workers_ = argc < 7;
   options.idle_timeout_ms_ = idle_timeout_ms;
 
-  celer::EchoService echo(port);
-  celer::Server server;
+  bycorf::EchoService echo(port);
+  bycorf::Server server;
   server.AddService(&echo);
   auto start_status = server.Start(options);
   if (!start_status.ok()) [[unlikely]] {
     spdlog::error("server start failed: {}", start_status.message());
-    celer::CleanupShutdownSignalHandler();
+    bycorf::CleanupShutdownSignalHandler();
     return 1;
   }
 
-  const celer::WaitResult wait_result =
-      celer::WaitForSignalOrServerStop(server);
-  if (wait_result == celer::WaitResult::kSignal) {
-    const int signal = static_cast<int>(celer::g_last_shutdown_signal);
+  const bycorf::WaitResult wait_result =
+      bycorf::WaitForSignalOrServerStop(server);
+  if (wait_result == bycorf::WaitResult::kSignal) {
+    const int signal = static_cast<int>(bycorf::g_last_shutdown_signal);
     spdlog::info(
         "shutdown requested by signal {}",
         (signal == 0 ? std::string("unknown") : std::to_string(signal)));
@@ -217,6 +217,6 @@ int main(int argc, char** argv) {
   }
 
   server.WaitUntilStopped();
-  celer::CleanupShutdownSignalHandler();
+  bycorf::CleanupShutdownSignalHandler();
   return server.exit_code();
 }

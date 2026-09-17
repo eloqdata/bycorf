@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/runtime/runtime.h"
+#include "bycorf/runtime/runtime.h"
 
 #include <pthread.h>
 #include <sched.h>
@@ -32,9 +32,9 @@
 #include <utility>
 #include <vector>
 
-#include "celer/runtime/cross_core.h"
+#include "bycorf/runtime/cross_core.h"
 
-namespace celer {
+namespace bycorf {
 
 class Runtime::Impl {
  public:
@@ -94,7 +94,7 @@ class Runtime::Impl {
     }
 
     FreezeIoBackends();
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
     if (DpdkNetworkEnabled()) {
       const auto network = DpdkBackend::PrepareRuntime(thread_count);
       if (!network.ok())
@@ -154,7 +154,7 @@ class Runtime::Impl {
           } else {
             local_exit_code = main_fn(i, raw->worker_);
           }
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
           if (DpdkNetworkEnabled() && local_exit_code != 0)
             DpdkBackend::AbortStartup(
                 absl::InternalError("worker startup failed"));
@@ -231,7 +231,7 @@ class Runtime::Impl {
         state->thread_.join();
       }
     }
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
     if (DpdkNetworkEnabled()) DpdkBackend::StopRuntime();
 #endif
     stopped_ = true;
@@ -304,8 +304,8 @@ int Runtime::exit_code() const noexcept { return impl_->exit_code(); }
 
 int Runtime::completion_fd() const noexcept { return impl_->completion_fd(); }
 
-celer::ForeignExecutor Runtime::GetForeignExecutor(WorkerId worker_id) {
-  return celer::ForeignExecutor(impl_->ForeignState(worker_id));
+bycorf::ForeignExecutor Runtime::GetForeignExecutor(WorkerId worker_id) {
+  return bycorf::ForeignExecutor(impl_->ForeignState(worker_id));
 }
 
-}  // namespace celer
+}  // namespace bycorf

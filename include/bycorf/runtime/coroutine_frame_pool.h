@@ -1,0 +1,156 @@
+/*
+ * Copyright (C) 2026 EloqData Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef BYCORF_RUNTIME_COROUTINE_FRAME_POOL_H_
+#define BYCORF_RUNTIME_COROUTINE_FRAME_POOL_H_
+
+#include <array>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <new>
+
+namespace bycorf::detail {
+
+// Coroutine frames are allocated and released on runtime threads at a high
+// rate. Cache freed frames on the thread that destroys them. This remains safe
+// when a frame is created on one worker and destroyed on another, and avoids a
+// synchronized global freelist.
+class CoroutineFramePool {
+ public:
+  CoroutineFramePool() = default;
+  CoroutineFramePool(const CoroutineFramePool&) = delete;
+  CoroutineFramePool& operator=(const CoroutineFramePool&) = delete;
+
+  ~CoroutineFramePool() {
+    for (Block* head : free_) {
+      while (head != nullptr) {
+        Block* next = head->next_;
+        ::operator delete(head);
+        head = next;
+      }
+    }
+  }
+
+  void* Allocate(std::size_t requested) {
+    const std::size_t class_index = ClassIndex(requested);
+    Block* block = nullptr;
+    if (class_index < kClassCount) {
+      block = free_[class_index];
+      if (block != nullptr) {
+        free_[class_index] = block->next_;
+        --count_[class_index];
+        cached_bytes_ -= ClassBytes(class_index);
+      } else {
+        block = static_cast<Block*>(
+            ::operator new(sizeof(Block) + ClassBytes(class_index)));
+      }
+      block->class_index_ = static_cast<std::uint16_t>(class_index);
+    } else {
+      block = static_cast<Block*>(::operator new(sizeof(Block) + requested));
+      block->class_index_ = kUncachedClass;
+    }
+    block->next_ = nullptr;
+    return block + 1;
+  }
+
+  void Release(void* frame) noexcept {
+    if (frame == nullptr) {
+      return;
+    }
+    Block* block = static_cast<Block*>(frame) - 1;
+    const std::size_t class_index = block->class_index_;
+    if (class_index >= kClassCount) {
+      ::operator delete(block);
+      return;
+    }
+
+    const std::size_t bytes = ClassBytes(class_index);
+    if (count_[class_index] >= kMaxFramesPerClass ||
+        cached_bytes_ + bytes > kMaxCachedBytes) {
+      ::operator delete(block);
+      return;
+    }
+    block->next_ = free_[class_index];
+    free_[class_index] = block;
+    ++count_[class_index];
+    cached_bytes_ += bytes;
+  }
+
+ private:
+  struct alignas(std::max_align_t) Block {
+    Block* next_ = nullptr;
+    std::uint16_t class_index_ = 0;
+  };
+
+  static constexpr std::size_t kMinClassBytes = 64;
+  static constexpr std::size_t kClassCount = 11;
+  static constexpr std::size_t kMaxFramesPerClass = 64;
+  static constexpr std::size_t kMaxCachedBytes = 4 * 1024 * 1024;
+  static constexpr std::uint16_t kUncachedClass = UINT16_MAX;
+
+  static std::size_t ClassBytes(std::size_t class_index) noexcept {
+    return kMinClassBytes << class_index;
+  }
+
+  static std::size_t ClassIndex(std::size_t requested) noexcept {
+    if (requested <= kMinClassBytes) return 0;
+    // Classes are consecutive powers of two. bit_width maps requested bytes
+    // to the same ceiling class without a comparison loop on every coroutine
+    // allocation; values above the largest class naturally return kClassCount
+    // or greater and follow the uncached path.
+    return std::bit_width(requested - 1) - std::bit_width(kMinClassBytes - 1);
+  }
+
+  std::array<Block*, kClassCount> free_{};
+  std::array<std::size_t, kClassCount> count_{};
+  std::size_t cached_bytes_ = 0;
+};
+
+inline thread_local CoroutineFramePool g_coroutine_frame_pool;
+
+// Under AddressSanitizer, bypass the pool so every frame is an individual
+// allocation: use-after-free and double-destroy of coroutine frames then
+// produce precise reports instead of silent pool-recycled corruption.
+#if !defined(BYCORF_ASAN) && defined(__SANITIZE_ADDRESS__)
+#define BYCORF_ASAN 1
+#endif
+#if !defined(BYCORF_ASAN) && defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define BYCORF_ASAN 1
+#endif
+#endif
+#if defined(BYCORF_ASAN)
+inline void* AllocateCoroutineFrame(std::size_t size) {
+  return ::operator new(size);
+}
+
+inline void ReleaseCoroutineFrame(void* frame) noexcept {
+  ::operator delete(frame);
+}
+#else
+inline void* AllocateCoroutineFrame(std::size_t size) {
+  return g_coroutine_frame_pool.Allocate(size);
+}
+
+inline void ReleaseCoroutineFrame(void* frame) noexcept {
+  g_coroutine_frame_pool.Release(frame);
+}
+#endif
+
+}  // namespace bycorf::detail
+
+#endif  // BYCORF_RUNTIME_COROUTINE_FRAME_POOL_H_

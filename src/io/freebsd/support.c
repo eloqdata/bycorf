@@ -86,7 +86,7 @@ int uiomove(void* buffer, int n, struct uio* uio) {
   return 0;
 }
 void arc4rand(void* p, u_int n, int reseed) {
-  celer_bsd_host.random_bytes(p, n);
+  bycorf_bsd_host.random_bytes(p, n);
 }
 uint32_t arc4random(void) {
   uint32_t value;
@@ -207,7 +207,7 @@ void getcredhostuuid(struct ucred* cr, char* out, size_t n) {
   strlcpy(out, "00000000-0000-0000-0000-000000000000", n);
 }
 void getjailname(struct ucred* cr, char* out, size_t n) {
-  strlcpy(out, "celer", n);
+  strlcpy(out, "bycorf", n);
 }
 int chgsbsize(struct uidinfo* uid, u_int* hiwat, u_int to, rlim_t limit) {
   if (to > limit) return 0;
@@ -242,7 +242,7 @@ volatile uint32_t hpts_that_need_softclock;
 #undef tcp_hpts_softclock
 void (*tcp_hpts_softclock)(void);
 
-// Readiness is polled by the Celer backend. No kqueue/select registrations or
+// Readiness is polled by the Bycorf backend. No kqueue/select registrations or
 // SIGIO owners are admitted through the bridge, so these lists stay empty.
 void knlist_init(struct knlist* knl, void* lock, void (*enter)(void*),
                  void (*leave)(void*), void (*assert)(void*, int)) {
@@ -394,7 +394,7 @@ struct sbuf* sbuf_new_for_sysctl(struct sbuf* s, char* buffer, int n,
 
 // These functions exist only to reject paths requiring the real kernel's VM.
 // External-page mbufs, sendfile and TLS are disabled above and at the bridge.
-_Noreturn uintptr_t celer_bsd_no_direct_map(uintptr_t address) {
+_Noreturn uintptr_t bycorf_bsd_no_direct_map(uintptr_t address) {
   panic("kernel direct map is unavailable");
 }
 vm_page_t PHYS_TO_VM_PAGE(vm_paddr_t address) {

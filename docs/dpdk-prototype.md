@@ -23,12 +23,15 @@ library or F-Stack-derived host adaptation.
 
 ## Build
 
-Prerequisites include Clang 18, CMake, Ninja, Meson, Python 3/pyelftools,
+Prerequisites include GCC 13 or newer, Clang 18, CMake, Ninja, Meson, Python 3/pyelftools,
 pkg-config, GNU patch/binutils/awk, OpenSSL and NUMA/UUID development files,
 and DPDK/SPDK's normal build dependencies. Both AArch64 and x86-64
 (Intel/AMD, called `amd64` by FreeBSD) use the same native build commands.
-CMake's C++ compiler may be Clang or GCC, but the private kernel build requires
-Clang. Headers and structure offsets follow the application's compiler target.
+Use GCC for the application and SPDK when building the bypass backend on
+AArch64: the pinned ISA-L Crypto dependency does not compile unmodified with
+Clang 18 there. The private kernel build separately uses Clang, then links
+through a C bridge into the application. Headers and structure offsets follow
+the application's compiler target. The ordinary io_uring build supports Clang.
 Full FreeBSD sources are not needed to build.
 
 Initialize direct dependencies and SPDK's compression helpers explicitly:
@@ -39,40 +42,42 @@ git submodule update --init third_party/liburing third_party/abseil \
 git -C third_party/spdk submodule update --init isa-l isa-l-crypto
 cmake -S . -B build-dpdk-net -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
-  -DCELER_KERNEL_BYPASS=ON -DCELER_BUILD_EXAMPLES=ON
+  -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+  -DBYCORF_KERNEL_BYPASS=ON -DBYCORF_BUILD_EXAMPLES=ON
 cmake --build build-dpdk-net -j4
 ```
 
-Celer builds and installs one static DPDK, then configures SPDK with
+Bycorf builds and installs one static DPDK, then configures SPDK with
 `--with-dpdk=<that-installation>`. It never builds SPDK's nested DPDK.
-`CELER_DPDK_PREFIX` may point to an existing installation built from the same
+`BYCORF_DPDK_PREFIX` may point to an existing installation built from the same
 pinned DPDK commit, with static libraries in `lib/` and headers in `include/`.
-`CELER_DPDK_DRIVERS` defaults to `net/tap,net/ring,net/virtio`; select additional
+`BYCORF_DPDK_DRIVERS` defaults to `net/tap,net/ring,net/virtio`; select additional
 PMDs at configuration time for other hardware. SPDK currently builds in its
 submodule directory, so configure builds that use different DPDK prefixes
-serially and keep each executable's dependency provenance.
+serially and keep each executable's dependency provenance. When changing
+compilers, use a fresh CMake build directory and clean and reconfigure SPDK
+with the new `CC`/`CXX`; its source-tree build is shared across build directories.
 
-Celer imports DPDK's non-include compiler flags from `libdpdk.pc`, including
+Bycorf imports DPDK's non-include compiler flags from `libdpdk.pc`, including
 the CPU features needed by its inline headers. A non-IPO build does not need
 an extra manually supplied SSSE3 flag on x86.
 
-`CELER_KERNEL_BYPASS=ON` includes both DPDK networking and SPDK NVMe storage.
+`BYCORF_KERNEL_BYPASS=ON` includes both DPDK networking and SPDK NVMe storage.
 It leaves both inactive until selected through the startup API described below. Networking and
 SPDK share `EnsureDpdkEnvironment()` and one `spdk_env_init` call. EAL is DPDK's
 environment layer for memory, devices, and thread/lcore registration; SPDK
-initializes it on Celer's behalf.
+initializes it on Bycorf's behalf.
 
 ## Virtual-device correctness tests
 
-The test owns an isolated TAP named `celerdp0` and refuses to alter it if it
+The test owns an isolated TAP named `bycorfdp0` and refuses to alter it if it
 already exists. It uses CPUs 0 and 1 for the two server workers and CPUs 2 and 3
 for ordinary Linux TCP clients by default. All workers share exactly one RX/TX
 queue pair. Root or equivalent network capabilities and `/dev/net/tun` are required.
 
 ```bash
-sudo python3 tests/dpdk_smoke.py build-dpdk-net/celer_echo
-sudo python3 tests/dpdk_smoke.py build-dpdk-net/celer_echo --loss
+sudo python3 tests/dpdk_smoke.py build-dpdk-net/bycorf_echo
+sudo python3 tests/dpdk_smoke.py build-dpdk-net/bycorf_echo --loss
 ```
 
 The second command adds 2% packet loss to the test's TAP with `tc netem`.
@@ -86,7 +91,7 @@ ownership and bytes with C++ strict aliasing enabled. On a 16-CPU host, exercise
 the full worker count and repeated ring turnover with:
 
 ```bash
-sudo python3 tests/dpdk_smoke.py build-dpdk-net/celer_echo \
+sudo python3 tests/dpdk_smoke.py build-dpdk-net/bycorf_echo \
   --workers 15 --server-cpus 0-14 --client-cpus 15 --streams 1000
 ```
 
@@ -98,10 +103,10 @@ requires a TCP RSS-capable device and a separate physical-device test.
 The startup regression check uses an in-memory ring PMD and needs no TAP:
 
 ```bash
-CELER_EAL_ARGS='--no-huge --no-pci --vdev=net_ring0' \
-  timeout 15s ./build-dpdk-net/celer_backend_startup_check 0
-CELER_EAL_ARGS='--no-huge --no-pci --vdev=net_ring0' \
-  timeout 15s ./build-dpdk-net/celer_backend_startup_check 1
+BYCORF_EAL_ARGS='--no-huge --no-pci --vdev=net_ring0' \
+  timeout 15s ./build-dpdk-net/bycorf_backend_startup_check 0
+BYCORF_EAL_ARGS='--no-huge --no-pci --vdev=net_ring0' \
+  timeout 15s ./build-dpdk-net/bycorf_backend_startup_check 1
 ```
 
 Each invocation fails one worker before initialization and verifies that its
@@ -113,8 +118,8 @@ use separate processes because the stack has process lifetime.
 The private BSD bridge can also be tested without DPDK or io_uring:
 
 ```bash
-sudo python3 tests/freebsd_port_smoke.py build-dpdk-net/celer_freebsd_port_check
-sudo python3 tests/freebsd_port_smoke.py build-dpdk-net/celer_freebsd_port_check --loss
+sudo python3 tests/freebsd_port_smoke.py build-dpdk-net/bycorf_freebsd_port_check
+sudo python3 tests/freebsd_port_smoke.py build-dpdk-net/bycorf_freebsd_port_check --loss
 ```
 
 This fixture owns two temporary TAPs in the otherwise unused `198.19.0.0/24`
@@ -128,7 +133,7 @@ The sequence-space regression uses an in-process Ethernet peer and requires no
 root privileges or interfaces:
 
 ```bash
-./build-dpdk-net/celer_freebsd_tcp_sequence_check
+./build-dpdk-net/bycorf_freebsd_tcp_sequence_check
 ```
 
 It rejects a forged ACK, acknowledges 3 GiB through native header prediction,
@@ -142,9 +147,9 @@ and run as x86-64 code with `gcc-x86-64-linux-gnu`,
 python3 cmake/build_freebsd.py --source . --output build-freebsd-x86 \
   --cc clang-18 --target x86_64-linux-gnu
 x86_64-linux-gnu-g++ -std=c++23 -O2 -g -pthread \
-  tests/freebsd_port_check.cpp build-freebsd-x86/libceler_freebsd.a \
-  -o build-freebsd-x86/celer_freebsd_port_check
-sudo python3 tests/freebsd_port_smoke.py build-freebsd-x86/celer_freebsd_port_check \
+  tests/freebsd_port_check.cpp build-freebsd-x86/libbycorf_freebsd.a \
+  -o build-freebsd-x86/bycorf_freebsd_port_check
+sudo python3 tests/freebsd_port_smoke.py build-freebsd-x86/bycorf_freebsd_port_check \
   --runner 'qemu-x86_64 -L /usr/x86_64-linux-gnu' --loss
 ```
 
@@ -157,16 +162,16 @@ validate x86 NIC interrupts or establish physical-machine performance.
 To run the echo server manually:
 
 ```bash
-sudo env CELER_DPDK_MODE=adaptive CELER_DPDK_QUEUES=1 \
-  taskset -c 0,1 ./build-dpdk-net/celer_echo 198.18.0.2 16390 2 -1 dpdk
+sudo env BYCORF_DPDK_MODE=adaptive BYCORF_DPDK_QUEUES=1 \
+  taskset -c 0,1 ./build-dpdk-net/bycorf_echo 198.18.0.2 16390 2 -1 dpdk
 ```
 
-After both `celer0: Ethernet address:` messages appear, configure the Linux
+After both `bycorf0: Ethernet address:` messages appear, configure the Linux
 side of the newly created TAP from another terminal:
 
 ```bash
-sudo ip link set celerdp0 address 02:00:00:00:00:01
-sudo ip address add 198.18.0.1/24 dev celerdp0
+sudo ip link set bycorfdp0 address 02:00:00:00:00:01
+sudo ip address add 198.18.0.1/24 dev bycorfdp0
 ```
 
 The PMD configures the TAP during startup, so assigning its Linux-side MAC
@@ -178,16 +183,16 @@ owning process closes. No physical NIC needs rebinding for these tests.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `CELER_DPDK_MODE` | `poll` | `poll` keeps polling; `adaptive` can arm RX notification and sleep on io_uring |
-| `CELER_DPDK_QUEUES` | worker count, capped by hardware | RX/TX pair count, between 1 and worker count |
-| `CELER_DPDK_RX_STEERING` | `hash` | `hash` redistributes TCP by software tuple hash; `rss` keeps it on the receiving queue's worker |
-| `CELER_DPDK_IP` | `198.18.0.2` | Stack's IPv4 address |
-| `CELER_DPDK_NETMASK` | `255.255.255.0` | IPv4 subnet mask |
-| `CELER_DPDK_GATEWAY` | none | Optional default gateway |
-| `CELER_DPDK_MEMORY_MB` | 512 for no-huge tests | EAL memory size in MiB |
-| `CELER_EAL_ARGS` | virtual TAP configuration | Extra arguments passed through SPDK to EAL |
+| `BYCORF_DPDK_MODE` | `poll` | `poll` keeps polling; `adaptive` can arm RX notification and sleep on io_uring |
+| `BYCORF_DPDK_QUEUES` | worker count, capped by hardware | RX/TX pair count, between 1 and worker count |
+| `BYCORF_DPDK_RX_STEERING` | `hash` | `hash` redistributes TCP by software tuple hash; `rss` keeps it on the receiving queue's worker |
+| `BYCORF_DPDK_IP` | `198.18.0.2` | Stack's IPv4 address |
+| `BYCORF_DPDK_NETMASK` | `255.255.255.0` | IPv4 subnet mask |
+| `BYCORF_DPDK_GATEWAY` | none | Optional default gateway |
+| `BYCORF_DPDK_MEMORY_MB` | 512 for no-huge tests | EAL memory size in MiB |
+| `BYCORF_EAL_ARGS` | virtual TAP configuration | Extra arguments passed through SPDK to EAL |
 
-An unset/empty `CELER_EAL_ARGS` selects no hugepages, no PCI probing, and the
+An unset/empty `BYCORF_EAL_ARGS` selects no hugepages, no PCI probing, and the
 TAP test device. Explicit arguments replace this virtual default; configure
 hugepages and the dedicated device allowlist for a physical run. Include the
 NVMe controller in that allowlist when using SPDK storage too. The prototype
@@ -197,7 +202,7 @@ include the requested capability; compilation alone does not activate it.
 
 ### Worker capacity
 
-`CELER_DPDK_MAX_WORKERS` is a CMake capacity setting, default 128 (range
+`BYCORF_DPDK_MAX_WORKERS` is a CMake capacity setting, default 128 (range
 1–1023). It sizes the backend and private FreeBSD per-worker state and builds
 DPDK with one additional lcore slot for the EAL initializer. SPDK uses that same
 DPDK capacity. This reserves registration/state capacity; it neither launches
@@ -205,18 +210,18 @@ extra polling threads nor reserves an extra physical CPU. The runtime worker
 count remains an application startup setting. Pinned workers still need one
 allowed Linux CPU each.
 
-For example, a build with `-DCELER_DPDK_MAX_WORKERS=256` supports up to 256
-DPDK workers. When using `CELER_DPDK_PREFIX`, that existing DPDK must have at
+For example, a build with `-DBYCORF_DPDK_MAX_WORKERS=256` supports up to 256
+DPDK workers. When using `BYCORF_DPDK_PREFIX`, that existing DPDK must have at
 least 257 lcore slots. CMake rejects a smaller prefix instead of overriding
-its ABI-defining headers. Clear the prefix to let Celer rebuild its dependency:
+its ABI-defining headers. Clear the prefix to let Bycorf rebuild its dependency:
 
 ```sh
-cmake -S . -B build-dpdk-net -DCELER_KERNEL_BYPASS=ON \
-  -DCELER_DPDK_MAX_WORKERS=256 -DCELER_DPDK_PREFIX=
+cmake -S . -B build-dpdk-net -DBYCORF_KERNEL_BYPASS=ON \
+  -DBYCORF_DPDK_MAX_WORKERS=256 -DBYCORF_DPDK_PREFIX=
 cmake --build build-dpdk-net
 ```
 
-Capacity changes require rebuilding Celer, the private BSD stack, and SPDK
+Capacity changes require rebuilding Bycorf, the private BSD stack, and SPDK
 against the matching DPDK headers. Runtime startup also checks available EAL
 registrations; other registered threads can consume slots. Packet pools grow
 with the configured queue descriptors and worker caches, so larger active
@@ -227,10 +232,10 @@ On a small host, validate additional owners using one TAP queue and hash
 steering; oversubscribed workers test correctness, not throughput scaling:
 
 ```sh
-sudo python3 tests/dpdk_smoke.py ./build-dpdk-net/celer_echo \
+sudo python3 tests/dpdk_smoke.py ./build-dpdk-net/bycorf_echo \
   --workers 32 --no-pin-workers --server-cpus 0-14 --client-cpus 15 --streams 1000
-sudo env CELER_EAL_ARGS='--no-huge --no-pci --vdev=net_ring0' \
-  CELER_DPDK_QUEUES=1 ./build-dpdk-net/celer_backend_worker_check 128
+sudo env BYCORF_EAL_ARGS='--no-huge --no-pci --vdev=net_ring0' \
+  BYCORF_DPDK_QUEUES=1 ./build-dpdk-net/bycorf_backend_worker_check 128
 ```
 
 The worker check creates a listener on every worker, verifies that handles stay
@@ -264,7 +269,7 @@ as accelerated networking; a working synthetic fallback alone is insufficient.
 
 ## Runtime selection
 
-Celer defaults to kernel networking and io_uring storage. Before starting any
+Bycorf defaults to kernel networking and io_uring storage. Before starting any
 runtime or preparing storage, applications call `ConfigureIoBackends` with the
 requested `dpdk_network` and `spdk_storage` booleans. The first runtime, storage
 probe or storage-buffer allocation freezes the selection for the process
@@ -272,9 +277,9 @@ lifetime. A different later selection fails. Both flags false leave EAL
 uninitialized; either flag true can initialize the same shared EAL environment.
 The complete device allowlist must be set before that first initialization.
 
-`celer_echo` accepts a final positional network selector after the idle timeout:
-`celer_echo ADDRESS PORT WORKERS IDLE_TIMEOUT_MS kernel|dpdk`.
-`dpdk_smoke.py` selects DPDK explicitly. `celer_backend_selection_check` checks
+`bycorf_echo` accepts a final positional network selector after the idle timeout:
+`bycorf_echo ADDRESS PORT WORKERS IDLE_TIMEOUT_MS kernel|dpdk`.
+`dpdk_smoke.py` selects DPDK explicitly. `bycorf_backend_selection_check` checks
 ordinary allocation and immutable selection without touching physical devices.
 
 ## Application and Keylane integration
@@ -282,16 +287,16 @@ ordinary allocation and immutable selection without touching physical devices.
 The normal `TcpService` / `TcpStream` API is unchanged. The same incremental
 parser consumes stream bytes, and the same storage implementation handles
 commands. Raw BSD socket handles are worker-local and must not be passed to
-Linux `send`, `poll`, `dup`, `close`, or descriptor-transfer APIs. Celer routes
+Linux `send`, `poll`, `dup`, `close`, or descriptor-transfer APIs. Bycorf routes
 its own close and peer-address operations to the right backend.
 
-Keylane's integration worktree can select an external Celer checkout:
+Keylane's integration worktree can select an external Bycorf checkout:
 
 ```bash
 cmake -S /path/to/keylane -B /path/to/keylane/build-dpdk-net -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKEYLANE_ENABLE_OPT=OFF \
   -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
-  -DKEYLANE_CELER_SOURCE_DIR=/path/to/celer \
+  -DKEYLANE_BYCORF_SOURCE_DIR=/path/to/bycorf \
   -DKEYLANE_KERNEL_BYPASS=ON
 cmake --build /path/to/keylane/build-dpdk-net --target keylane -j4
 ```
@@ -321,7 +326,7 @@ also fail explicitly. This is not a production-hardened network stack.
 
 TAP sends packets through Linux and introduces syscalls, scheduling, and
 virtual-device overhead. The pinned TAP PMD also uses asynchronous realtime
-signals as an RX trigger in both modes; Celer's poll/adaptive switch controls
+signals as an RX trigger in both modes; Bycorf's poll/adaptive switch controls
 worker parking and RX descriptor/interrupt arming, not that PMD implementation.
 Its throughput is useful for finding prototype
 bottlenecks, but cannot demonstrate the throughput or CPU savings of a

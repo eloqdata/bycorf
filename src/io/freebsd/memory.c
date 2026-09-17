@@ -26,7 +26,7 @@ struct allocation_header {
   char reserved[64 - sizeof(size_t)];
 };
 
-MALLOC_DEFINE(M_TEMP, "celer temporary", "Host-backed kernel allocations");
+MALLOC_DEFINE(M_TEMP, "bycorf temporary", "Host-backed kernel allocations");
 
 // Kernel malloc has a different ABI from libc malloc. These symbols become
 // local when the port is partially linked; host allocation crosses callbacks.
@@ -34,7 +34,7 @@ void* malloc(size_t size, struct malloc_type* type, int flags) {
   (void)type;
   if (size > SIZE_MAX - sizeof(struct allocation_header)) return NULL;
   struct allocation_header* header =
-      celer_bsd_host.allocate(size + sizeof(*header), 64);
+      bycorf_bsd_host.allocate(size + sizeof(*header), 64);
   void* p = header ? header + 1 : NULL;
   if (header) header->size = size;
   if (p && (flags & M_ZERO)) memset(p, 0, size);
@@ -44,7 +44,7 @@ void* malloc(size_t size, struct malloc_type* type, int flags) {
 
 void free(void* p, struct malloc_type* type) {
   (void)type;
-  if (p) celer_bsd_host.release((struct allocation_header*)p - 1);
+  if (p) bycorf_bsd_host.release((struct allocation_header*)p - 1);
 }
 
 void* realloc(void* p, size_t size, struct malloc_type* type, int flags) {
@@ -102,7 +102,7 @@ struct uma_zone {
 
 static void zone_lock(struct uma_zone* z) {
   while (__atomic_exchange_n(&z->retire_lock, 1, __ATOMIC_ACQUIRE))
-    celer_bsd_spinwait();
+    bycorf_bsd_spinwait();
 }
 static void zone_unlock(struct uma_zone* z) {
   __atomic_store_n(&z->retire_lock, 0, __ATOMIC_RELEASE);
@@ -140,17 +140,17 @@ void* uma_zalloc_arg(uma_zone_t z, void* arg, int flags) {
     return NULL;
   }
   size_t size = (z->flags & UMA_ZONE_PCPU)
-                    ? UMA_PCPU_ALLOC_SIZE * celer_bsd_worker_count
+                    ? UMA_PCPU_ALLOC_SIZE * bycorf_bsd_worker_count
                     : z->size;
-  void* p = celer_bsd_host.allocate(size, z->alignment);
+  void* p = bycorf_bsd_host.allocate(size, z->alignment);
   if (p && (flags & M_ZERO)) memset(p, 0, size);
   if (p && z->init && z->init(p, z->size, flags)) {
-    celer_bsd_host.release(p);
+    bycorf_bsd_host.release(p);
     p = NULL;
   }
   if (p && z->ctor && z->ctor(p, z->size, arg, flags)) {
     if (z->fini) z->fini(p, z->size);
-    celer_bsd_host.release(p);
+    bycorf_bsd_host.release(p);
     p = NULL;
   }
   if (!p) {
@@ -164,7 +164,7 @@ void uma_zfree_arg(uma_zone_t z, void* p, void* arg) {
   if (!p) return;
   if (z->dtor) z->dtor(p, z->size, arg);
   if (z->fini) z->fini(p, z->size);
-  celer_bsd_host.release(p);
+  bycorf_bsd_host.release(p);
   __atomic_sub_fetch(&z->current, 1, __ATOMIC_RELAXED);
 }
 

@@ -14,16 +14,16 @@
  * limitations under the License.
  */
 
-#ifndef CELER_FREEBSD_MACHINE_PCPU_H_
-#define CELER_FREEBSD_MACHINE_PCPU_H_
+#ifndef BYCORF_FREEBSD_MACHINE_PCPU_H_
+#define BYCORF_FREEBSD_MACHINE_PCPU_H_
 
-// FreeBSD's native pcpu pointer lives in a kernel-reserved register. A Celer
+// FreeBSD's native pcpu pointer lives in a kernel-reserved register. A Bycorf
 // worker instead carries the context in TLS, including while a coroutine is
 // suspended. Network state never follows a coroutine to another worker.
 struct pcpu;
 struct thread;
-extern _Thread_local struct pcpu* celer_bsd_pcpu;
-extern _Thread_local struct thread* celer_bsd_curthread;
+extern _Thread_local struct pcpu* bycorf_bsd_pcpu;
+extern _Thread_local struct thread* bycorf_bsd_curthread;
 
 #if defined(__x86_64__)
 // Native PMAP headers parse an inline TLB workaround through PCPU_GET even
@@ -31,14 +31,14 @@ extern _Thread_local struct thread* celer_bsd_curthread;
 // management state is initialized or used by networking.
 #define PCPU_MD_FIELDS bool pc_pcid_invlpg_workaround
 #else
-#define PCPU_MD_FIELDS char celer_unused
+#define PCPU_MD_FIELDS char bycorf_unused
 #endif
-#define curthread celer_bsd_curthread
-#define PCPU_GET(member) (celer_bsd_pcpu->pc_##member)
-#define PCPU_PTR(member) (&celer_bsd_pcpu->pc_##member)
-#define PCPU_SET(member, value) (celer_bsd_pcpu->pc_##member = (value))
-#define PCPU_ADD(member, value) (celer_bsd_pcpu->pc_##member += (value))
+#define curthread bycorf_bsd_curthread
+#define PCPU_GET(member) (bycorf_bsd_pcpu->pc_##member)
+#define PCPU_PTR(member) (&bycorf_bsd_pcpu->pc_##member)
+#define PCPU_SET(member, value) (bycorf_bsd_pcpu->pc_##member = (value))
+#define PCPU_ADD(member, value) (bycorf_bsd_pcpu->pc_##member += (value))
 
-static inline struct pcpu* get_pcpu(void) { return celer_bsd_pcpu; }
+static inline struct pcpu* get_pcpu(void) { return bycorf_bsd_pcpu; }
 
 #endif

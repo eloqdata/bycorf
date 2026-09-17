@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-#include "celer/io/backend_options.h"
+#include "bycorf/io/backend_options.h"
 
 #include <atomic>
 #include <mutex>
 
-namespace celer {
+namespace bycorf {
 namespace detail {
 IoBackends io_backends;
 }
@@ -29,11 +29,9 @@ std::atomic<bool> frozen{false};
 }  // namespace
 absl::Status ConfigureIoBackends(IoBackends options) {
   std::lock_guard lock(options_mutex);
-#ifndef CELER_WITH_DPDK
+#if !BYCORF_KERNEL_BYPASS
   if (options.dpdk_network)
     return absl::UnimplementedError("DPDK network support is not compiled in");
-#endif
-#ifndef CELER_WITH_SPDK_STORAGE
   if (options.spdk_storage)
     return absl::UnimplementedError("SPDK storage support is not compiled in");
 #endif
@@ -52,4 +50,4 @@ void FreezeIoBackends() {
   std::lock_guard lock(options_mutex);
   frozen.store(true, std::memory_order_release);
 }
-}  // namespace celer
+}  // namespace bycorf

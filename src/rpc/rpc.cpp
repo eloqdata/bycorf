@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/rpc/rpc.h"
+#include "bycorf/rpc/rpc.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -28,11 +28,11 @@
 #include <cstring>
 #include <string>
 
-#include "celer/net/connection.h"
-#include "celer/runtime/cross_core.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/net/connection.h"
+#include "bycorf/runtime/cross_core.h"
+#include "bycorf/runtime/worker.h"
 
-namespace celer::rpc {
+namespace bycorf::rpc {
 
 namespace {
 
@@ -339,4 +339,4 @@ Task<absl::Status> RpcClient::ReadLoop() {
   co_return absl::OkStatus();
 }
 
-}  // namespace celer::rpc
+}  // namespace bycorf::rpc

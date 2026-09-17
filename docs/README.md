@@ -14,12 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Celer documentation
+# Bycorf documentation
 
+- [Getting started](../README.md): build, tests, examples, CMake integration,
+  and development tools.
 - [Architecture](architecture/README.md): current module boundaries, ownership,
   lifecycle, and backend integration.
 - [DPDK prototype](dpdk-prototype.md): prerequisites, build, virtual-device tests,
   physical-device configuration, and compatibility limits.
+- [Roadmap](../ROADMAP.md): remaining runtime and RPC work.
 
 Source and tests are authoritative. Keep current architecture synchronized with
 changes to core boundaries, flows, and invariants; keep benchmark results and

@@ -16,7 +16,7 @@ limitations under the License.
 
 # Architecture
 
-Celer is a Linux C++23 coroutine runtime. Applications provide services and
+Bycorf is a Linux C++23 coroutine runtime. Applications provide services and
 protocol handlers; the runtime owns worker threads, scheduling, connections,
 and asynchronous I/O. Abseil supplies status types and spdlog supplies logging.
 
@@ -32,9 +32,9 @@ application-level request routing may choose a different worker; that does not
 move the connection. Cross-worker work returns to the awaiting coroutine's
 worker before that coroutine uses its stream again.
 
-`celer::core`, `celer::celer`, and `celer::io` alias the core library;
-`celer::rpc` is a separate optional consumer of its public network primitives.
-`CELER_KERNEL_BYPASS=ON` includes DPDK networking and SPDK storage together.
+`bycorf::core`, `bycorf::bycorf`, and `bycorf::io` alias the core library;
+`bycorf::rpc` is a separate optional consumer of its public network primitives.
+`BYCORF_KERNEL_BYPASS=ON` includes DPDK networking and SPDK storage together.
 Startup selection independently activates network and storage backends and
 remains fixed for the process lifetime. Both default to io_uring even in a
 bypass-capable build.

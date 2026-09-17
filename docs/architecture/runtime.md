@@ -46,10 +46,10 @@ With DPDK networking, runtime preparation configures the shared port before
 launch. Worker 0 initializes the native FreeBSD kernel services; remaining
 workers attach separate VNETs in serialized startup. The existing worker loop
 runs packet input, TCP timers, and deferred BSD tasks. EAL may have control or
-interrupt helper threads; it does not launch Celer network polling workers.
+interrupt helper threads; it does not launch Bycorf network polling workers.
 Worker-affine BSD sockets close and EAL thread registrations detach before
 join; the runtime then releases the port and software packet queues.
 
 Sources: `src/runtime/runtime.cpp`, `src/runtime/worker.cpp`,
-`include/celer/runtime/cross_core.h`, `src/runtime/foreign_executor.cpp`,
+`include/bycorf/runtime/cross_core.h`, `src/runtime/foreign_executor.cpp`,
 `src/net/server.cpp`.

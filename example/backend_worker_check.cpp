@@ -24,8 +24,8 @@
 #include <string>
 #include <vector>
 
-#include "celer/net/socket_ops.h"
-#include "celer/runtime/runtime.h"
+#include "bycorf/net/socket_ops.h"
+#include "bycorf/runtime/runtime.h"
 
 // Run on a virtual PMD. Every owner must have a positive, distinct BSD handle,
 // including worker IDs above 63; rejecting a foreign handle must not close the
@@ -34,16 +34,16 @@ int main(int argc, char** argv) {
   const unsigned workers = argc > 1 ? std::stoul(argv[1]) : 128;
   const bool expect_rejection =
       argc > 2 && std::string_view(argv[2]) == "reject";
-  if (!workers || !celer::ConfigureIoBackends({.dpdk_network = true}).ok())
+  if (!workers || !bycorf::ConfigureIoBackends({.dpdk_network = true}).ok())
     return 2;
-  celer::Runtime runtime;
+  bycorf::Runtime runtime;
   std::latch ready(workers);
   std::vector<int> handles(workers, -1);
   std::atomic<unsigned> passed{0};
   try {
     runtime.Start(
         workers,
-        [&](unsigned id, celer::Worker& worker) {
+        [&](unsigned id, bycorf::Worker& worker) {
           const auto status = worker.Init({});
           if (!status.ok()) {
             std::cerr << status << '\n';
@@ -54,20 +54,21 @@ int main(int argc, char** argv) {
           address.sin_family = AF_INET;
           address.sin_port = htons(16391);
           inet_pton(AF_INET, "198.18.0.2", &address.sin_addr);
-          handles[id] = celer::DpdkBackend::Listen(
+          handles[id] = bycorf::DpdkBackend::Listen(
               reinterpret_cast<sockaddr*>(&address), sizeof(address), 16);
           ready.arrive_and_wait();
-          bool ok = celer::detail::IsDpdkSocket(handles[id]);
+          bool ok = bycorf::detail::IsDpdkSocket(handles[id]);
           if (id == 0)
             ok = ok && std::set<int>(handles.begin(), handles.end()).size() ==
                            workers;
           if (workers > 1) {
             const int other = handles[(id + 1) % workers];
-            ok = ok && celer::DpdkBackend::Close(other) == -1 && errno == EBADF;
+            ok =
+                ok && bycorf::DpdkBackend::Close(other) == -1 && errno == EBADF;
           }
           // Kernel close() must never see this namespace, even at the highest
           // ID.
-          ok = ok && celer::detail::CloseSocket(handles[id]) == 0;
+          ok = ok && bycorf::detail::CloseSocket(handles[id]) == 0;
           if (ok) ++passed;
           worker.Shutdown();
           return ok ? 0 : 1;

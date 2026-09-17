@@ -14,16 +14,16 @@
  * limitations under the License.
  */
 
-#include "celer/runtime/foreign_executor.h"
+#include "bycorf/runtime/foreign_executor.h"
 
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstdint>
 
-#include "celer/runtime/worker.h"
+#include "bycorf/runtime/worker.h"
 
-namespace celer {
+namespace bycorf {
 namespace {
 
 void EnqueueContinuation(void* context, std::uint64_t value) noexcept {
@@ -102,4 +102,4 @@ void ForeignExecutor::WaitUntilIdle() const noexcept {
   }
 }
 
-}  // namespace celer
+}  // namespace bycorf

@@ -127,7 +127,7 @@ struct Peer {
     std::memcpy(arp + 8, kPeerMac.data(), 6);
     Put32(arp + 14, kPeerIp);
     Put32(arp + 24, kServerIp);
-    celer_bsd_input(frame.data(), frame.size());
+    bycorf_bsd_input(frame.data(), frame.size());
   }
 
   void Packet(uint8_t flags, uint16_t window, uint32_t ack,
@@ -166,13 +166,13 @@ struct Peer {
                             (kServerIp >> 16) + (kServerIp & 65535) + 6 +
                             tcp_size;
     Put16(tcp + 16, Checksum({tcp, tcp_size}, pseudo));
-    celer_bsd_input(frame.data(), 34 + tcp_size);
+    bycorf_bsd_input(frame.data(), 34 + tcp_size);
   }
 };
 }  // namespace
 
 int main() {
-  celer_bsd_host host{
+  bycorf_bsd_host host{
       Allocate,
       std::free,
       [] { return Now(CLOCK_MONOTONIC); },
@@ -180,54 +180,54 @@ int main() {
       Random,
       [](const char* p, size_t n) { std::fwrite(p, 1, n, stderr); },
       std::abort};
-  Check(celer_bsd_initialize(&host, 1) == 0, "initialize stack");
+  Check(bycorf_bsd_initialize(&host, 1) == 0, "initialize stack");
   Peer peer;
-  celer_bsd_interface interface{};
+  bycorf_bsd_interface interface{};
   interface.address = htonl(kServerIp);
   interface.netmask = htonl(0xffffff00);
   std::memcpy(interface.mac, kServerMac.data(), 6);
   interface.mtu = 1500;
   interface.transmit = Peer::Transmit;
   interface.context = &peer;
-  Check(celer_bsd_attach_interface(&interface) == 0, "attach interface");
+  Check(bycorf_bsd_attach_interface(&interface) == 0, "attach interface");
   struct socket* listener = nullptr;
   struct socket* socket = nullptr;
-  Check(celer_bsd_listen(interface.address, 16390, 16, &listener) == 0,
+  Check(bycorf_bsd_listen(interface.address, 16390, 16, &listener) == 0,
         "listen");
   peer.LearnNeighbor();
   peer.Packet(2, 65535, 0);
   Check(peer.syn_received, "receive SYN-ACK");
   peer.Packet(16, 65535, peer.server_next);
-  Check(celer_bsd_accept(listener, &socket) == 0, "accept");
+  Check(bycorf_bsd_accept(listener, &socket) == 0, "accept");
 
   // The fix must preserve rejection of an ACK preceding the initial sequence.
   const std::array<uint8_t, 1> request{'x'};
   peer.Packet(24, 65535, peer.server_next - 10, request);
   uint8_t byte = 0;
   size_t count = 0;
-  Check(celer_bsd_receive(socket, &byte, 1, &count) == 35 && count == 0,
+  Check(bycorf_bsd_receive(socket, &byte, 1, &count) == 35 && count == 0,
         "reject ghost ACK before bulk transfer");
 
   const std::array<uint8_t, 2048> reply{};
   constexpr uint64_t kBytes = uint64_t{3} << 30;
   for (uint64_t total = 0; total < kBytes; total += reply.size()) {
     size_t sent = 0;
-    Check(celer_bsd_send(socket, reply.data(), reply.size(), &sent) == 0 &&
+    Check(bycorf_bsd_send(socket, reply.data(), reply.size(), &sent) == 0 &&
               sent == reply.size(),
           "bulk send makes progress");
     Check(peer.received == total + reply.size(), "bulk reply reaches peer");
     peer.Packet(16, 65535, peer.server_next);
-    if ((total & ((1 << 20) - 1)) == 0) celer_bsd_poll();
+    if ((total & ((1 << 20) - 1)) == 0) bycorf_bsd_poll();
   }
   // A window change forces slow ACK processing after signed sequence distance
   // from ISS has wrapped. An ordinary request must still enter the receive buf.
   peer.Packet(24, 65534, peer.server_next, request);
-  Check(celer_bsd_receive(socket, &byte, 1, &count) == 0 && count == 1 &&
+  Check(bycorf_bsd_receive(socket, &byte, 1, &count) == 0 && count == 1 &&
             byte == 'x',
         "valid request after 3 GiB and receive-window change");
   ++peer.next;
-  Check(celer_bsd_close(socket) == 0, "close session");
-  Check(celer_bsd_close(listener) == 0, "close listener");
+  Check(bycorf_bsd_close(socket) == 0, "close session");
+  Check(bycorf_bsd_close(listener) == 0, "close listener");
   std::puts(
       "PASS: ghost ACK rejected; 3 GiB acknowledged on fast path; slow-path "
       "request accepted");

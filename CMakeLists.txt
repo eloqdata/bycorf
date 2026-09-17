@@ -14,7 +14,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(celer VERSION 0.1.0 LANGUAGES C CXX)
+project(bycorf VERSION 0.1.0 LANGUAGES C CXX)
 
 find_package(OpenSSL REQUIRED)
 
@@ -23,139 +23,139 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(CELER_BUILD_EXAMPLES "Build example applications" ON)
+option(BYCORF_BUILD_EXAMPLES "Build example applications" ON)
 # Standalone builds expose CTest by default. Embedders own their test graph
-# and opt in explicitly, so adding Celer does not register tests for the parent.
-set(CELER_BUILD_TESTS_DEFAULT OFF)
+# and opt in explicitly, so adding Bycorf does not register tests for the parent.
+set(BYCORF_BUILD_TESTS_DEFAULT OFF)
 if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
   include(CTest)
-  set(CELER_BUILD_TESTS_DEFAULT "${BUILD_TESTING}")
+  set(BYCORF_BUILD_TESTS_DEFAULT "${BUILD_TESTING}")
 endif()
-option(CELER_BUILD_TESTS "Build Celer regression tests"
-  ${CELER_BUILD_TESTS_DEFAULT})
-option(CELER_ENABLE_WERROR "Treat warnings as errors" OFF)
+option(BYCORF_BUILD_TESTS "Build Bycorf regression tests"
+  ${BYCORF_BUILD_TESTS_DEFAULT})
+option(BYCORF_ENABLE_WERROR "Treat warnings as errors" OFF)
 # One dependency boundary includes both accelerators; applications still select
 # network and storage independently at startup. DPDK uses private FreeBSD TCP.
-option(CELER_KERNEL_BYPASS
+option(BYCORF_KERNEL_BYPASS
   "Include DPDK networking and SPDK storage (selected independently at startup)"
   OFF)
-option(CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+option(BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
   "Enable detailed cross-core queue and wake latency tracing" OFF)
 
-set(CELER_CLANG_FORMAT_REQUIRED_VERSION "23.1.1")
-string(REPLACE "." "\\." CELER_CLANG_FORMAT_VERSION_REGEX
-  "${CELER_CLANG_FORMAT_REQUIRED_VERSION}")
-find_program(CELER_CLANG_FORMAT NAMES clang-format-23 clang-format)
-if (CELER_CLANG_FORMAT)
+set(BYCORF_CLANG_FORMAT_REQUIRED_VERSION "23.1.1")
+string(REPLACE "." "\\." BYCORF_CLANG_FORMAT_VERSION_REGEX
+  "${BYCORF_CLANG_FORMAT_REQUIRED_VERSION}")
+find_program(BYCORF_CLANG_FORMAT NAMES clang-format-23 clang-format)
+if (BYCORF_CLANG_FORMAT)
   execute_process(
-    COMMAND ${CELER_CLANG_FORMAT} --version
-    RESULT_VARIABLE CELER_CLANG_FORMAT_VERSION_RESULT
-    OUTPUT_VARIABLE CELER_CLANG_FORMAT_VERSION_OUTPUT
-    ERROR_VARIABLE CELER_CLANG_FORMAT_VERSION_OUTPUT
+    COMMAND ${BYCORF_CLANG_FORMAT} --version
+    RESULT_VARIABLE BYCORF_CLANG_FORMAT_VERSION_RESULT
+    OUTPUT_VARIABLE BYCORF_CLANG_FORMAT_VERSION_OUTPUT
+    ERROR_VARIABLE BYCORF_CLANG_FORMAT_VERSION_OUTPUT
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_STRIP_TRAILING_WHITESPACE
   )
   # Repository-wide formatting must be deterministic across developer
   # machines; other releases remain unavailable to the format targets.
-  if (NOT CELER_CLANG_FORMAT_VERSION_RESULT EQUAL 0 OR
-      NOT CELER_CLANG_FORMAT_VERSION_OUTPUT MATCHES
-        "clang-format version ${CELER_CLANG_FORMAT_VERSION_REGEX}([^0-9.]|$)")
-    unset(CELER_CLANG_FORMAT CACHE)
-    set(CELER_CLANG_FORMAT "")
+  if (NOT BYCORF_CLANG_FORMAT_VERSION_RESULT EQUAL 0 OR
+      NOT BYCORF_CLANG_FORMAT_VERSION_OUTPUT MATCHES
+        "clang-format version ${BYCORF_CLANG_FORMAT_VERSION_REGEX}([^0-9.]|$)")
+    unset(BYCORF_CLANG_FORMAT CACHE)
+    set(BYCORF_CLANG_FORMAT "")
   endif()
 endif()
-file(GLOB_RECURSE CELER_FORMAT_FILES CONFIGURE_DEPENDS
+file(GLOB_RECURSE BYCORF_FORMAT_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c
   ${CMAKE_CURRENT_SOURCE_DIR}/example/*.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/celer/*.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/bycorf/*.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h
   ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp
 )
-list(FILTER CELER_FORMAT_FILES EXCLUDE REGEX "/runtime/concurrentqueue\\.h$")
-if (CELER_CLANG_FORMAT)
-  add_custom_target(celer-format
-    COMMAND ${CELER_CLANG_FORMAT} -i ${CELER_FORMAT_FILES}
-    COMMENT "Formatting celer sources"
+list(FILTER BYCORF_FORMAT_FILES EXCLUDE REGEX "/runtime/concurrentqueue\\.h$")
+if (BYCORF_CLANG_FORMAT)
+  add_custom_target(bycorf-format
+    COMMAND ${BYCORF_CLANG_FORMAT} -i ${BYCORF_FORMAT_FILES}
+    COMMENT "Formatting bycorf sources"
     VERBATIM
   )
-  add_custom_target(celer-format-check
-    COMMAND ${CELER_CLANG_FORMAT} --dry-run --Werror ${CELER_FORMAT_FILES}
-    COMMENT "Checking celer source formatting"
+  add_custom_target(bycorf-format-check
+    COMMAND ${BYCORF_CLANG_FORMAT} --dry-run --Werror ${BYCORF_FORMAT_FILES}
+    COMMENT "Checking bycorf source formatting"
     VERBATIM
   )
   if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-    add_custom_target(format DEPENDS celer-format)
-    add_custom_target(format-check DEPENDS celer-format-check)
+    add_custom_target(format DEPENDS bycorf-format)
+    add_custom_target(format-check DEPENDS bycorf-format-check)
   endif()
 else()
   message(STATUS
-    "clang-format ${CELER_CLANG_FORMAT_REQUIRED_VERSION} not found; "
-    "celer format targets are disabled")
+    "clang-format ${BYCORF_CLANG_FORMAT_REQUIRED_VERSION} not found; "
+    "bycorf format targets are disabled")
 endif()
 
 set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(CELER_ABSEIL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/abseil")
-if (NOT EXISTS "${CELER_ABSEIL_SOURCE_DIR}/CMakeLists.txt")
+set(BYCORF_ABSEIL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/abseil")
+if (NOT EXISTS "${BYCORF_ABSEIL_SOURCE_DIR}/CMakeLists.txt")
   message(FATAL_ERROR
     "Abseil submodule not found; run git submodule update --init --recursive")
 endif()
 if (NOT TARGET absl::base)
   add_subdirectory(
-    "${CELER_ABSEIL_SOURCE_DIR}"
+    "${BYCORF_ABSEIL_SOURCE_DIR}"
     "${CMAKE_CURRENT_BINARY_DIR}/third_party/abseil"
     EXCLUDE_FROM_ALL
   )
 endif()
 
-set(CELER_LIBURING_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/liburing")
-if (NOT EXISTS "${CELER_LIBURING_SOURCE_DIR}/configure")
+set(BYCORF_LIBURING_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/liburing")
+if (NOT EXISTS "${BYCORF_LIBURING_SOURCE_DIR}/configure")
   message(FATAL_ERROR
     "liburing submodule not found; run git submodule update --init --recursive")
 endif()
 
 include(ExternalProject)
-find_program(CELER_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
+find_program(BYCORF_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
 
-set(CELER_LIBURING_JOBSERVER_ARGS)
+set(BYCORF_LIBURING_JOBSERVER_ARGS)
 if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.28")
-  list(APPEND CELER_LIBURING_JOBSERVER_ARGS BUILD_JOB_SERVER_AWARE TRUE)
+  list(APPEND BYCORF_LIBURING_JOBSERVER_ARGS BUILD_JOB_SERVER_AWARE TRUE)
 endif()
 
-set(CELER_LIBURING_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/liburing")
-set(CELER_LIBURING_ARCHIVE "${CELER_LIBURING_BINARY_DIR}/src/liburing.a")
+set(BYCORF_LIBURING_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/liburing")
+set(BYCORF_LIBURING_ARCHIVE "${BYCORF_LIBURING_BINARY_DIR}/src/liburing.a")
 # CMake validates imported include paths during generation, before liburing's
 # configure script has created its generated-header directory.
-file(MAKE_DIRECTORY "${CELER_LIBURING_BINARY_DIR}/src/include")
+file(MAKE_DIRECTORY "${BYCORF_LIBURING_BINARY_DIR}/src/include")
 
-ExternalProject_Add(celer_liburing_build
-  SOURCE_DIR "${CELER_LIBURING_SOURCE_DIR}"
-  BINARY_DIR "${CELER_LIBURING_BINARY_DIR}"
+ExternalProject_Add(bycorf_liburing_build
+  SOURCE_DIR "${BYCORF_LIBURING_SOURCE_DIR}"
+  BINARY_DIR "${BYCORF_LIBURING_BINARY_DIR}"
   DOWNLOAD_COMMAND ""
   UPDATE_COMMAND ""
   PATCH_COMMAND ""
   CONFIGURE_COMMAND
-    "${CELER_LIBURING_SOURCE_DIR}/configure"
+    "${BYCORF_LIBURING_SOURCE_DIR}/configure"
       "--cc=${CMAKE_C_COMPILER}"
       "--cxx=${CMAKE_CXX_COMPILER}"
   BUILD_COMMAND
-    "${CELER_MAKE_EXECUTABLE}" -C "${CELER_LIBURING_BINARY_DIR}/src"
+    "${BYCORF_MAKE_EXECUTABLE}" -C "${BYCORF_LIBURING_BINARY_DIR}/src"
       liburing.a ENABLE_SHARED=0
   INSTALL_COMMAND ""
-  BUILD_BYPRODUCTS "${CELER_LIBURING_ARCHIVE}"
-  ${CELER_LIBURING_JOBSERVER_ARGS}
+  BUILD_BYPRODUCTS "${BYCORF_LIBURING_ARCHIVE}"
+  ${BYCORF_LIBURING_JOBSERVER_ARGS}
 )
 
-add_library(celer_liburing STATIC IMPORTED GLOBAL)
-set_target_properties(celer_liburing PROPERTIES
-  IMPORTED_LOCATION "${CELER_LIBURING_ARCHIVE}"
+add_library(bycorf_liburing STATIC IMPORTED GLOBAL)
+set_target_properties(bycorf_liburing PROPERTIES
+  IMPORTED_LOCATION "${BYCORF_LIBURING_ARCHIVE}"
   INTERFACE_INCLUDE_DIRECTORIES
-    "${CELER_LIBURING_BINARY_DIR}/src/include;${CELER_LIBURING_SOURCE_DIR}/src/include"
+    "${BYCORF_LIBURING_BINARY_DIR}/src/include;${BYCORF_LIBURING_SOURCE_DIR}/src/include"
 )
-add_dependencies(celer_liburing celer_liburing_build)
+add_dependencies(bycorf_liburing bycorf_liburing_build)
 
-add_library(celer
+add_library(bycorf
   src/io/io.cpp
   src/io/storage.cpp
   src/io/backend_options.cpp
@@ -171,148 +171,147 @@ add_library(celer
   src/net/tls.cpp
 )
 
-target_compile_definitions(celer PUBLIC
-  CELER_ENABLE_CROSS_CORE_LATENCY_TRACE=$<BOOL:${CELER_ENABLE_CROSS_CORE_LATENCY_TRACE}>
+target_compile_definitions(bycorf PUBLIC
+  # Public headers and consumers must agree on the backend-dependent layouts.
+  # Export one numeric switch for both capabilities, including zero when off.
+  BYCORF_KERNEL_BYPASS=$<BOOL:${BYCORF_KERNEL_BYPASS}>
+  BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE=$<BOOL:${BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE}>
 )
 
-if (CELER_KERNEL_BYPASS)
+if (BYCORF_KERNEL_BYPASS)
   include(cmake/Dpdk.cmake)
-  set(CELER_SPDK_SOURCE_DIR
+  set(BYCORF_SPDK_SOURCE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/spdk")
-  if (NOT EXISTS "${CELER_SPDK_SOURCE_DIR}/configure")
+  if (NOT EXISTS "${BYCORF_SPDK_SOURCE_DIR}/configure")
     message(FATAL_ERROR
       "SPDK submodules are missing; run git submodule update --init --recursive")
   endif()
-  find_program(CELER_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
+  find_program(BYCORF_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
   find_package(OpenSSL REQUIRED)
-  set(CELER_SPDK_CONFIGURED_DPDK "")
-  set(CELER_SPDK_CONFIGURED_LCORES "")
-  if (EXISTS "${CELER_SPDK_SOURCE_DIR}/mk/config.mk")
-    file(STRINGS "${CELER_SPDK_SOURCE_DIR}/mk/config.mk" CELER_SPDK_CONFIGURED_DPDK
+  set(BYCORF_SPDK_CONFIGURED_DPDK "")
+  set(BYCORF_SPDK_CONFIGURED_LCORES "")
+  if (EXISTS "${BYCORF_SPDK_SOURCE_DIR}/mk/config.mk")
+    file(STRINGS "${BYCORF_SPDK_SOURCE_DIR}/mk/config.mk" BYCORF_SPDK_CONFIGURED_DPDK
       REGEX "^CONFIG_DPDK_DIR")
-    string(REGEX REPLACE "^[^=]*=" "" CELER_SPDK_CONFIGURED_DPDK "${CELER_SPDK_CONFIGURED_DPDK}")
-    file(STRINGS "${CELER_SPDK_SOURCE_DIR}/mk/config.mk" CELER_SPDK_CONFIGURED_LCORES
+    string(REGEX REPLACE "^[^=]*=" "" BYCORF_SPDK_CONFIGURED_DPDK "${BYCORF_SPDK_CONFIGURED_DPDK}")
+    file(STRINGS "${BYCORF_SPDK_SOURCE_DIR}/mk/config.mk" BYCORF_SPDK_CONFIGURED_LCORES
       REGEX "^CONFIG_MAX_LCORES")
-    string(REGEX REPLACE "^[^=]*=" "" CELER_SPDK_CONFIGURED_LCORES "${CELER_SPDK_CONFIGURED_LCORES}")
+    string(REGEX REPLACE "^[^=]*=" "" BYCORF_SPDK_CONFIGURED_LCORES "${BYCORF_SPDK_CONFIGURED_LCORES}")
   endif()
   # A capacity change can rebuild DPDK at the same prefix. Reconfigure SPDK
   # too, so its own capacity and all rebuilt consumers use compatible headers.
-  if (NOT CELER_SPDK_CONFIGURED_DPDK STREQUAL CELER_DPDK_PREFIX OR
-      NOT CELER_SPDK_CONFIGURED_LCORES STREQUAL CELER_DPDK_LCORE_CAPACITY)
+  if (NOT BYCORF_SPDK_CONFIGURED_DPDK STREQUAL BYCORF_DPDK_PREFIX OR
+      NOT BYCORF_SPDK_CONFIGURED_LCORES STREQUAL BYCORF_DPDK_LCORE_CAPACITY)
     execute_process(
-      COMMAND "${CELER_SPDK_SOURCE_DIR}/configure"
+      COMMAND "${BYCORF_SPDK_SOURCE_DIR}/configure"
         --disable-tests --disable-unit-tests --disable-examples --disable-apps
         --without-crypto --without-vhost --without-virtio --without-nvme-cuse
         --without-fsdev --without-shared
-        "--max-lcores=${CELER_DPDK_LCORE_CAPACITY}"
-        "--with-dpdk=${CELER_DPDK_PREFIX}"
-      WORKING_DIRECTORY "${CELER_SPDK_SOURCE_DIR}"
-      RESULT_VARIABLE CELER_SPDK_CONFIGURE_RESULT
+        "--max-lcores=${BYCORF_DPDK_LCORE_CAPACITY}"
+        "--with-dpdk=${BYCORF_DPDK_PREFIX}"
+      WORKING_DIRECTORY "${BYCORF_SPDK_SOURCE_DIR}"
+      RESULT_VARIABLE BYCORF_SPDK_CONFIGURE_RESULT
     )
-    if (NOT CELER_SPDK_CONFIGURE_RESULT EQUAL 0)
+    if (NOT BYCORF_SPDK_CONFIGURE_RESULT EQUAL 0)
       message(FATAL_ERROR "SPDK configure failed")
     endif()
   endif()
   execute_process(
-    COMMAND "${CELER_MAKE_EXECUTABLE}" -j8
-    WORKING_DIRECTORY "${CELER_SPDK_SOURCE_DIR}"
-    RESULT_VARIABLE CELER_SPDK_BUILD_RESULT
+    COMMAND "${BYCORF_MAKE_EXECUTABLE}" -j8
+    WORKING_DIRECTORY "${BYCORF_SPDK_SOURCE_DIR}"
+    RESULT_VARIABLE BYCORF_SPDK_BUILD_RESULT
   )
-  if (NOT CELER_SPDK_BUILD_RESULT EQUAL 0)
+  if (NOT BYCORF_SPDK_BUILD_RESULT EQUAL 0)
     message(FATAL_ERROR
       "SPDK build failed; run third_party/spdk/scripts/pkgdep.sh or install its documented dependencies")
   endif()
-  set(CELER_SPDK_PKG_CONFIG_PATH
-    "${CELER_SPDK_SOURCE_DIR}/build/lib/pkgconfig:${CELER_DPDK_PREFIX}/lib/pkgconfig")
+  set(BYCORF_SPDK_PKG_CONFIG_PATH
+    "${BYCORF_SPDK_SOURCE_DIR}/build/lib/pkgconfig:${BYCORF_DPDK_PREFIX}/lib/pkgconfig")
   # DPDK's inline headers require the CPU features of its build (for example
   # SSSE3 on x86). Include paths alone are insufficient when the application
   # does not add native/aggressive optimization flags of its own.
   execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
-      "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
-      "${CELER_PKG_CONFIG_EXECUTABLE}" --cflags-only-other libdpdk
-    OUTPUT_VARIABLE CELER_DPDK_COMPILE_FLAGS_RAW OUTPUT_STRIP_TRAILING_WHITESPACE
+      "PKG_CONFIG_PATH=${BYCORF_SPDK_PKG_CONFIG_PATH}"
+      "${BYCORF_PKG_CONFIG_EXECUTABLE}" --cflags-only-other libdpdk
+    OUTPUT_VARIABLE BYCORF_DPDK_COMPILE_FLAGS_RAW OUTPUT_STRIP_TRAILING_WHITESPACE
     COMMAND_ERROR_IS_FATAL ANY
   )
-  separate_arguments(CELER_DPDK_COMPILE_FLAGS NATIVE_COMMAND
-    "${CELER_DPDK_COMPILE_FLAGS_RAW}")
-  target_compile_options(celer PRIVATE ${CELER_DPDK_COMPILE_FLAGS})
+  separate_arguments(BYCORF_DPDK_COMPILE_FLAGS NATIVE_COMMAND
+    "${BYCORF_DPDK_COMPILE_FLAGS_RAW}")
+  target_compile_options(bycorf PRIVATE ${BYCORF_DPDK_COMPILE_FLAGS})
   execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
-      "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
-      "${CELER_PKG_CONFIG_EXECUTABLE}" --libs --static
+      "PKG_CONFIG_PATH=${BYCORF_SPDK_PKG_CONFIG_PATH}"
+      "${BYCORF_PKG_CONFIG_EXECUTABLE}" --libs --static
       spdk_nvme spdk_env_dpdk
-    OUTPUT_VARIABLE CELER_SPDK_LINK_FLAGS_RAW
+    OUTPUT_VARIABLE BYCORF_SPDK_LINK_FLAGS_RAW
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE CELER_SPDK_PKG_CONFIG_RESULT
+    RESULT_VARIABLE BYCORF_SPDK_PKG_CONFIG_RESULT
   )
-  if (NOT CELER_SPDK_PKG_CONFIG_RESULT EQUAL 0)
+  if (NOT BYCORF_SPDK_PKG_CONFIG_RESULT EQUAL 0)
     message(FATAL_ERROR "pkg-config could not resolve static SPDK libraries")
   endif()
-  separate_arguments(CELER_SPDK_LINK_FLAGS NATIVE_COMMAND
-    "${CELER_SPDK_LINK_FLAGS_RAW}")
-  list(FILTER CELER_SPDK_LINK_FLAGS EXCLUDE REGEX
+  separate_arguments(BYCORF_SPDK_LINK_FLAGS NATIVE_COMMAND
+    "${BYCORF_SPDK_LINK_FLAGS_RAW}")
+  list(FILTER BYCORF_SPDK_LINK_FLAGS EXCLUDE REGEX
     "^(-pthread|-lm|-ldl|-lnuma)$")
   # SPDK's pkg-config selects only its EAL/storage dependencies, omitting
   # network PMD constructors. Replace that subset with one complete DPDK
   # archive list; linking both under whole-archive duplicates EAL symbols.
   execute_process(COMMAND "${CMAKE_COMMAND}" -E env
-    "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
-    "${CELER_PKG_CONFIG_EXECUTABLE}" --libs --static libdpdk
-    OUTPUT_VARIABLE CELER_DPDK_FLAGS_RAW OUTPUT_STRIP_TRAILING_WHITESPACE
+    "PKG_CONFIG_PATH=${BYCORF_SPDK_PKG_CONFIG_PATH}"
+    "${BYCORF_PKG_CONFIG_EXECUTABLE}" --libs --static libdpdk
+    OUTPUT_VARIABLE BYCORF_DPDK_FLAGS_RAW OUTPUT_STRIP_TRAILING_WHITESPACE
     COMMAND_ERROR_IS_FATAL ANY)
-  separate_arguments(CELER_DPDK_FLAGS NATIVE_COMMAND "${CELER_DPDK_FLAGS_RAW}")
-  list(FILTER CELER_SPDK_LINK_FLAGS EXCLUDE REGEX "^-lrte_")
-  set(CELER_DPDK_SYSTEM_FLAGS ${CELER_DPDK_FLAGS})
-  list(FILTER CELER_DPDK_FLAGS INCLUDE REGEX "^-l:librte_.*\\.a$")
-  list(FILTER CELER_DPDK_SYSTEM_FLAGS EXCLUDE REGEX "^(-l:?lib?rte_|-lrte_|-Wl,|-L)")
-  list(APPEND CELER_SPDK_LINK_FLAGS ${CELER_DPDK_FLAGS})
+  separate_arguments(BYCORF_DPDK_FLAGS NATIVE_COMMAND "${BYCORF_DPDK_FLAGS_RAW}")
+  list(FILTER BYCORF_SPDK_LINK_FLAGS EXCLUDE REGEX "^-lrte_")
+  set(BYCORF_DPDK_SYSTEM_FLAGS ${BYCORF_DPDK_FLAGS})
+  list(FILTER BYCORF_DPDK_FLAGS INCLUDE REGEX "^-l:librte_.*\\.a$")
+  list(FILTER BYCORF_DPDK_SYSTEM_FLAGS EXCLUDE REGEX "^(-l:?lib?rte_|-lrte_|-Wl,|-L)")
+  list(APPEND BYCORF_SPDK_LINK_FLAGS ${BYCORF_DPDK_FLAGS})
   # spdk_nvme/spdk_env_dpdk do not propagate the ISA-L archives from
   # spdk_syslibs.pc. They provide CRC/XOR symbols used by libspdk_util, so
   # retain the non-`-l` archive entries without pulling OpenSSL and other
   # system libraries into --whole-archive.
   execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
-      "PKG_CONFIG_PATH=${CELER_SPDK_PKG_CONFIG_PATH}"
-      "${CELER_PKG_CONFIG_EXECUTABLE}" --libs-only-other --static
+      "PKG_CONFIG_PATH=${BYCORF_SPDK_PKG_CONFIG_PATH}"
+      "${BYCORF_PKG_CONFIG_EXECUTABLE}" --libs-only-other --static
       spdk_syslibs
-    OUTPUT_VARIABLE CELER_SPDK_SYSTEM_ARCHIVES_RAW
+    OUTPUT_VARIABLE BYCORF_SPDK_SYSTEM_ARCHIVES_RAW
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE CELER_SPDK_SYSTEM_ARCHIVES_RESULT
+    RESULT_VARIABLE BYCORF_SPDK_SYSTEM_ARCHIVES_RESULT
   )
-  if (NOT CELER_SPDK_SYSTEM_ARCHIVES_RESULT EQUAL 0)
+  if (NOT BYCORF_SPDK_SYSTEM_ARCHIVES_RESULT EQUAL 0)
     message(FATAL_ERROR "pkg-config could not resolve SPDK system archives")
   endif()
-  separate_arguments(CELER_SPDK_SYSTEM_ARCHIVES NATIVE_COMMAND
-    "${CELER_SPDK_SYSTEM_ARCHIVES_RAW}")
-  list(FILTER CELER_SPDK_SYSTEM_ARCHIVES EXCLUDE REGEX "^-pthread$")
+  separate_arguments(BYCORF_SPDK_SYSTEM_ARCHIVES NATIVE_COMMAND
+    "${BYCORF_SPDK_SYSTEM_ARCHIVES_RAW}")
+  list(FILTER BYCORF_SPDK_SYSTEM_ARCHIVES EXCLUDE REGEX "^-pthread$")
   include(cmake/Freebsd.cmake)
-  target_sources(celer PRIVATE
+  target_sources(bycorf PRIVATE
     src/io/dpdk_environment.cpp src/io/spdk_storage.cpp
     src/io/dpdk_backend.cpp src/net/socket_ops.cpp)
-  # Preserve the public header feature macros for consumers. They are derived
-  # together from this option, never independent CMake configuration switches.
-  target_compile_definitions(celer PUBLIC
-    CELER_WITH_DPDK=1 CELER_WITH_SPDK_STORAGE=1)
-  target_include_directories(celer SYSTEM PUBLIC
-    "${CELER_SPDK_SOURCE_DIR}/include"
-    "${CELER_SPDK_SOURCE_DIR}/build/include"
-    "${CELER_DPDK_PREFIX}/include"
+  target_include_directories(bycorf SYSTEM PUBLIC
+    "${BYCORF_SPDK_SOURCE_DIR}/include"
+    "${BYCORF_SPDK_SOURCE_DIR}/build/include"
+    "${BYCORF_DPDK_PREFIX}/include"
   )
-  target_link_libraries(celer PUBLIC
+  target_link_libraries(bycorf PUBLIC
     # SPDK and DPDK discover transports and bus drivers through static
     # constructors.  Keep every object from these archives; otherwise the
     # linker drops the PCIe transport because no ordinary symbol references it.
     "-Wl,--whole-archive"
     "-Wl,-Bstatic"
-    ${CELER_SPDK_LINK_FLAGS}
+    ${BYCORF_SPDK_LINK_FLAGS}
     "-Wl,--no-whole-archive"
     # ISA-L exports a generic gf_mul symbol that OpenSSL also defines. Keep
     # these archives outside --whole-archive so only SPDK's referenced CRC/XOR
     # objects are selected.
-    ${CELER_SPDK_SYSTEM_ARCHIVES}
+    ${BYCORF_SPDK_SYSTEM_ARCHIVES}
     "-Wl,-Bdynamic"
-    ${CELER_DPDK_SYSTEM_FLAGS}
+    ${BYCORF_DPDK_SYSTEM_FLAGS}
     OpenSSL::SSL
     OpenSSL::Crypto
     uuid
@@ -322,96 +321,96 @@ if (CELER_KERNEL_BYPASS)
   )
 endif()
 
-add_library(celer::celer ALIAS celer)
-add_library(celer::core ALIAS celer)
-add_library(celer::io ALIAS celer)
+add_library(bycorf::bycorf ALIAS bycorf)
+add_library(bycorf::core ALIAS bycorf)
+add_library(bycorf::io ALIAS bycorf)
 
-target_include_directories(celer
+target_include_directories(bycorf
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party  # vendored header-only spdlog
 )
-target_include_directories(celer SYSTEM PUBLIC
-  ${CELER_ABSEIL_SOURCE_DIR}
+target_include_directories(bycorf SYSTEM PUBLIC
+  ${BYCORF_ABSEIL_SOURCE_DIR}
 )
 
-target_compile_features(celer PUBLIC cxx_std_23)
-target_link_libraries(celer PUBLIC
-  celer_liburing
+target_compile_features(bycorf PUBLIC cxx_std_23)
+target_link_libraries(bycorf PUBLIC
+  bycorf_liburing
   absl::base
   absl::status
   absl::statusor
 )
-target_link_libraries(celer PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(celer PRIVATE -Wall -Wextra -Wpedantic)
-  if (CELER_ENABLE_WERROR)
-    target_compile_options(celer PRIVATE -Werror)
+  target_compile_options(bycorf PRIVATE -Wall -Wextra -Wpedantic)
+  if (BYCORF_ENABLE_WERROR)
+    target_compile_options(bycorf PRIVATE -Werror)
   endif()
 endif()
 
-# Optional RPC framework (built on celer's public net primitives). Separate target
+# Optional RPC framework (built on bycorf's public net primitives). Separate target
 # so apps that don't need RPC don't link it.
-add_library(celer_rpc
+add_library(bycorf_rpc
   src/rpc/rpc.cpp
 )
-add_library(celer::rpc ALIAS celer_rpc)
-target_link_libraries(celer_rpc PUBLIC celer::core)
+add_library(bycorf::rpc ALIAS bycorf_rpc)
+target_link_libraries(bycorf_rpc PUBLIC bycorf::core)
 
-if (CELER_BUILD_EXAMPLES)
-  add_executable(celer_echo
+if (BYCORF_BUILD_EXAMPLES)
+  add_executable(bycorf_echo
     example/echo_server.cpp
   )
-  target_link_libraries(celer_echo PRIVATE celer::core)
+  target_link_libraries(bycorf_echo PRIVATE bycorf::core)
 
   add_executable(rpc_echo_server
     example/rpc_echo_server.cpp
   )
-  target_link_libraries(rpc_echo_server PRIVATE celer::rpc)
+  target_link_libraries(rpc_echo_server PRIVATE bycorf::rpc)
 
   add_executable(rpc_bench
     example/rpc_bench.cpp
   )
-  target_link_libraries(rpc_bench PRIVATE celer::rpc)
+  target_link_libraries(rpc_bench PRIVATE bycorf::rpc)
 endif()
 
-if (CELER_BUILD_EXAMPLES OR CELER_BUILD_TESTS)
-  add_executable(celer_connect_timer_check
+if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
+  add_executable(bycorf_connect_timer_check
     example/connect_timer_check.cpp
   )
-  target_link_libraries(celer_connect_timer_check PRIVATE celer::core)
+  target_link_libraries(bycorf_connect_timer_check PRIVATE bycorf::core)
 
-  add_executable(celer_connection_storage_check example/connection_storage_check.cpp)
-  target_link_libraries(celer_connection_storage_check PRIVATE celer::core)
+  add_executable(bycorf_connection_storage_check example/connection_storage_check.cpp)
+  target_link_libraries(bycorf_connection_storage_check PRIVATE bycorf::core)
 
-  add_executable(celer_backend_selection_check example/backend_selection_check.cpp)
-  target_link_libraries(celer_backend_selection_check PRIVATE celer::core)
+  add_executable(bycorf_backend_selection_check example/backend_selection_check.cpp)
+  target_link_libraries(bycorf_backend_selection_check PRIVATE bycorf::core)
 
-  add_executable(celer_backend_startup_check example/backend_startup_check.cpp)
-  target_link_libraries(celer_backend_startup_check PRIVATE celer::core)
+  add_executable(bycorf_backend_startup_check example/backend_startup_check.cpp)
+  target_link_libraries(bycorf_backend_startup_check PRIVATE bycorf::core)
 
-  if (CELER_KERNEL_BYPASS)
-    add_executable(celer_backend_worker_check example/backend_worker_check.cpp)
-    target_link_libraries(celer_backend_worker_check PRIVATE celer::core)
+  if (BYCORF_KERNEL_BYPASS)
+    add_executable(bycorf_backend_worker_check example/backend_worker_check.cpp)
+    target_link_libraries(bycorf_backend_worker_check PRIVATE bycorf::core)
 
     find_package(Threads REQUIRED)
-    add_executable(celer_freebsd_port_check tests/freebsd_port_check.cpp)
-    target_link_libraries(celer_freebsd_port_check PRIVATE
-      celer_freebsd Threads::Threads)
-    add_executable(celer_freebsd_tcp_sequence_check tests/freebsd_tcp_sequence_check.cpp)
-    target_link_libraries(celer_freebsd_tcp_sequence_check PRIVATE celer_freebsd)
+    add_executable(bycorf_freebsd_port_check tests/freebsd_port_check.cpp)
+    target_link_libraries(bycorf_freebsd_port_check PRIVATE
+      bycorf_freebsd Threads::Threads)
+    add_executable(bycorf_freebsd_tcp_sequence_check tests/freebsd_tcp_sequence_check.cpp)
+    target_link_libraries(bycorf_freebsd_tcp_sequence_check PRIVATE bycorf_freebsd)
   endif()
 endif()
 
-if (CELER_BUILD_TESTS)
+if (BYCORF_BUILD_TESTS)
   enable_testing()
-  add_test(NAME celer_connect_timer_check COMMAND celer_connect_timer_check)
-  add_test(NAME celer_connection_storage_check COMMAND celer_connection_storage_check)
-  add_test(NAME celer_backend_selection_check COMMAND celer_backend_selection_check)
-  set_tests_properties(celer_connection_storage_check celer_backend_selection_check
+  add_test(NAME bycorf_connect_timer_check COMMAND bycorf_connect_timer_check)
+  add_test(NAME bycorf_connection_storage_check COMMAND bycorf_connection_storage_check)
+  add_test(NAME bycorf_backend_selection_check COMMAND bycorf_backend_selection_check)
+  set_tests_properties(bycorf_connection_storage_check bycorf_backend_selection_check
     PROPERTIES TIMEOUT 90 LABELS "runtime;net;io_uring")
-  set_tests_properties(celer_connect_timer_check PROPERTIES
+  set_tests_properties(bycorf_connect_timer_check PROPERTIES
     TIMEOUT 90 LABELS "runtime;net;io_uring"
   )
 endif()

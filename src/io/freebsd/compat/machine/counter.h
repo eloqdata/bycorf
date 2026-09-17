@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef CELER_FREEBSD_MACHINE_COUNTER_H_
-#define CELER_FREEBSD_MACHINE_COUNTER_H_
+#ifndef BYCORF_FREEBSD_MACHINE_COUNTER_H_
+#define BYCORF_FREEBSD_MACHINE_COUNTER_H_
 #include <machine/atomic.h>
 #include <sys/pcpu.h>
 

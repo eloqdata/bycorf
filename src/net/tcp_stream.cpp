@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/net/tcp_stream.h"
+#include "bycorf/net/tcp_stream.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -29,12 +29,12 @@
 #include <utility>
 #include <vector>
 
-#include "celer/io/completion.h"
-#include "celer/net/socket_ops.h"
-#include "celer/net/tls.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/io/completion.h"
+#include "bycorf/net/socket_ops.h"
+#include "bycorf/net/tls.h"
+#include "bycorf/runtime/worker.h"
 
-namespace celer {
+namespace bycorf {
 
 namespace {
 
@@ -760,4 +760,4 @@ Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
   co_return TcpStream(registered);
 }
 
-}  // namespace celer
+}  // namespace bycorf

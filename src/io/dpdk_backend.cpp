@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/io/dpdk_backend.h"
+#include "bycorf/io/dpdk_backend.h"
 
 #include <arpa/inet.h>
 #include <poll.h>
@@ -46,18 +46,18 @@
 #include <utility>
 #include <vector>
 
-#include "celer/io/dpdk_environment.h"
-#include "celer/net/socket_ops.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/io/dpdk_environment.h"
+#include "bycorf/net/socket_ops.h"
+#include "bycorf/runtime/worker.h"
 #include "freebsd/abi.h"
 #include "freebsd_errno.h"
 
-namespace celer {
+namespace bycorf {
 namespace {
 using BsdSocket = struct ::socket;
 constexpr unsigned kBurst = 32;
 constexpr unsigned kQueueSize = 8192;
-constexpr unsigned kMaxWorkers = CELER_DPDK_MAX_WORKERS;
+constexpr unsigned kMaxWorkers = BYCORF_DPDK_MAX_WORKERS;
 static_assert(kMaxWorkers > 0 && kMaxWorkers < RTE_MAX_LCORE);
 constexpr int kFirstHandle = 0x40000000;
 // Bit 30 distinguishes BSD handles from kernel fds; the remaining positive
@@ -94,8 +94,8 @@ void Random(void* buffer, std::size_t length) {
 void Log(const char* bytes, std::size_t size) {
   std::fwrite(bytes, 1, size, stderr);
 }
-const celer_bsd_host kHost{Allocate, std::free, NowNs,     WallNs,
-                           Random,   Log,       std::abort};
+const bycorf_bsd_host kHost{Allocate, std::free, NowNs,     WallNs,
+                            Random,   Log,       std::abort};
 
 struct alignas(64) Lane {
   rte_ring* rx = nullptr;
@@ -113,7 +113,7 @@ struct Fabric {
   std::array<Lane, kMaxWorkers> lanes;
   std::uint16_t port = RTE_MAX_ETHPORTS;
   rte_mempool* pool = nullptr;
-  celer_bsd_interface interface{};
+  bycorf_bsd_interface interface{};
   bool adaptive = false, tap = false, rss_owner = false;
 } fabric;
 
@@ -228,7 +228,7 @@ class DpdkBackend::Impl {
   }
   int Own(BsdSocket* so) {
     if ((next_handle & kHandleMask) == kHandleMask) {
-      celer_bsd_close(so);
+      bycorf_bsd_close(so);
       errno = EMFILE;
       return -1;
     }
@@ -271,7 +271,7 @@ class DpdkBackend::Impl {
             ? rte_pktmbuf_read(packet, 0, length, scratch.data())
             : nullptr;
     if (bytes) {
-      celer_bsd_input(bytes, length);
+      bycorf_bsd_input(bytes, length);
       ++rx;
     } else
       ++drops;
@@ -374,7 +374,7 @@ class DpdkBackend::Impl {
     for (unsigned i = 0; i < n; ++i)
       Input(reinterpret_cast<rte_mbuf*>(items[i]));
     work |= n != 0;
-    celer_bsd_poll();
+    bycorf_bsd_poll();
     return FlushTx() || work;
   }
   void FinishRead(Connection* connection) {
@@ -393,7 +393,7 @@ class DpdkBackend::Impl {
       BsdSocket* listener = Find(request.fd);
       BsdSocket* accepted = nullptr;
       const int error =
-          listener ? BsdError(celer_bsd_accept(listener, &accepted)) : EBADF;
+          listener ? BsdError(bycorf_bsd_accept(listener, &accepted)) : EBADF;
       if (error == EAGAIN) {
         ++i;
         continue;
@@ -421,12 +421,12 @@ class DpdkBackend::Impl {
           const auto& iov = request.message->msg_iov[v];
           std::size_t part = 0;
           const auto size = std::min<std::size_t>(iov.iov_len, INT_MAX - sent);
-          error = BsdError(celer_bsd_send(so, iov.iov_base, size, &part));
+          error = BsdError(bycorf_bsd_send(so, iov.iov_base, size, &part));
           sent += part;
           if (error || part < iov.iov_len || sent >= INT_MAX) break;
         }
       } else if (so) {
-        error = BsdError(celer_bsd_send(
+        error = BsdError(bycorf_bsd_send(
             so, request.bytes.data(),
             std::min<std::size_t>(request.bytes.size(), INT_MAX), &sent));
       }
@@ -444,8 +444,8 @@ class DpdkBackend::Impl {
       std::size_t got = 0;
       const int error =
           so && !c->closing_
-              ? BsdError(celer_bsd_receive(so, c->read_buffer_.data(),
-                                           c->read_buffer_.size(), &got))
+              ? BsdError(bycorf_bsd_receive(so, c->read_buffer_.data(),
+                                            c->read_buffer_.size(), &got))
               : ECANCELED;
       if (error == EAGAIN) {
         ++i;
@@ -468,7 +468,7 @@ class DpdkBackend::Impl {
       BsdSocket* so = Find(c->file_.fd_);
       const bool cancel =
           c->peer_disconnect_poll_cancel_requested_ || c->closing_ || !so;
-      if (!cancel && !celer_bsd_disconnected(so)) {
+      if (!cancel && !bycorf_bsd_disconnected(so)) {
         ++i;
         continue;
       }
@@ -505,7 +505,7 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   if (!workers || workers > kMaxWorkers)
     return absl::InvalidArgumentError("DPDK build supports 1.." +
                                       std::to_string(kMaxWorkers) + " workers");
-  if (workers > celer_bsd_max_workers())
+  if (workers > bycorf_bsd_max_workers())
     return absl::FailedPreconditionError(
         "FreeBSD worker capacity does not match the DPDK backend; rebuild");
   auto status = EnsureDpdkEnvironment();
@@ -527,19 +527,19 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
         " remain; increase build capacity or "
         "release other EAL registrations");
   fabric.workers = workers;
-  const char* mode = std::getenv("CELER_DPDK_MODE");
+  const char* mode = std::getenv("BYCORF_DPDK_MODE");
   if (mode && std::strcmp(mode, "poll") && std::strcmp(mode, "adaptive"))
     return absl::InvalidArgumentError(
-        "CELER_DPDK_MODE must be poll or adaptive");
+        "BYCORF_DPDK_MODE must be poll or adaptive");
   fabric.adaptive = mode && std::string_view(mode) == "adaptive";
-  const char* steering = std::getenv("CELER_DPDK_RX_STEERING");
+  const char* steering = std::getenv("BYCORF_DPDK_RX_STEERING");
   if (steering && std::strcmp(steering, "hash") && std::strcmp(steering, "rss"))
     return absl::InvalidArgumentError(
-        "CELER_DPDK_RX_STEERING must be hash or rss");
+        "BYCORF_DPDK_RX_STEERING must be hash or rss");
   fabric.rss_owner = steering && std::string_view(steering) == "rss";
-  const char* address = std::getenv("CELER_DPDK_IP");
-  const char* netmask = std::getenv("CELER_DPDK_NETMASK");
-  const char* gateway = std::getenv("CELER_DPDK_GATEWAY");
+  const char* address = std::getenv("BYCORF_DPDK_IP");
+  const char* netmask = std::getenv("BYCORF_DPDK_NETMASK");
+  const char* gateway = std::getenv("BYCORF_DPDK_GATEWAY");
   if (inet_pton(AF_INET, address ? address : "198.18.0.2",
                 &fabric.interface.address) != 1 ||
       inet_pton(AF_INET, netmask ? netmask : "255.255.255.0",
@@ -561,12 +561,12 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   fabric.tap =
       info.driver_name && std::string_view(info.driver_name) == "net_tap";
   unsigned requested = workers;
-  if (const char* queues = std::getenv("CELER_DPDK_QUEUES")) {
+  if (const char* queues = std::getenv("BYCORF_DPDK_QUEUES")) {
     char* end = nullptr;
     const unsigned long value = std::strtoul(queues, &end, 10);
     if (!*queues || *end || !value || value > workers)
       return absl::InvalidArgumentError(
-          "CELER_DPDK_QUEUES must be between 1 and the worker count");
+          "BYCORF_DPDK_QUEUES must be between 1 and the worker count");
     requested = value;
   }
   fabric.queues = std::min(
@@ -612,7 +612,7 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
                           workers * (kCacheSize + kBurst) + kBurst;
   const unsigned packets = std::max(65535U, std::bit_ceil(needed + 1) - 1);
   fabric.pool =
-      rte_pktmbuf_pool_create("celer_packets", packets, kCacheSize, 0,
+      rte_pktmbuf_pool_create("bycorf_packets", packets, kCacheSize, 0,
                               RTE_MBUF_DEFAULT_BUF_SIZE, SOCKET_ID_ANY);
   if (!fabric.pool) {
     StopPort();
@@ -620,10 +620,10 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   }
   for (unsigned i = 0; i < workers; ++i) {
     fabric.lanes[i].rx =
-        rte_ring_create(("celer_rx_" + std::to_string(i)).c_str(), kQueueSize,
+        rte_ring_create(("bycorf_rx_" + std::to_string(i)).c_str(), kQueueSize,
                         SOCKET_ID_ANY, RING_F_SC_DEQ);
     fabric.lanes[i].tx =
-        rte_ring_create(("celer_tx_" + std::to_string(i)).c_str(), kQueueSize,
+        rte_ring_create(("bycorf_tx_" + std::to_string(i)).c_str(), kQueueSize,
                         SOCKET_ID_ANY, RING_F_SC_DEQ);
     if (!fabric.lanes[i].rx || !fabric.lanes[i].tx) {
       StopPort();
@@ -708,7 +708,7 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
   const unsigned id = impl_->id;
   int error = 0;
   if (id == 0 && fabric.failure.ok()) {
-    error = celer_bsd_initialize(&kHost, fabric.workers);
+    error = bycorf_bsd_initialize(&kHost, fabric.workers);
     fabric.bsd_ready = error == 0;
     if (error)
       fabric.failure = DeviceError("FreeBSD initialization", BsdError(error));
@@ -716,13 +716,13 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
   } else if (id != 0) {
     fabric.attached.wait(
         lock, [] { return fabric.bsd_ready || !fabric.failure.ok(); });
-    if (fabric.failure.ok()) error = celer_bsd_attach_worker(id);
+    if (fabric.failure.ok()) error = bycorf_bsd_attach_worker(id);
   }
   if (!error && fabric.failure.ok()) {
     auto config = fabric.interface;
     config.transmit = Impl::Transmit;
     config.context = impl_.get();
-    error = celer_bsd_attach_interface(&config);
+    error = bycorf_bsd_attach_interface(&config);
   }
   if (error)
     fabric.failure = DeviceError("FreeBSD worker setup", BsdError(error));
@@ -757,7 +757,7 @@ void DpdkBackend::Shutdown() {
   if (current_ != impl_.get())
     std::abort();  // Runtime tears down on the owning thread.
   fabric.lanes[impl_->id].parked.store(false, std::memory_order_release);
-  for (auto [handle, so] : impl_->sockets) celer_bsd_close(so);
+  for (auto [handle, so] : impl_->sockets) bycorf_bsd_close(so);
   impl_->sockets.clear();
   impl_->SocketCompletions();
   impl_->FlushTx();
@@ -826,7 +826,7 @@ bool DpdkBackend::Wait(int timeout_ms) {
     if (!submitted.ok())
       ok = false;
     else {
-      const auto now = NowNs(), deadline = celer_bsd_deadline_ns();
+      const auto now = NowNs(), deadline = bycorf_bsd_deadline_ns();
       if (deadline != UINT64_MAX) {
         const auto delay = deadline <= now
                                ? 0
@@ -942,7 +942,7 @@ int DpdkBackend::Listen(const sockaddr* address, socklen_t length,
   }
   const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(address);
   BsdSocket* listener = nullptr;
-  const int error = BsdError(celer_bsd_listen(
+  const int error = BsdError(bycorf_bsd_listen(
       ipv4->sin_addr.s_addr, ntohs(ipv4->sin_port), backlog, &listener));
   if (error) {
     errno = error;
@@ -961,7 +961,7 @@ int DpdkBackend::Close(int handle) noexcept {
     return -1;
   }
   current_->sockets.erase(handle);
-  const int error = BsdError(celer_bsd_close(so));
+  const int error = BsdError(bycorf_bsd_close(so));
   if (error) {
     errno = error;
     return -1;
@@ -982,7 +982,8 @@ int DpdkBackend::PeerName(int handle, sockaddr* address,
   sockaddr_in value{};
   value.sin_family = AF_INET;
   std::uint16_t port;
-  const int error = BsdError(celer_bsd_peer(so, &value.sin_addr.s_addr, &port));
+  const int error =
+      BsdError(bycorf_bsd_peer(so, &value.sin_addr.s_addr, &port));
   if (error) {
     errno = error;
     return -1;
@@ -992,4 +993,4 @@ int DpdkBackend::PeerName(int handle, sockaddr* address,
   *length = sizeof(value);
   return 0;
 }
-}  // namespace celer
+}  // namespace bycorf

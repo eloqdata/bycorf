@@ -29,34 +29,34 @@ static uint64_t boot_ns;
 static _Thread_local struct callout_tailq pending;
 
 static sbintime_t uptime_sbt(void) {
-  uint64_t ns = celer_bsd_host.monotonic_ns() - boot_ns + 1000000000;
+  uint64_t ns = bycorf_bsd_host.monotonic_ns() - boot_ns + 1000000000;
   return (ns / 1000000000) * SBT_1S + (ns % 1000000000) * SBT_1S / 1000000000;
 }
 
-void celer_bsd_clock_update(void) {
-  if (!boot_ns) boot_ns = celer_bsd_host.monotonic_ns();
+void bycorf_bsd_clock_update(void) {
+  if (!boot_ns) boot_ns = bycorf_bsd_host.monotonic_ns();
   // Each VNET uses its owner's snapshot of the same process clock. Worker 0
   // may be asleep while another worker processes a retransmission timer.
-  uint64_t ns = celer_bsd_host.monotonic_ns() - boot_ns + 1000000000;
+  uint64_t ns = bycorf_bsd_host.monotonic_ns() - boot_ns + 1000000000;
   ticks = ns / 1000000;
   time_uptime = ns / 1000000000;
-  time_second = celer_bsd_host.realtime_ns() / 1000000000;
+  time_second = bycorf_bsd_host.realtime_ns() / 1000000000;
 }
 
 void getbinuptime(struct bintime* bt) {
-  uint64_t ns = celer_bsd_host.monotonic_ns() - boot_ns + 1000000000;
+  uint64_t ns = bycorf_bsd_host.monotonic_ns() - boot_ns + 1000000000;
   bt->sec = ns / 1000000000;
   bt->frac = (uint64_t)(((__uint128_t)(ns % 1000000000) << 64) / 1000000000);
 }
 void binuptime(struct bintime* bt) { getbinuptime(bt); }
 void bintime(struct bintime* bt) {
-  uint64_t ns = celer_bsd_host.realtime_ns();
+  uint64_t ns = bycorf_bsd_host.realtime_ns();
   bt->sec = ns / 1000000000;
   bt->frac = (uint64_t)(((__uint128_t)(ns % 1000000000) << 64) / 1000000000);
 }
 void getboottimebin(struct bintime* bt) {
-  uint64_t ns =
-      celer_bsd_host.realtime_ns() - (celer_bsd_host.monotonic_ns() - boot_ns);
+  uint64_t ns = bycorf_bsd_host.realtime_ns() -
+                (bycorf_bsd_host.monotonic_ns() - boot_ns);
   bt->sec = ns / 1000000000;
   bt->frac = (uint64_t)(((__uint128_t)(ns % 1000000000) << 64) / 1000000000);
 }
@@ -138,7 +138,7 @@ int callout_schedule(struct callout* c, int n) {
   return callout_reset_sbt_on(c, tick_sbt * n, 0, c->c_func, c->c_arg, -1,
                               C_HARDCLOCK);
 }
-void celer_bsd_callout_poll(void) {
+void bycorf_bsd_callout_poll(void) {
   if (!pending.tqh_last) return;
   const sbintime_t now = uptime_sbt();
   // Bound timer work so a burst of expirations cannot monopolize the worker.
@@ -151,18 +151,18 @@ void celer_bsd_callout_poll(void) {
     const bool unlock = !(c->c_flags & CALLOUT_RETURNUNLOCKED);
     void (*fn)(void*) = c->c_func;
     void* arg = c->c_arg;
-    celer_bsd_lock(lock);
+    bycorf_bsd_lock(lock);
     fn(arg);
     // The callback may have freed its enclosing object; do not read c again.
-    if (unlock) celer_bsd_unlock(lock);
+    if (unlock) bycorf_bsd_unlock(lock);
   }
 }
-uint64_t celer_bsd_deadline_ns(void) {
-  if (celer_bsd_tasks_pending()) return celer_bsd_host.monotonic_ns();
+uint64_t bycorf_bsd_deadline_ns(void) {
+  if (bycorf_bsd_tasks_pending()) return bycorf_bsd_host.monotonic_ns();
   struct callout* c = TAILQ_FIRST(&pending);
   if (!c) return UINT64_MAX;
   sbintime_t delta = c->c_time - uptime_sbt();
-  if (delta <= 0) return celer_bsd_host.monotonic_ns();
-  return celer_bsd_host.monotonic_ns() +
+  if (delta <= 0) return bycorf_bsd_host.monotonic_ns();
+  return bycorf_bsd_host.monotonic_ns() +
          (uint64_t)(((__uint128_t)delta * 1000000000 + SBT_1S - 1) / SBT_1S);
 }

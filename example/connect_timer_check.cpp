@@ -15,10 +15,10 @@
  */
 
 // Verification harness for the NuRaft-adapter prerequisite primitives:
-//   - celer::ConnectTcp        (IORING_OP_CONNECT + deadline + loser cancel)
-//   - celer::CancellableSleepFor (one-shot timer with a thread-safe cancel)
-//   - celer::Runtime           (stop requests racing worker startup)
-// Runs every check on one celer worker and exits non-zero on any failure.
+//   - bycorf::ConnectTcp        (IORING_OP_CONNECT + deadline + loser cancel)
+//   - bycorf::CancellableSleepFor (one-shot timer with a thread-safe cancel)
+//   - bycorf::Runtime           (stop requests racing worker startup)
+// Runs every check on one bycorf worker and exits non-zero on any failure.
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -34,11 +34,11 @@
 #include <thread>
 
 #include "absl/status/status.h"
-#include "celer/io/storage.h"
-#include "celer/net/tcp_listener.h"
-#include "celer/net/tcp_stream.h"
-#include "celer/runtime/runtime.h"
-#include "celer/runtime/worker.h"
+#include "bycorf/io/storage.h"
+#include "bycorf/net/tcp_listener.h"
+#include "bycorf/net/tcp_stream.h"
+#include "bycorf/runtime/runtime.h"
+#include "bycorf/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
 namespace {
@@ -57,21 +57,21 @@ void Check(bool condition, std::string_view name) {
 }
 
 void CheckStopDuringStartup(bool before_init) {
-  celer::Runtime runtime;
+  bycorf::Runtime runtime;
   std::promise<absl::Status> parked;
   auto ready = parked.get_future();
   std::promise<void> release;
   auto resume = release.get_future();
   runtime.Start(
       1,
-      [&](unsigned, celer::Worker& worker) {
+      [&](unsigned, bycorf::Worker& worker) {
         // Hold startup at a known boundary so RequestStop wins the race on
         // every run, including hosts that normally schedule the worker first.
         if (before_init) {
           parked.set_value(absl::OkStatus());
           resume.wait();
         }
-        celer::WorkerOptions options;
+        bycorf::WorkerOptions options;
         options.recv_buffer_count_ = 64;
         const auto status = worker.Init(options);
         if (!before_init) {
@@ -102,16 +102,16 @@ std::int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
 
 // Cancels `handle` after `delay`; runs on the worker, so Cancel takes the
 // prompt io_uring_prep_cancel path.
-celer::Task<absl::Status> CancelAfterOnWorker(celer::Worker& worker,
-                                              celer::TimerCancelHandle handle,
-                                              std::chrono::nanoseconds delay) {
-  (void)co_await celer::SleepFor(worker, delay);
+bycorf::Task<absl::Status> CancelAfterOnWorker(bycorf::Worker& worker,
+                                               bycorf::TimerCancelHandle handle,
+                                               std::chrono::nanoseconds delay) {
+  (void)co_await bycorf::SleepFor(worker, delay);
   handle.Cancel();
   co_return absl::OkStatus();
 }
 
-celer::Task<absl::Status> CheckTimerFire(celer::Worker& worker) {
-  auto timer = celer::CancellableSleepFor(worker, 100ms);
+bycorf::Task<absl::Status> CheckTimerFire(bycorf::Worker& worker) {
+  auto timer = bycorf::CancellableSleepFor(worker, 100ms);
   const auto started = std::chrono::steady_clock::now();
   const absl::Status fired = co_await timer;
   Check(fired.ok(), "timer fires with OkStatus");
@@ -119,9 +119,9 @@ celer::Task<absl::Status> CheckTimerFire(celer::Worker& worker) {
   co_return absl::OkStatus();
 }
 
-celer::Task<absl::Status> CheckTimerCancelOnWorker(celer::Worker& worker) {
-  auto timer = celer::CancellableSleepFor(worker, 5s);
-  celer::TimerCancelHandle handle = timer.CancelHandle();
+bycorf::Task<absl::Status> CheckTimerCancelOnWorker(bycorf::Worker& worker) {
+  auto timer = bycorf::CancellableSleepFor(worker, 5s);
+  bycorf::TimerCancelHandle handle = timer.CancelHandle();
   worker.Spawn(CancelAfterOnWorker(worker, handle, 50ms));
   const auto started = std::chrono::steady_clock::now();
   const absl::Status fired = co_await timer;
@@ -133,9 +133,10 @@ celer::Task<absl::Status> CheckTimerCancelOnWorker(celer::Worker& worker) {
   co_return absl::OkStatus();
 }
 
-celer::Task<absl::Status> CheckTimerCancelForeignThread(celer::Worker& worker) {
-  auto timer = celer::CancellableSleepFor(worker, 800ms);
-  celer::TimerCancelHandle handle = timer.CancelHandle();
+bycorf::Task<absl::Status> CheckTimerCancelForeignThread(
+    bycorf::Worker& worker) {
+  auto timer = bycorf::CancellableSleepFor(worker, 800ms);
+  bycorf::TimerCancelHandle handle = timer.CancelHandle();
   // NuRaft cancels from its own internal threads: the ring is single-issuer,
   // so only the flag is set and the late fire must resolve as a no-op
   // kCancelled at the original deadline.
@@ -153,22 +154,22 @@ celer::Task<absl::Status> CheckTimerCancelForeignThread(celer::Worker& worker) {
   co_return absl::OkStatus();
 }
 
-celer::Task<absl::Status> CheckTimerCancelAfterFire(celer::Worker& worker) {
-  auto timer = celer::CancellableSleepFor(worker, 30ms);
-  celer::TimerCancelHandle handle = timer.CancelHandle();
+bycorf::Task<absl::Status> CheckTimerCancelAfterFire(bycorf::Worker& worker) {
+  auto timer = bycorf::CancellableSleepFor(worker, 30ms);
+  bycorf::TimerCancelHandle handle = timer.CancelHandle();
   const absl::Status fired = co_await timer;
   Check(fired.ok(), "timer fires before the cancel");
   // Cancel-after-fire and double cancel are safe no-ops on live shared state.
   handle.Cancel();
   handle.Cancel();
-  celer::TimerCancelHandle empty;
+  bycorf::TimerCancelHandle empty;
   empty.Cancel();
   Check(true, "cancel-after-fire and double cancel are safe");
   co_return absl::OkStatus();
 }
 
-celer::Task<absl::Status> CheckTimerCancelBeforeAwait(celer::Worker& worker) {
-  auto timer = celer::CancellableSleepFor(worker, 5s);
+bycorf::Task<absl::Status> CheckTimerCancelBeforeAwait(bycorf::Worker& worker) {
+  auto timer = bycorf::CancellableSleepFor(worker, 5s);
   timer.CancelHandle().Cancel();
   const auto started = std::chrono::steady_clock::now();
   const absl::Status fired = co_await timer;
@@ -178,7 +179,7 @@ celer::Task<absl::Status> CheckTimerCancelBeforeAwait(celer::Worker& worker) {
   co_return absl::OkStatus();
 }
 
-absl::StatusOr<std::uint16_t> BoundPort(const celer::TcpListener& listener) {
+absl::StatusOr<std::uint16_t> BoundPort(const bycorf::TcpListener& listener) {
   sockaddr_in address{};
   socklen_t length = sizeof(address);
   if (::getsockname(listener.NativeFd(), reinterpret_cast<sockaddr*>(&address),
@@ -191,8 +192,8 @@ absl::StatusOr<std::uint16_t> BoundPort(const celer::TcpListener& listener) {
 // Connect success against a local listener, including an echo round trip to
 // prove the registered Connection works, and cancellation of the pending
 // deadline (a stray timeout firing later would close or corrupt the stream).
-celer::Task<absl::Status> CheckConnectSuccess(celer::Worker& worker) {
-  celer::TcpListener listener;
+bycorf::Task<absl::Status> CheckConnectSuccess(bycorf::Worker& worker) {
+  bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
     Check(false, "connect-success: listener bind");
@@ -204,7 +205,7 @@ celer::Task<absl::Status> CheckConnectSuccess(celer::Worker& worker) {
     co_return port.status();
   }
 
-  auto client = co_await celer::ConnectTcp(worker, "127.0.0.1", *port, 2s);
+  auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 2s);
   Check(client.ok(), "connect-success: ConnectTcp to local listener");
   if (!client.ok()) {
     co_return client.status();
@@ -214,7 +215,7 @@ celer::Task<absl::Status> CheckConnectSuccess(celer::Worker& worker) {
   if (!accepted.ok()) {
     co_return accepted.status();
   }
-  celer::TcpStream server(*accepted);
+  bycorf::TcpStream server(*accepted);
 
   constexpr std::string_view kPing = "ping";
   absl::Status written = co_await client->WriteAll(std::span<const std::byte>(
@@ -249,8 +250,8 @@ celer::Task<absl::Status> CheckConnectSuccess(celer::Worker& worker) {
 // ECONNREFUSED: deterministic immediate failure — bind an ephemeral port,
 // close the listener, then connect to it. Verifies failure cleanup (fd
 // closed, both CQEs consumed, error mapped).
-celer::Task<absl::Status> CheckConnectRefused(celer::Worker& worker) {
-  celer::TcpListener listener;
+bycorf::Task<absl::Status> CheckConnectRefused(bycorf::Worker& worker) {
+  bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
     Check(false, "connect-refused: listener bind");
@@ -263,7 +264,7 @@ celer::Task<absl::Status> CheckConnectRefused(celer::Worker& worker) {
     co_return port.status();
   }
   const auto started = std::chrono::steady_clock::now();
-  auto client = co_await celer::ConnectTcp(worker, "127.0.0.1", *port, 5s);
+  auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 5s);
   Check(
       !client.ok() && client.status().code() == absl::StatusCode::kUnavailable,
       "connect-refused: ECONNREFUSED maps to kUnavailable");
@@ -274,10 +275,10 @@ celer::Task<absl::Status> CheckConnectRefused(celer::Worker& worker) {
 // Deadline path: 10.255.255.1 is unreachable-but-routable here (default route
 // exists, nobody answers), so the connect hangs until the 300ms deadline wins
 // and cancels it.
-celer::Task<absl::Status> CheckConnectTimeout(celer::Worker& worker) {
+bycorf::Task<absl::Status> CheckConnectTimeout(bycorf::Worker& worker) {
   const auto started = std::chrono::steady_clock::now();
   auto client =
-      co_await celer::ConnectTcp(worker, "10.255.255.1", 17699, 300ms);
+      co_await bycorf::ConnectTcp(worker, "10.255.255.1", 17699, 300ms);
   const std::int64_t elapsed = ElapsedMs(started);
   if (!client.ok() &&
       client.status().code() == absl::StatusCode::kUnavailable) {
@@ -298,8 +299,8 @@ celer::Task<absl::Status> CheckConnectTimeout(celer::Worker& worker) {
   co_return absl::OkStatus();
 }
 
-celer::Task<absl::Status> CheckConnectRejectsHostname(celer::Worker& worker) {
-  auto client = co_await celer::ConnectTcp(worker, "localhost", 17699, 100ms);
+bycorf::Task<absl::Status> CheckConnectRejectsHostname(bycorf::Worker& worker) {
+  auto client = co_await bycorf::ConnectTcp(worker, "localhost", 17699, 100ms);
   Check(!client.ok() &&
             client.status().code() == absl::StatusCode::kInvalidArgument,
         "connect: non-numeric host is rejected without DNS");
@@ -314,9 +315,9 @@ celer::Task<absl::Status> CheckConnectRejectsHostname(celer::Worker& worker) {
 // trailing sleep then keeps the worker alive past every armed deadline. A
 // stale dispatch crashes here (garbage vtable); the fixed code leaves nothing
 // pending and the sleep is silent.
-celer::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
-    celer::Worker& worker) {
-  celer::TcpListener listener;
+bycorf::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
+    bycorf::Worker& worker) {
+  bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
     Check(false, "deadline-retired(fail): listener bind");
@@ -332,7 +333,7 @@ celer::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
   constexpr int kAttempts = 64;
   const auto started = std::chrono::steady_clock::now();
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
-    auto client = co_await celer::ConnectTcp(worker, "127.0.0.1", *port, 1s);
+    auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 1s);
     if (client.ok() ||
         client.status().code() != absl::StatusCode::kUnavailable) {
       Check(false,
@@ -343,7 +344,7 @@ celer::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
   }
   Check(ElapsedMs(started) < 2000,
         "deadline-retired(fail): refused loop stays fast");
-  (void)co_await celer::SleepFor(worker, 1500ms);
+  (void)co_await bycorf::SleepFor(worker, 1500ms);
   Check(true,
         "deadline-retired(fail): no late timeout dispatch after teardown");
   co_return absl::OkStatus();
@@ -352,9 +353,9 @@ celer::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
 // Success twin of the check above: the connect wins instantly against a live
 // listener, so the loser-cancel must pull the 1s deadline off the ring before
 // the frame is destroyed.
-celer::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
-    celer::Worker& worker) {
-  celer::TcpListener listener;
+bycorf::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
+    bycorf::Worker& worker) {
+  bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
     Check(false, "deadline-retired(ok): listener bind");
@@ -371,7 +372,7 @@ celer::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
     // The kernel completes the handshake against the listen backlog; no
     // userspace accept is needed for the connect to win instantly.
-    auto client = co_await celer::ConnectTcp(worker, "127.0.0.1", *port, 1s);
+    auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 1s);
     if (!client.ok()) {
       Check(false, "deadline-retired(ok): connect succeeds");
       co_return client.status();
@@ -380,7 +381,7 @@ celer::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
   }
   Check(ElapsedMs(started) < 2000,
         "deadline-retired(ok): connect loop stays fast");
-  (void)co_await celer::SleepFor(worker, 1500ms);
+  (void)co_await bycorf::SleepFor(worker, 1500ms);
   Check(true, "deadline-retired(ok): no late timeout dispatch after teardown");
 
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
@@ -389,14 +390,14 @@ celer::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
       Check(false, "deadline-retired(ok): drain accepted sockets");
       break;
     }
-    celer::TcpStream server(*accepted);
+    bycorf::TcpStream server(*accepted);
     server.Close().IgnoreError();
   }
   listener.Close().IgnoreError();
   co_return absl::OkStatus();
 }
 
-celer::Task<absl::Status> RunAllChecks(celer::Worker& worker) {
+bycorf::Task<absl::Status> RunAllChecks(bycorf::Worker& worker) {
   co_await CheckTimerFire(worker);
   co_await CheckTimerCancelOnWorker(worker);
   co_await CheckTimerCancelForeignThread(worker);
@@ -418,11 +419,11 @@ celer::Task<absl::Status> RunAllChecks(celer::Worker& worker) {
 int main() {
   CheckStopDuringStartup(/*before_init=*/true);
   CheckStopDuringStartup(/*before_init=*/false);
-  celer::Runtime runtime;
+  bycorf::Runtime runtime;
   runtime.Start(
       1,
-      [](unsigned, celer::Worker& worker) -> int {
-        celer::WorkerOptions options;
+      [](unsigned, bycorf::Worker& worker) -> int {
+        bycorf::WorkerOptions options;
         options.recv_buffer_count_ = 64;
         if (!worker.Init(options).ok()) {
           return 1;

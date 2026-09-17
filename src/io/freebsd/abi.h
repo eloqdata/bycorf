@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef CELER_FREEBSD_ABI_H_
-#define CELER_FREEBSD_ABI_H_
+#ifndef BYCORF_FREEBSD_ABI_H_
+#define BYCORF_FREEBSD_ABI_H_
 
 #ifdef _KERNEL
 #include <sys/types.h>
@@ -32,7 +32,7 @@ extern "C" {
 // Callbacks stay alive until all worker stacks have stopped. Packet callbacks
 // must copy/retain bytes before returning: FreeBSD reclaims their mbuf
 // afterward.
-struct celer_bsd_host {
+struct bycorf_bsd_host {
   void* (*allocate)(size_t size, size_t alignment);
   void (*release)(void* pointer);
   uint64_t (*monotonic_ns)(void);
@@ -42,7 +42,7 @@ struct celer_bsd_host {
   void (*abort_process)(void);
 };
 
-struct celer_bsd_interface {
+struct bycorf_bsd_interface {
   uint32_t address;
   uint32_t netmask;
   uint32_t gateway;
@@ -55,27 +55,27 @@ struct celer_bsd_interface {
 // Initialize process-wide kernel services on worker 0 before other workers
 // attach. Each API below must run on the thread that owns its stack/socket.
 // Capacity may be queried before initialization, without a worker context.
-unsigned celer_bsd_max_workers(void);
-int celer_bsd_initialize(const struct celer_bsd_host* host, unsigned workers);
-int celer_bsd_attach_worker(unsigned worker);
-int celer_bsd_attach_interface(const struct celer_bsd_interface* config);
-void celer_bsd_input(const void* bytes, size_t length);
-void celer_bsd_poll(void);
-uint64_t celer_bsd_deadline_ns(void);
+unsigned bycorf_bsd_max_workers(void);
+int bycorf_bsd_initialize(const struct bycorf_bsd_host* host, unsigned workers);
+int bycorf_bsd_attach_worker(unsigned worker);
+int bycorf_bsd_attach_interface(const struct bycorf_bsd_interface* config);
+void bycorf_bsd_input(const void* bytes, size_t length);
+void bycorf_bsd_poll(void);
+uint64_t bycorf_bsd_deadline_ns(void);
 
 // Socket pointers are opaque user-stack handles, never Linux file descriptors.
 // Errors are positive FreeBSD errno values; the host adapter translates them.
 struct socket;
-int celer_bsd_listen(uint32_t address, uint16_t port, int backlog,
-                     struct socket** result);
-int celer_bsd_accept(struct socket* listener, struct socket** result);
-int celer_bsd_receive(struct socket* socket, void* buffer, size_t size,
-                      size_t* received);
-int celer_bsd_send(struct socket* socket, const void* buffer, size_t size,
-                   size_t* sent);
-int celer_bsd_close(struct socket* socket);
-int celer_bsd_peer(struct socket* socket, uint32_t* address, uint16_t* port);
-int celer_bsd_disconnected(struct socket* socket);
+int bycorf_bsd_listen(uint32_t address, uint16_t port, int backlog,
+                      struct socket** result);
+int bycorf_bsd_accept(struct socket* listener, struct socket** result);
+int bycorf_bsd_receive(struct socket* socket, void* buffer, size_t size,
+                       size_t* received);
+int bycorf_bsd_send(struct socket* socket, const void* buffer, size_t size,
+                    size_t* sent);
+int bycorf_bsd_close(struct socket* socket);
+int bycorf_bsd_peer(struct socket* socket, uint32_t* address, uint16_t* port);
+int bycorf_bsd_disconnected(struct socket* socket);
 
 #ifdef __cplusplus
 }

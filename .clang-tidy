@@ -15,7 +15,7 @@
 ---
 Checks: '-*,readability-identifier-naming'
 WarningsAsErrors: 'readability-identifier-naming'
-HeaderFilterRegex: '(^|.*/)(src|example)/.*|(^|.*/)include/celer/(io|net|rpc)/.*|(^|.*/)include/celer/runtime/(coroutine_frame_pool|cross_core|runtime|sync|task|worker)\.h'
+HeaderFilterRegex: '(^|.*/)(src|example)/.*|(^|.*/)include/bycorf/(io|net|rpc)/.*|(^|.*/)include/bycorf/runtime/(coroutine_frame_pool|cross_core|runtime|sync|task|worker)\.h'
 CheckOptions:
   readability-identifier-naming.AggressiveDependentMemberLookup: true
   readability-identifier-naming.PrivateMemberSuffix: '_'

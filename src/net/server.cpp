@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
-#include "celer/net/server.h"
+#include "bycorf/net/server.h"
 
 #include <exception>
 #include <thread>
 
 #include "spdlog/spdlog.h"
 
-namespace celer {
+namespace bycorf {
 
 Server::~Server() {
   RequestStop();
@@ -117,7 +117,7 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   auto init_status = worker.Init(worker_options);
   if (!init_status.ok()) [[unlikely]] {
     spdlog::error("worker[{}] init failed: {}", index, init_status.message());
-#ifdef CELER_WITH_DPDK
+#if BYCORF_KERNEL_BYPASS
     if (DpdkNetworkEnabled()) DpdkBackend::AbortStartup(init_status);
 #endif
     // Failed workers own no coroutine frames, but must still participate in
@@ -175,4 +175,4 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   return 0;
 }
 
-}  // namespace celer
+}  // namespace bycorf

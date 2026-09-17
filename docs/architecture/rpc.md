@@ -16,11 +16,11 @@ limitations under the License.
 
 # RPC
 
-The `celer::rpc` target provides the repository's RPC client/server layer above
-Celer's TCP streams. It owns framing, request dispatch, and reply correlation;
+The `bycorf::rpc` target provides the repository's RPC client/server layer above
+Bycorf's TCP streams. It owns framing, request dispatch, and reply correlation;
 it relies on the runtime and networking modules for scheduling, connection
 lifetime, and transport completion. Applications that only need raw streams or
 a different wire protocol link the core target without RPC.
 
-Sources: `include/celer/rpc/`, `src/rpc/rpc.cpp`,
+Sources: `include/bycorf/rpc/`, `src/rpc/rpc.cpp`,
 `example/rpc_echo_server.cpp`, `example/rpc_bench.cpp`.

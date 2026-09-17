@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/io/dpdk_environment.h"
+#include "bycorf/io/dpdk_environment.h"
 
 #include <pthread.h>
 #include <sched.h>
@@ -26,9 +26,9 @@
 #include <sstream>
 #include <string>
 
-#include "celer/io/backend_options.h"
+#include "bycorf/io/backend_options.h"
 
-namespace celer {
+namespace bycorf {
 absl::Status EnsureDpdkEnvironment() {
   FreezeIoBackends();
   if (!DpdkNetworkEnabled() && !SpdkStorageEnabled())
@@ -45,26 +45,26 @@ absl::Status EnsureDpdkEnvironment() {
     }
     unsigned cpu = 0;
     while (cpu < CPU_SETSIZE && !CPU_ISSET(cpu, &original)) ++cpu;
-    // EAL lcore 0 is only its control context. Existing Celer worker threads
+    // EAL lcore 0 is only its control context. Existing Bycorf worker threads
     // register themselves later; EAL never launches an RX polling worker.
     const std::string mapping = "0@" + std::to_string(cpu);
     spdk_env_opts options{};
     options.opts_size = sizeof(options);
     spdk_env_opts_init(&options);
-    options.name = "celer";
+    options.name = "bycorf";
     options.core_mask = nullptr;
     options.lcore_map = mapping.c_str();
     options.unlink_hugepage = true;
     std::string extra;
-    if (const char* args = std::getenv("CELER_EAL_ARGS")) extra = args;
-#ifdef CELER_WITH_DPDK
+    if (const char* args = std::getenv("BYCORF_EAL_ARGS")) extra = args;
+#if BYCORF_KERNEL_BYPASS
     // Virtual-device testing is the explicit default. A physical-device run
-    // supplies CELER_EAL_ARGS with its allowlist and hugepage configuration.
+    // supplies BYCORF_EAL_ARGS with its allowlist and hugepage configuration.
     if (DpdkNetworkEnabled() && extra.empty()) {
       options.no_huge = true;
       options.no_pci = true;
       options.mem_size = 512;
-      extra = "--vdev=net_tap0,iface=celerdp0,mac=02:00:00:00:00:02";
+      extra = "--vdev=net_tap0,iface=bycorfdp0,mac=02:00:00:00:00:02";
     }
 #endif
     // SPDK synthesizes some EAL flags from its options, including --no-huge
@@ -95,12 +95,12 @@ absl::Status EnsureDpdkEnvironment() {
     }
     extra = std::move(forwarded);
     if (options.no_huge && options.mem_size < 0) options.mem_size = 512;
-    if (const char* memory = std::getenv("CELER_DPDK_MEMORY_MB")) {
+    if (const char* memory = std::getenv("BYCORF_DPDK_MEMORY_MB")) {
       char* end = nullptr;
       const unsigned long value = std::strtoul(memory, &end, 10);
       if (!*memory || *end || !value || value > INT_MAX) {
         result = absl::InvalidArgumentError(
-            "CELER_DPDK_MEMORY_MB must be a positive integer");
+            "BYCORF_DPDK_MEMORY_MB must be a positive integer");
         return;
       }
       options.mem_size = value;
@@ -122,4 +122,4 @@ absl::Status EnsureDpdkEnvironment() {
   });
   return result;
 }
-}  // namespace celer
+}  // namespace bycorf

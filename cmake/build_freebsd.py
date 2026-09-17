@@ -193,14 +193,14 @@ def main():
     names = []
     for line in symbols.splitlines():
         fields = line.split()
-        if len(fields) == 3 and fields[1].isupper() and not fields[2].startswith("celer_bsd_"):
+        if len(fields) == 3 and fields[1].isupper() and not fields[2].startswith("bycorf_bsd_"):
             names.append(fields[2])
     # Keep kernel malloc/free/printf and socket symbols private. Only the
-    # explicit C bridge remains visible to Celer and its other dependencies.
+    # explicit C bridge remains visible to Bycorf and its other dependencies.
     localize = output / "local-symbols.txt"
     localize.write_text("\n".join(names) + "\n")
     run([tools["objcopy"], "--localize-symbols=" + str(localize), str(combined)])
-    archive = output / "libceler_freebsd.a"
+    archive = output / "libbycorf_freebsd.a"
     archive.unlink(missing_ok=True)
     run([tools["ar"], "rcs", str(archive), str(combined)])
     print(f"Built {len(sources)} FreeBSD/port translation units for {architecture}: {archive}")

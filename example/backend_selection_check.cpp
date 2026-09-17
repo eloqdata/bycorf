@@ -18,28 +18,40 @@
 #include <cstring>
 #include <iostream>
 
-#include "celer/io/backend_options.h"
-#include "celer/io/dpdk_environment.h"
-#include "celer/io/spdk_storage.h"
+#include "bycorf/io/backend_options.h"
+#include "bycorf/io/dpdk_environment.h"
+#include "bycorf/io/spdk_storage.h"
 
 // No device access: even an all-capability binary must allocate ordinary memory
 // with the default selection, and may never change allocator identity later.
 int main() {
-  if (celer::DpdkNetworkEnabled() || celer::SpdkStorageEnabled()) return 1;
-#ifndef CELER_WITH_DPDK
-  if (celer::ConfigureIoBackends({.dpdk_network = true}).ok()) return 2;
+  if (bycorf::DpdkNetworkEnabled() || bycorf::SpdkStorageEnabled()) return 1;
+#if BYCORF_KERNEL_BYPASS
+  // Compiling both capabilities must still allow independent startup choices.
+  // Selection alone must not initialize EAL or access a device.
+  const bycorf::IoBackends supported[] = {
+      {.dpdk_network = true},
+      {.spdk_storage = true},
+      {.dpdk_network = true, .spdk_storage = true},
+  };
+  for (const auto options : supported) {
+    if (!bycorf::ConfigureIoBackends(options).ok() ||
+        bycorf::DpdkNetworkEnabled() != options.dpdk_network ||
+        bycorf::SpdkStorageEnabled() != options.spdk_storage)
+      return 9;
+  }
+#else
+  if (bycorf::ConfigureIoBackends({.dpdk_network = true}).ok()) return 2;
+  if (bycorf::ConfigureIoBackends({.spdk_storage = true}).ok()) return 3;
 #endif
-#ifndef CELER_WITH_SPDK_STORAGE
-  if (celer::ConfigureIoBackends({.spdk_storage = true}).ok()) return 3;
-#endif
-  if (!celer::ConfigureIoBackends({}).ok()) return 4;
-  void* memory = celer::AllocateStorageBuffer(4096, 4096);
+  if (!bycorf::ConfigureIoBackends({}).ok()) return 4;
+  void* memory = bycorf::AllocateStorageBuffer(4096, 4096);
   if (!memory) return 5;
   std::memset(memory, 0xa5, 4096);
-  if (celer::ConfigureIoBackends({.dpdk_network = true}).ok()) return 6;
-  if (celer::ConfigureIoBackends({.spdk_storage = true}).ok()) return 7;
-  if (!celer::ConfigureIoBackends({}).ok()) return 8;
-  celer::FreeStorageBuffer(memory, 4096);
+  if (bycorf::ConfigureIoBackends({.dpdk_network = true}).ok()) return 6;
+  if (bycorf::ConfigureIoBackends({.spdk_storage = true}).ok()) return 7;
+  if (!bycorf::ConfigureIoBackends({}).ok()) return 8;
+  bycorf::FreeStorageBuffer(memory, 4096);
   std::cout
       << "default kernel/uring; inactive DMA; immutable selection: PASS\n";
 }

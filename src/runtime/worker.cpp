@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "celer/runtime/worker.h"
+#include "bycorf/runtime/worker.h"
 
 #include <unistd.h>
 
@@ -29,16 +29,16 @@
 #include <vector>
 
 #include "absl/base/internal/cycleclock.h"
-#include "celer/net/socket_ops.h"
-#include "celer/runtime/cycle_clock.h"
+#include "bycorf/net/socket_ops.h"
+#include "bycorf/runtime/cycle_clock.h"
 #if defined(__x86_64__)
 #include "absl/base/internal/sysinfo.h"
 #endif
 #include "spdlog/spdlog.h"
 
-namespace celer {
+namespace bycorf {
 
-#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+#if BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
 std::uint64_t CrossCoreTraceNowNanos() noexcept {
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -195,7 +195,7 @@ absl::Status Worker::Init(const WorkerOptions& options) {
   if (!status.ok()) {
     return status;
   }
-#ifdef CELER_WITH_SPDK_STORAGE
+#if BYCORF_KERNEL_BYPASS
   if (SpdkStorageEnabled()) status = storage_backend_.Init(this);
   if (!status.ok()) {
     backend_.Shutdown();
@@ -213,7 +213,7 @@ void Worker::Shutdown() {
   if (!initialized_) {
     return;
   }
-#ifdef CELER_WITH_SPDK_STORAGE
+#if BYCORF_KERNEL_BYPASS
   storage_backend_.Shutdown();
 #endif
   backend_.Shutdown();
@@ -804,7 +804,7 @@ bool Worker::DrainCrossCore() {
   std::size_t nrep = 0;
   std::size_t nnotifications = 0;
   const auto schedule_request = [this](RemoteWork* work) {
-#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+#if BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
     const std::uint64_t now = CrossCoreTraceNowNanos();
     if (work->request_post_ns_ != 0 && now >= work->request_post_ns_) {
       cross_core_latency_stats_.request_queue_.Add(now -
@@ -818,7 +818,7 @@ bool Worker::DrainCrossCore() {
     }
   };
   const auto schedule_reply = [this](RemoteWork* work) {
-#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+#if BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
     const std::uint64_t now = CrossCoreTraceNowNanos();
     if (work->reply_post_ns_ != 0 && now >= work->reply_post_ns_) {
       cross_core_latency_stats_.reply_queue_.Add(now - work->reply_post_ns_);
@@ -940,7 +940,7 @@ void Worker::FlushWakes() {
     ++wake_checks_;
     const bool parked =
         mb.wake_seq_.fetch_add(1, std::memory_order_acq_rel) == kWakeSeqParked;
-#if CELER_ENABLE_CROSS_CORE_LATENCY_TRACE
+#if BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
     const std::uint64_t now = CrossCoreTraceNowNanos();
     const std::uint64_t mark = w.wake_mark_ns_[target];
     if (mark != 0 && now >= mark) {
@@ -969,7 +969,7 @@ bool Worker::BusyPoll() {
   do {
     bool did_work = DrainCrossCore();
     did_work |= backend_.Poll();
-#ifdef CELER_WITH_SPDK_STORAGE
+#if BYCORF_KERNEL_BYPASS
     did_work |= PollStorage();
 #endif
     if (did_work) {
@@ -1005,7 +1005,7 @@ bool Worker::BusyPoll() {
   return false;
 }
 
-#ifdef CELER_WITH_SPDK_STORAGE
+#if BYCORF_KERNEL_BYPASS
 bool Worker::PollStorage() {
   if (!SpdkStorageEnabled()) return false;
   const std::int64_t start = CycleNow();
@@ -1048,7 +1048,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
       !next_background_ready_.empty() || !background_remote_work_.empty();
   did_work |= DrainCrossCore();
   did_work |= backend_.Poll();
-#ifdef CELER_WITH_SPDK_STORAGE
+#if BYCORF_KERNEL_BYPASS
   if (SpdkStorageEnabled() && options_.spdk_foreground_pre_poll_us_ != 0 &&
       (!ready_.empty() || !next_ready_.empty() ||
        !foreground_remote_work_.empty())) {
@@ -1132,7 +1132,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
     return true;
   }
 
-#ifdef CELER_WITH_SPDK_STORAGE
+#if BYCORF_KERNEL_BYPASS
   // SPDK is a polled-mode driver and has no fd that can wake io_uring. Keep
   // driving its completion queues while device I/O is outstanding.
   if (storage_backend_.HasOutstanding()) {
@@ -1193,4 +1193,4 @@ void Worker::Run() {
   // that still holds cross-core references into those frames.
 }
 
-}  // namespace celer
+}  // namespace bycorf
