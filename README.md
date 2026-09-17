@@ -54,7 +54,7 @@ sudo apt-get install --no-install-recommends \
 For a new standalone checkout:
 
 ```bash
-git clone https://github.com/thweetkomputer/celer.git bycorf
+git clone https://github.com/eloqdata/bycorf.git bycorf
 cd bycorf
 ```
 
@@ -219,3 +219,10 @@ io_uring and raises the test shell's memlock limit on its disposable runners.
 CTest must discover at least one test. Its JUnit report and detailed logs are
 uploaded as per-architecture artifacts retained for seven days. Hosted CI
 sets `BYCORF_KERNEL_BYPASS=OFF`; DPDK/SPDK hardware testing requires a separate host.
+
+## License
+
+EloqData-authored code and accompanying materials are Copyright (C) 2026
+EloqData Inc. and licensed under the [Apache License, Version 2.0](LICENSE).
+Third-party components retain their original copyright notices and licenses;
+see [NOTICE](NOTICE) and the notices in those components.
