@@ -282,32 +282,13 @@ The complete device allowlist must be set before that first initialization.
 `dpdk_smoke.py` selects DPDK explicitly. `bycorf_backend_selection_check` checks
 ordinary allocation and immutable selection without touching physical devices.
 
-## Application and Keylane integration
+## Application integration
 
 The normal `TcpService` / `TcpStream` API is unchanged. The same incremental
 parser consumes stream bytes, and the same storage implementation handles
 commands. Raw BSD socket handles are worker-local and must not be passed to
 Linux `send`, `poll`, `dup`, `close`, or descriptor-transfer APIs. Bycorf routes
 its own close and peer-address operations to the right backend.
-
-Keylane's integration worktree can select an external Bycorf checkout:
-
-```bash
-cmake -S /path/to/keylane -B /path/to/keylane/build-dpdk-net -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKEYLANE_ENABLE_OPT=OFF \
-  -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
-  -DKEYLANE_BYCORF_SOURCE_DIR=/path/to/bycorf \
-  -DKEYLANE_KERNEL_BYPASS=ON
-cmake --build /path/to/keylane/build-dpdk-net --target keylane -j4
-```
-
-Use a fresh disposable data file for SET/GET runs, bind the server to the
-configured stack address, and configure the TAP after initialization as above.
-For two workers pinned to CPUs 0 and 1, pin memtier to other CPUs. Ordinary
-files use `--storage=uring`; `KEYLANE_KERNEL_BYPASS=ON` includes support for
-`--storage=spdk`. Keylane must explicitly select `--network=dpdk`.
-Keylane's replication handoff and any application path that operates directly
-on Linux descriptors have not been ported by this prototype.
 
 ## Limits and interpretation
 
