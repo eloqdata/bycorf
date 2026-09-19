@@ -25,6 +25,8 @@ worker main functions from entering partial service initialization.
 A `Worker` owns its coroutine queues, connections, I/O backend, completion
 handling, and optional storage poller. The scheduler bounds foreground and
 background coroutine work and polls external completions between rounds.
+Workers submit queued foreground I/O and peer wakes before a maintenance slice,
+then submit any work queued by that slice before advancing to the next round.
 Coroutines cooperate: a long non-suspending handler can delay all work on its
 worker. Worker-local synchronization and cross-worker synchronization have
 separate ownership contracts.

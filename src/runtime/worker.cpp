@@ -1007,7 +1007,11 @@ bool Worker::BusyPoll() {
 
 #if BYCORF_KERNEL_BYPASS
 bool Worker::PollStorage() {
-  if (!SpdkStorageEnabled()) return false;
+  // Submissions and completions are worker-owned. With neither device I/O
+  // nor deferred open/close completions pending, polling cannot make progress.
+  // Use the same predicate as the idle/park decision so queued completions
+  // still run even when the hardware outstanding count is zero.
+  if (!SpdkStorageEnabled() || !storage_backend_.HasOutstanding()) return false;
   const std::int64_t start = CycleNow();
   const SpdkPollResult result =
       storage_backend_.Poll(options_.spdk_max_completions_per_poll_);
@@ -1049,7 +1053,11 @@ bool Worker::RunOnce(bool wait_for_completion) {
   did_work |= DrainCrossCore();
   did_work |= backend_.Poll();
 #if BYCORF_KERNEL_BYPASS
-  if (SpdkStorageEnabled() && options_.spdk_foreground_pre_poll_us_ != 0 &&
+  // This extra foreground slice exists to get ahead of storage completions.
+  // Without pending storage work, the normal slice below already serves the
+  // same queues; splitting it adds a second deadline and accounting pass.
+  if (SpdkStorageEnabled() && storage_backend_.HasOutstanding() &&
+      options_.spdk_foreground_pre_poll_us_ != 0 &&
       (!ready_.empty() || !next_ready_.empty() ||
        !foreground_remote_work_.empty())) {
     MergeDeferred();
@@ -1094,6 +1102,10 @@ bool Worker::RunOnce(bool wait_for_completion) {
   //    its rolling CPU share is below the warrant. Background tasks remain
   //    cooperative and may overrun only until their next Yield checkpoint.
   if (ShouldRunBackground()) {
+    // Submit completed foreground replies and cross-core wakes before the
+    // maintenance slice. Peers can then make progress while this worker runs
+    // background CPU work, instead of waiting an extra slice for every reply.
+    Flush();
     const std::int64_t background_start = CycleNow();
     const std::size_t background_resumes =
         DrainBackgroundUntil(background_start + static_cast<std::int64_t>(
@@ -1112,10 +1124,10 @@ bool Worker::RunOnce(bool wait_for_completion) {
     }
   }
 
-  // 3. The single submit point: flush queued SQEs (sends, recv re-arms) and
-  //    batched cross-core wakes. Completions dispatched while parked are
-  //    resumed by the next iteration, which always reaches here before it can
-  //    block.
+  // 3. Flush remaining SQEs (sends, recv re-arms) and batched cross-core wakes,
+  //    including work queued by maintenance. Completions dispatched while
+  //    parked are resumed by the next iteration, which always reaches here
+  //    before it can block.
   Flush();
   ReclaimConnections();
   MaybeResetRuntimeWindow();
