@@ -46,6 +46,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "bycorf/io/dpdk_environment.h"
 #include "bycorf/net/socket_ops.h"
 #include "bycorf/runtime/worker.h"
@@ -66,6 +67,9 @@ constexpr int kFirstHandle = 0x40000000;
 constexpr unsigned kHandleBits = 30 - std::bit_width(kMaxWorkers - 1);
 constexpr unsigned kHandleMask = (1U << kHandleBits) - 1;
 constexpr std::size_t kMaxFrame = 1518;
+constexpr unsigned kClientPortFirst = 32768;
+constexpr unsigned kClientPortLast = 60999;
+constexpr unsigned kListenerPortOwner = ~0u;
 // rte_ring_create reserves pointer-sized slots; the element API below stores
 // their address representation as the uint64_t type used by DPDK's copy code.
 static_assert(sizeof(void*) == sizeof(std::uint64_t));
@@ -115,6 +119,12 @@ struct Fabric {
   rte_mempool* pool = nullptr;
   bycorf_bsd_interface interface{};
   bool adaptive = false, tap = false, rss_owner = false;
+  // Populated before workers start, immutable throughout their lifetime.
+  absl::flat_hash_map<std::uint16_t, std::vector<unsigned>> listener_workers;
+  // A source port retains its owner through TIME_WAIT and is reused only by
+  // that worker. Unused ephemeral ports still follow ordinary listener routing.
+  // Zero = unused; worker + 1 = client stripe; UINT_MAX = listening port.
+  std::array<std::atomic<unsigned>, 65536> port_owners{};
 } fabric;
 
 std::uint16_t Read16(const unsigned char* p) {
@@ -135,12 +145,26 @@ int Destination(const unsigned char* frame, std::size_t length,
   if (ihl < 20 || length < 14 + ihl || (Read16(frame + 20) & 0x3fff)) return -1;
   if (frame[23] == 1) return -2;  // ICMP errors can concern any local TCP flow.
   if (frame[23] != 6 || length < 14 + ihl + 20) return -1;
-  if (fabric.rss_owner) return static_cast<int>(rx_owner);
+  const unsigned destination_port = Read16(frame + 16 + ihl);
+  const auto& placements = std::as_const(fabric.listener_workers);
+  const auto placement = placements.find(destination_port);
+  if (placement == placements.end()) {
+    const unsigned owner =
+        fabric.port_owners[destination_port].load(std::memory_order_acquire);
+    if (owner != 0 && owner != kListenerPortOwner)
+      return static_cast<int>(owner - 1);
+  }
+  if (fabric.rss_owner && (placement == placements.end() ||
+                           placement->second.size() == fabric.workers))
+    return static_cast<int>(rx_owner);
   std::uint32_t hash = 2166136261u;
   for (unsigned i = 26; i < 34; ++i) hash = (hash ^ frame[i]) * 16777619u;
   for (unsigned i = 14 + ihl; i < 18 + ihl; ++i)
     hash = (hash ^ frame[i]) * 16777619u;
   hash ^= hash >> 16;
+  if (placement != placements.end()) {
+    return placement->second[hash % placement->second.size()];
+  }
   return static_cast<int>(hash % fabric.workers);
 }
 
@@ -182,6 +206,7 @@ class DpdkBackend::Impl {
   bool initialized = false, polling = false;
   std::size_t buffer_size = 4096;
   int next_handle = kFirstHandle;
+  unsigned next_client_port = 0;
   std::unordered_map<int, BsdSocket*> sockets;
   struct Request {
     int fd;
@@ -194,7 +219,7 @@ class DpdkBackend::Impl {
     int result;
     unsigned flags;
   };
-  std::vector<Request> accepts, sends;
+  std::vector<Request> accepts, sends, connects;
   std::vector<Connection*> reads, disconnects;
   std::vector<Completion> completions;
   std::uint64_t rx = 0, tx = 0, forwarded_rx = 0, forwarded_tx = 0, drops = 0;
@@ -388,6 +413,19 @@ class DpdkBackend::Impl {
   }
   bool SocketCompletions() {
     bool work = false;
+    for (std::size_t i = 0; i < connects.size();) {
+      const auto request = connects[i];
+      BsdSocket* so = Find(request.fd);
+      const int error =
+          so ? BsdError(bycorf_bsd_connect_status(so)) : ECANCELED;
+      if (error == EAGAIN) {
+        ++i;
+        continue;
+      }
+      connects.erase(connects.begin() + i);
+      QueueCompletion(request.tag, -error);
+      work = true;
+    }
     for (std::size_t i = 0; i < accepts.size();) {
       const auto request = accepts[i];
       BsdSocket* listener = Find(request.fd);
@@ -497,8 +535,29 @@ DpdkBackend::DpdkBackend(IoUringBackend& kernel)
     : kernel_(kernel), impl_(std::make_unique<Impl>(*this)) {}
 DpdkBackend::~DpdkBackend() { Shutdown(); }
 
+absl::Status DpdkBackend::ConfigureListenerWorkers(
+    std::uint16_t port, std::span<const unsigned> workers) {
+  std::lock_guard lock(fabric.mutex);
+  if (fabric.prepared || workers.empty()) {
+    return absl::FailedPreconditionError(
+        "configure DPDK listeners before startup");
+  }
+  std::vector<unsigned> placement(workers.begin(), workers.end());
+  const auto [it, inserted] = fabric.listener_workers.emplace(port, placement);
+  if (!inserted && it->second != placement) {
+    return absl::InvalidArgumentError("DPDK port has conflicting worker sets");
+  }
+  return absl::OkStatus();
+}
+
 absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   std::lock_guard lock(fabric.mutex);
+  for (const auto& [port, ids] : fabric.listener_workers) {
+    for (unsigned id : ids) {
+      if (id >= workers)
+        return absl::InvalidArgumentError("invalid DPDK listener worker");
+    }
+  }
   if (fabric.prepared)
     return absl::FailedPreconditionError(
         "DPDK prototype supports one Runtime per process");
@@ -858,6 +917,25 @@ absl::Status DpdkBackend::SubmitSend(const RegisteredFile& file,
   impl_->sends.push_back({file.fd_, tag, bytes});
   return absl::OkStatus();
 }
+absl::Status DpdkBackend::SubmitConnect(int fd, const sockaddr* address,
+                                        socklen_t length, IoCompletion* tag) {
+  if (!detail::IsDpdkSocket(fd))
+    return kernel_.SubmitConnect(fd, address, length, tag);
+  auto* so = impl_->Find(fd);
+  if (!so || !tag || !address || address->sa_family != AF_INET ||
+      length < sizeof(sockaddr_in)) {
+    return absl::InvalidArgumentError("invalid DPDK connect request");
+  }
+  const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(address);
+  const int error = BsdError(
+      bycorf_bsd_connect(so, ipv4->sin_addr.s_addr, ntohs(ipv4->sin_port)));
+  if (error && error != EINPROGRESS) {
+    impl_->QueueCompletion(tag, -error);
+  } else {
+    impl_->connects.push_back({fd, tag, {}});
+  }
+  return absl::OkStatus();
+}
 absl::Status DpdkBackend::SubmitSendMsg(const RegisteredFile& file,
                                         const msghdr* message,
                                         IoCompletion* tag) {
@@ -876,7 +954,7 @@ absl::Status DpdkBackend::SubmitAcceptMultishot(int fd, IoCompletion* tag) {
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::SubmitCancel(IoCompletion* target) {
-  for (auto* requests : {&impl_->accepts, &impl_->sends}) {
+  for (auto* requests : {&impl_->accepts, &impl_->sends, &impl_->connects}) {
     for (auto at = requests->begin(); at != requests->end(); ++at) {
       if (at->tag != target) continue;
       requests->erase(at);
@@ -941,6 +1019,14 @@ int DpdkBackend::Listen(const sockaddr* address, socklen_t length,
     return -1;
   }
   const auto* ipv4 = reinterpret_cast<const sockaddr_in*>(address);
+  const unsigned port = ntohs(ipv4->sin_port);
+  unsigned previous = 0;
+  if (!fabric.port_owners[port].compare_exchange_strong(
+          previous, kListenerPortOwner, std::memory_order_acq_rel) &&
+      previous != kListenerPortOwner) {
+    errno = EADDRINUSE;
+    return -1;
+  }
   BsdSocket* listener = nullptr;
   const int error = BsdError(bycorf_bsd_listen(
       ipv4->sin_addr.s_addr, ntohs(ipv4->sin_port), backlog, &listener));
@@ -949,6 +1035,35 @@ int DpdkBackend::Listen(const sockaddr* address, socklen_t length,
     return -1;
   }
   return current_->Own(listener);
+}
+int DpdkBackend::OpenClient(int family) {
+  if (!current_ || family != AF_INET) {
+    errno = EAFNOSUPPORT;
+    return -1;
+  }
+  const unsigned ports =
+      (kClientPortLast - kClientPortFirst - current_->id) / fabric.workers + 1;
+  for (unsigned tried = 0; tried < ports; ++tried) {
+    const unsigned port =
+        kClientPortFirst + current_->id +
+        (current_->next_client_port++ % ports) * fabric.workers;
+    if (fabric.listener_workers.contains(port)) continue;
+    unsigned previous = 0;
+    if (!fabric.port_owners[port].compare_exchange_strong(
+            previous, current_->id + 1, std::memory_order_acq_rel) &&
+        previous != current_->id + 1)
+      continue;
+    BsdSocket* so = nullptr;
+    const int error =
+        BsdError(bycorf_bsd_open_client(fabric.interface.address, port, &so));
+    if (!error) return current_->Own(so);
+    if (error != EADDRINUSE) {
+      errno = error;
+      return -1;
+    }
+  }
+  errno = EADDRINUSE;
+  return -1;
 }
 int DpdkBackend::Close(int handle) noexcept {
   if (!current_) {

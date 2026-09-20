@@ -341,7 +341,8 @@ target_link_libraries(bycorf PUBLIC
   absl::status
   absl::statusor
 )
-target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto
+  absl::flat_hash_map)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(bycorf PRIVATE -Wall -Wextra -Wpedantic)

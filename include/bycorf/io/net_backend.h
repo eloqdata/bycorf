@@ -73,6 +73,9 @@ class NetBackend {
   }
   absl::Status SubmitConnect(int fd, const sockaddr* address,
                              socklen_t address_length, IoCompletion* tag) {
+#if BYCORF_KERNEL_BYPASS
+    if (dpdk_) return dpdk_->SubmitConnect(fd, address, address_length, tag);
+#endif
     return kernel_.SubmitConnect(fd, address, address_length, tag);
   }
   absl::Status SubmitCancel(IoCompletion* target) {

@@ -18,7 +18,9 @@ limitations under the License.
 
 `Runtime` creates the worker table and cross-core mailboxes before releasing
 worker threads. Each worker normally pins to one CPU from the caller's
-inherited affinity mask. Every thread completes affinity setup before any
+inherited affinity mask, cycling when workers outnumber CPUs. An explicit CPU
+list can select the order and repeat IDs, but every entry must belong to the
+inherited mask. Every thread completes affinity setup before any
 worker main function runs. An affinity or thread-launch failure prevents the
 worker main functions from entering partial service initialization.
 
@@ -38,7 +40,9 @@ peer; foreign ingress and process control use the pre-created eventfds.
 work. Stop closes ingress and wakes workers through descriptors that remain
 alive until after their threads have joined.
 
-`Server` starts each registered service on every worker. During shutdown,
+`Server` starts each registered service on its selected global worker IDs;
+an empty selection means every worker. Prepare sees the full runtime count,
+while Run and FinalizeWorker execute only on selected workers. During shutdown,
 workers first leave their loops, then quiesce I/O and reclaim coroutine frames
 on their owning native threads. Service finalizers run after all worker frames
 are reclaimed. A worker that fails initialization contributes to both teardown

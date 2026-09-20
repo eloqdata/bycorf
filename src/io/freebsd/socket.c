@@ -81,6 +81,51 @@ int bycorf_bsd_accept(struct socket* listener, struct socket** out) {
   *out = so;
   return 0;
 }
+int bycorf_bsd_open_client(uint32_t address, uint16_t local_port,
+                           struct socket** out) {
+  *out = NULL;
+  struct socket* so;
+  int error = socreate(AF_INET, &so, SOCK_STREAM, IPPROTO_TCP,
+                       curthread->td_ucred, curthread);
+  if (error) return error;
+  so->so_state |= SS_NBIO;
+  // Each worker uses a disjoint source-port stripe. TIME_WAIT stays in the
+  // same VNET, and replies can be routed without a shared mutable flow table.
+  struct sockaddr_in local = {.sin_len = sizeof(local),
+                               .sin_family = AF_INET,
+                               .sin_port = htons(local_port),
+                               .sin_addr.s_addr = address};
+  error = sobind(so, (struct sockaddr*)&local, curthread);
+  int enabled = 1;
+  struct sockopt option = {.sopt_dir = SOPT_SET,
+                           .sopt_level = IPPROTO_TCP,
+                           .sopt_name = TCP_NODELAY,
+                           .sopt_val = &enabled,
+                           .sopt_valsize = sizeof(enabled),
+                           .sopt_td = curthread};
+  if (!error) error = sosetopt(so, &option);
+  if (error) {
+    soclose(so);
+    return error;
+  }
+  *out = so;
+  return 0;
+}
+int bycorf_bsd_connect(struct socket* so, uint32_t address, uint16_t port) {
+  assert_owner(so);
+  struct sockaddr_in remote = {.sin_len = sizeof(remote),
+                                .sin_family = AF_INET,
+                                .sin_port = htons(port),
+                                .sin_addr.s_addr = address};
+  return soconnect(so, (struct sockaddr*)&remote, curthread);
+}
+int bycorf_bsd_connect_status(struct socket* so) {
+  assert_owner(so);
+  if (so->so_error) return so->so_error;
+  if (so->so_state & SS_ISCONNECTED) return 0;
+  if (so->so_state & SS_ISCONNECTING) return EAGAIN;
+  return ECONNABORTED;
+}
 int bycorf_bsd_receive(struct socket* so, void* buffer, size_t size,
                        size_t* received) {
   assert_owner(so);

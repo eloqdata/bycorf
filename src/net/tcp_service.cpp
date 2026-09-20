@@ -18,6 +18,7 @@
 
 #include <unistd.h>
 
+#include <stdexcept>
 #include <unordered_set>
 
 #include "absl/cleanup/cleanup.h"
@@ -37,6 +38,20 @@ void TcpService::AddTlsEndpoint(std::uint16_t port,
 
 void TcpService::Prepare(unsigned thread_count) {
   thread_count_ = thread_count;
+  session_workers_.clear();
+  for (unsigned id = 0; id < thread_count; ++id) {
+    if (RunsOnWorker(id)) session_workers_.push_back(id);
+  }
+#if BYCORF_KERNEL_BYPASS
+  if (DpdkNetworkEnabled()) {
+    for (const auto& endpoint : endpoints_) {
+      auto configured = DpdkBackend::ConfigureListenerWorkers(endpoint.port_,
+                                                              session_workers_);
+      if (!configured.ok())
+        throw std::invalid_argument(std::string(configured.message()));
+    }
+  }
+#endif
   next_connection_worker_.store(0, std::memory_order_relaxed);
   listeners_.clear();
   listeners_.resize(thread_count);
@@ -179,9 +194,9 @@ Task<absl::Status> TcpService::AcceptLoop(Worker& worker,
     const unsigned target =
         detail::IsDpdkSocket(fd)
             ? worker.id()
-            : static_cast<unsigned>(next_connection_worker_.fetch_add(
-                                        1, std::memory_order_relaxed) %
-                                    thread_count_);
+            : session_workers_[next_connection_worker_.fetch_add(
+                                   1, std::memory_order_relaxed) %
+                               session_workers_.size()];
     absl::Status started = co_await SubmitTo(
         target,
         [this, connection = std::move(*accepted),

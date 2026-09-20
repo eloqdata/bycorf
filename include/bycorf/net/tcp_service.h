@@ -92,6 +92,7 @@ class TcpService : public Service {
   std::vector<Endpoint> endpoints_;
   std::vector<WorkerListeners> listeners_;  // one collection per worker
   unsigned thread_count_ = 0;
+  std::vector<unsigned> session_workers_;
   std::atomic<std::uint64_t> next_connection_worker_{0};
 #if BYCORF_KERNEL_BYPASS
   std::mutex stop_mutex_;

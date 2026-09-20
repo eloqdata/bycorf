@@ -34,6 +34,10 @@ class DpdkBackend {
   // Rejects counts exceeding build capacity or available EAL registrations
   // before configuring the port. RSS additionally requires one pair per worker.
   static absl::Status PrepareRuntime(unsigned workers);
+  // Startup-only port placement. Every segment is steered to the same member
+  // of this service's worker set; non-listening control workers are excluded.
+  static absl::Status ConfigureListenerWorkers(
+      std::uint16_t port, std::span<const unsigned> workers);
   // Release peers waiting for worker 0 if any worker fails during startup.
   static void AbortStartup(const absl::Status& reason);
   static void StopRuntime();
@@ -44,6 +48,7 @@ class DpdkBackend {
   absl::Status Submit();
   absl::Status SubmitSend(const RegisteredFile&, std::span<const std::byte>,
                           IoCompletion*);
+  absl::Status SubmitConnect(int fd, const sockaddr*, socklen_t, IoCompletion*);
   absl::Status SubmitSendMsg(const RegisteredFile&, const msghdr*,
                              IoCompletion*);
   absl::Status SubmitAcceptMultishot(int fd, IoCompletion*);
@@ -58,6 +63,7 @@ class DpdkBackend {
 
   // Socket helpers require the owning worker thread. Return host errno values.
   static int Listen(const sockaddr* address, socklen_t length, int backlog);
+  static int OpenClient(int family);
   static int Close(int handle) noexcept;
   static int PeerName(int handle, sockaddr*, socklen_t*) noexcept;
 

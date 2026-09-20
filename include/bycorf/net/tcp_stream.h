@@ -233,10 +233,11 @@ class TcpStream {
 };
 
 // Connect a TCP stream to a numeric IPv4/IPv6 address (no DNS). Creates the
-// socket (TCP_NODELAY, nonblocking), drives IORING_OP_CONNECT under the
-// deadline, and on success registers the fd as a Connection on `worker` —
+// socket (TCP_NODELAY, nonblocking), drives the selected network backend under
+// the deadline, and on success registers the fd as a Connection on `worker` —
 // mirroring the accept-side registration flow. Must be awaited on `worker`.
 // On any failure the fd is closed; a lost deadline yields kDeadlineExceeded.
+// The DPDK backend supports IPv4 and keeps the connection on this worker.
 Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
                                            std::uint16_t port,
                                            std::chrono::nanoseconds timeout);

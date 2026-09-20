@@ -18,6 +18,7 @@
 
 #include <exception>
 #include <thread>
+#include <unordered_set>
 
 #include "spdlog/spdlog.h"
 
@@ -53,14 +54,25 @@ absl::Status Server::Start(const ServerOptions& options) {
     options_.bind_addresses_.push_back(options_.bind_ip_);
   }
   for (Service* service : services_) {
-    service->Prepare(options_.thread_count_);
+    std::unordered_set<unsigned> seen;
+    for (unsigned id : service->workers()) {
+      if (id >= options_.thread_count_ || !seen.insert(id).second) {
+        return absl::InvalidArgumentError(
+            "invalid or duplicate service worker");
+      }
+    }
+    try {
+      service->Prepare(options_.thread_count_);
+    } catch (const std::exception& error) {
+      return absl::InvalidArgumentError(error.what());
+    }
   }
 
   started_ = true;
   auto fn = [this](unsigned i, Worker& worker) { return RunWorker(i, worker); };
   try {
-    runtime_.Start(options_.thread_count_, std::move(fn),
-                   options_.pin_workers_);
+    runtime_.Start(options_.thread_count_, std::move(fn), options_.pin_workers_,
+                   options_.cpu_ids_);
   } catch (const std::exception& error) {
     runtime_.RequestStop();
     runtime_.WaitUntilStopped();
@@ -134,7 +146,9 @@ int Server::RunWorker(unsigned index, Worker& worker) {
       .control_executor_ = runtime_.GetForeignExecutor(index),
   };
   for (Service* service : services_) {
-    worker.SpawnRoot(service->Run(worker, ctx));
+    if (service->RunsOnWorker(index)) {
+      worker.SpawnRoot(service->Run(worker, ctx));
+    }
   }
 
   worker.Run();
@@ -166,7 +180,7 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   // dependencies only after their later-registered consumers have finalized.
   for (auto service = services_.rbegin(); service != services_.rend();
        ++service) {
-    (*service)->FinalizeWorker(worker);
+    if ((*service)->RunsOnWorker(index)) (*service)->FinalizeWorker(worker);
   }
 
   if (!worker.stop_requested()) [[unlikely]] {
