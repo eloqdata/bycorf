@@ -92,9 +92,9 @@ int bycorf_bsd_open_client(uint32_t address, uint16_t local_port,
   // Each worker uses a disjoint source-port stripe. TIME_WAIT stays in the
   // same VNET, and replies can be routed without a shared mutable flow table.
   struct sockaddr_in local = {.sin_len = sizeof(local),
-                               .sin_family = AF_INET,
-                               .sin_port = htons(local_port),
-                               .sin_addr.s_addr = address};
+                              .sin_family = AF_INET,
+                              .sin_port = htons(local_port),
+                              .sin_addr.s_addr = address};
   error = sobind(so, (struct sockaddr*)&local, curthread);
   int enabled = 1;
   struct sockopt option = {.sopt_dir = SOPT_SET,
@@ -114,9 +114,9 @@ int bycorf_bsd_open_client(uint32_t address, uint16_t local_port,
 int bycorf_bsd_connect(struct socket* so, uint32_t address, uint16_t port) {
   assert_owner(so);
   struct sockaddr_in remote = {.sin_len = sizeof(remote),
-                                .sin_family = AF_INET,
-                                .sin_port = htons(port),
-                                .sin_addr.s_addr = address};
+                               .sin_family = AF_INET,
+                               .sin_port = htons(port),
+                               .sin_addr.s_addr = address};
   return soconnect(so, (struct sockaddr*)&remote, curthread);
 }
 int bycorf_bsd_connect_status(struct socket* so) {
