@@ -722,13 +722,22 @@ Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
   // Nonblocking at creation: io_uring issues the connect on the worker, and
   // the registered Connection assumes nonblocking semantics (as accepted
   // sockets do).
-  const int fd =
-      ::socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
+  int fd;
+#if BYCORF_KERNEL_BYPASS
+  if (DpdkNetworkEnabled()) {
+    fd = DpdkBackend::OpenClient(family);
+  } else
+#endif
+  {
+    fd = ::socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                  IPPROTO_TCP);
+  }
   if (fd < 0) {
     co_return ErrnoToStatus(errno, "socket creation failed");
   }
   int one = 1;
-  if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
+  if (!detail::IsDpdkSocket(fd) &&
+      ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0) {
     const int error = errno;
     detail::CloseSocket(fd);
     co_return ErrnoToStatus(error, "setsockopt(TCP_NODELAY) failed");

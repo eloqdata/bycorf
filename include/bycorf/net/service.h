@@ -17,8 +17,11 @@
 #ifndef BYCORF_NET_SERVICE_H_
 #define BYCORF_NET_SERVICE_H_
 
+#include <algorithm>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "bycorf/runtime/foreign_executor.h"
@@ -36,7 +39,7 @@ struct ServiceContext {
   ForeignExecutor control_executor_;
 };
 
-// A unit of work hosted by a Server across all workers. The Server owns the
+// A unit of work hosted by a Server on selected workers. The Server owns the
 // worker threads; a Service only describes what to run on each of them. This is
 // transport-agnostic: a TCP service runs an accept loop, a future UDP service a
 // datagram loop — the Server neither knows nor cares which. None of these calls
@@ -46,12 +49,24 @@ class Service {
  public:
   virtual ~Service() = default;
 
+  // Configure before Server::Start. Empty means all runtime workers; otherwise
+  // these are global worker IDs, not a second service-local numbering scheme.
+  // Server validates the set and calls Run/FinalizeWorker only on these IDs.
+  void SetWorkers(std::vector<unsigned> workers) {
+    workers_ = std::move(workers);
+  }
+  std::span<const unsigned> workers() const noexcept { return workers_; }
+  bool RunsOnWorker(unsigned id) const noexcept {
+    return workers_.empty() ||
+           std::find(workers_.begin(), workers_.end(), id) != workers_.end();
+  }
+
   // Called once on the Server's thread before any worker starts, so the service
   // can size its per-worker state for `thread_count` workers.
   virtual void Prepare(unsigned thread_count) = 0;
 
-  // Spawned once on each worker (runs on that worker's thread). Sets up its
-  // sockets and serves until the worker stops, then returns.
+  // Spawned once on each selected worker (runs on that worker's thread). Sets
+  // up its sockets and serves until the worker stops, then returns.
   virtual Task<absl::Status> Run(Worker& worker, ServiceContext ctx) = 0;
 
   // Called on the Server's thread at shutdown (before the workers are stopped)
@@ -64,6 +79,9 @@ class Service {
   // frames have been destroyed. Services may override this to release
   // worker-affine state before the native worker thread exits.
   virtual void FinalizeWorker(Worker&) noexcept {}
+
+ private:
+  std::vector<unsigned> workers_;
 };
 
 }  // namespace bycorf

@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 
 #include "bycorf/runtime/foreign_executor.h"
 #include "bycorf/runtime/worker.h"
@@ -37,8 +38,12 @@ class Runtime {
   Runtime& operator=(Runtime&&) noexcept;
   ~Runtime();
 
-  void Start(unsigned thread_count, WorkerMain main_fn,
-             bool pin_workers = true);
+  // Empty cpu_ids uses the caller's allowed CPUs; otherwise the supplied CPU
+  // list is cycled over workers. Repeated IDs deliberately share a logical CPU.
+  // Every ID must belong to the inherited affinity mask. Explicit placement
+  // requires pin_workers; setup failures prevent all worker mains from running.
+  void Start(unsigned thread_count, WorkerMain main_fn, bool pin_workers = true,
+             std::span<const unsigned> cpu_ids = {});
   // Request shutdown after Start returns, even if a worker has not entered
   // Init or Run yet. WorkerMain must eventually observe stop or return.
   void RequestStop() noexcept;

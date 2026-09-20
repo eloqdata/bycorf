@@ -63,7 +63,8 @@ class Runtime::Impl {
     std::thread thread_;
   };
 
-  void Start(unsigned thread_count, WorkerMain main_fn, bool pin_workers) {
+  void Start(unsigned thread_count, WorkerMain main_fn, bool pin_workers,
+             std::span<const unsigned> cpu_ids) {
     if (started_) {
       throw std::logic_error("runtime already started");
     }
@@ -75,6 +76,10 @@ class Runtime::Impl {
     }
 
     std::vector<unsigned> worker_cpus;
+    if (!pin_workers && !cpu_ids.empty()) {
+      throw std::invalid_argument(
+          "explicit CPU placement requires pin_workers");
+    }
     if (pin_workers) {
       cpu_set_t allowed;
       CPU_ZERO(&allowed);
@@ -87,9 +92,17 @@ class Runtime::Impl {
           worker_cpus.push_back(cpu);
         }
       }
-      if (worker_cpus.size() < thread_count) {
-        throw std::invalid_argument(
-            "worker pinning requires at least one allowed CPU per worker");
+      if (worker_cpus.empty()) {
+        throw std::invalid_argument("worker pinning requires an allowed CPU");
+      }
+      if (!cpu_ids.empty()) {
+        for (unsigned cpu : cpu_ids) {
+          if (cpu >= CPU_SETSIZE || !CPU_ISSET(cpu, &allowed)) {
+            throw std::invalid_argument(
+                "worker CPU is outside inherited affinity");
+          }
+        }
+        worker_cpus.assign(cpu_ids.begin(), cpu_ids.end());
       }
     }
 
@@ -141,7 +154,7 @@ class Runtime::Impl {
           if (!worker_cpus.empty()) {
             cpu_set_t affinity;
             CPU_ZERO(&affinity);
-            CPU_SET(worker_cpus[i], &affinity);
+            CPU_SET(worker_cpus[i % worker_cpus.size()], &affinity);
             if (pthread_setaffinity_np(pthread_self(), sizeof(affinity),
                                        &affinity) != 0) {
               local_exit_code = 1;
@@ -287,9 +300,9 @@ Runtime::~Runtime() {
   }
 }
 
-void Runtime::Start(unsigned thread_count, WorkerMain main_fn,
-                    bool pin_workers) {
-  impl_->Start(thread_count, std::move(main_fn), pin_workers);
+void Runtime::Start(unsigned thread_count, WorkerMain main_fn, bool pin_workers,
+                    std::span<const unsigned> cpu_ids) {
+  impl_->Start(thread_count, std::move(main_fn), pin_workers, cpu_ids);
 }
 
 void Runtime::RequestStop() noexcept { impl_->RequestStop(); }

@@ -34,8 +34,9 @@ struct ServerOptions {
   // Entries may be IPv4, IPv6, hostnames, or "*".
   std::vector<std::string> bind_addresses_;
   unsigned thread_count_ = 1;
-  // Pin worker i to the i-th CPU in the process's inherited affinity mask.
+  // Pin workers cyclically over cpu_ids_, or the inherited affinity if empty.
   bool pin_workers_ = true;
+  std::vector<unsigned> cpu_ids_;
   bool reuse_port_ = true;
   int idle_timeout_ms_ = -1;
   // Multishot recv buffer-ring entries. Zero uses per-connection one-shot recv.
@@ -49,11 +50,11 @@ struct ServerOptions {
   unsigned spdk_foreground_pre_poll_us_ = 0;
 };
 
-// Hosts one or more Services on a pool of thread-per-core workers. The Runtime
-// owns the worker threads; the Server only spawns each registered service's Run
-// on every worker and coordinates shutdown. It is transport-agnostic — what a
-// service does on a worker (TCP accept loop, UDP datagram loop, ...) is the
-// service's business.
+// Hosts one or more Services on a pool of independently scheduled workers. The
+// Runtime owns the worker threads; the Server only spawns each registered
+// service's Run on selected workers and coordinates shutdown. It is
+// transport-agnostic — what a service does on a worker (TCP accept loop, UDP
+// datagram loop, ...) is the service's business.
 class Server {
  public:
   Server() = default;

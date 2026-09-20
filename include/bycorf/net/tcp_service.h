@@ -84,7 +84,8 @@ class TcpService : public Service {
   absl::Status StartSession(Worker& worker, Connection connection,
                             std::shared_ptr<TlsContext> tls);
   Task<absl::Status> RunSession(Worker& worker, Connection* connection,
-                                std::shared_ptr<TlsContext> tls);
+                                std::shared_ptr<TlsContext> tls,
+                                ConnectionStorageBorrow borrow);
   Task<absl::Status> AcceptLoop(Worker& worker, BoundListener* bound);
 
   std::uint16_t port_;
@@ -92,6 +93,7 @@ class TcpService : public Service {
   std::vector<Endpoint> endpoints_;
   std::vector<WorkerListeners> listeners_;  // one collection per worker
   unsigned thread_count_ = 0;
+  std::vector<unsigned> session_workers_;
   std::atomic<std::uint64_t> next_connection_worker_{0};
 #if BYCORF_KERNEL_BYPASS
   std::mutex stop_mutex_;

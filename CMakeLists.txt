@@ -341,7 +341,8 @@ target_link_libraries(bycorf PUBLIC
   absl::status
   absl::statusor
 )
-target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto
+  absl::flat_hash_map)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(bycorf PRIVATE -Wall -Wextra -Wpedantic)
@@ -405,6 +406,15 @@ endif()
 
 if (BYCORF_BUILD_TESTS)
   enable_testing()
+  if (BYCORF_KERNEL_BYPASS)
+    add_executable(bycorf_freebsd_local_connect_check
+      tests/freebsd_local_connect_check.cpp)
+    target_link_libraries(bycorf_freebsd_local_connect_check PRIVATE bycorf_freebsd)
+    add_test(NAME bycorf_freebsd_local_connect_check
+      COMMAND bycorf_freebsd_local_connect_check)
+    set_tests_properties(bycorf_freebsd_local_connect_check PROPERTIES
+      TIMEOUT 15 LABELS "runtime;net;freebsd")
+  endif()
   add_test(NAME bycorf_connect_timer_check COMMAND bycorf_connect_timer_check)
   add_test(NAME bycorf_connection_storage_check COMMAND bycorf_connection_storage_check)
   add_test(NAME bycorf_backend_selection_check COMMAND bycorf_backend_selection_check)

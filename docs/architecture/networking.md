@@ -36,8 +36,14 @@ backend is selected.
 
 Linux owns the TCP state and NIC receive processing. An accepted Linux socket
 may be assigned to another worker before its session starts. The service uses
-round-robin assignment, then retains that worker for the session. io_uring
+round-robin assignment within the service's selected worker set, then retains
+that worker for the session. io_uring
 completions make received byte ranges available to the stream.
+Connection closure cancels an armed receive by its operation identity before
+closing the descriptor. A receive may otherwise retain the kernel socket after
+`close`, delaying peer EOF and session replacement. Cancellation preserves a
+duplicated live socket during worker handoff; it does not shut down that shared
+socket. Session storage borrows remain independent of transport retirement.
 
 ## DPDK and native FreeBSD TCP
 
@@ -66,8 +72,30 @@ ring of a queue owner.
 Only that owner calls the device's TX burst API. Queue scarcity therefore does
 not reduce the number of workers that can own TCP connections.
 
-Optional `rss` steering keeps TCP packets on the receiving queue's worker and
-skips software tuple redistribution. It requires one queue pair per worker and
+TCP service worker sets are registered by listening port before runtime
+startup and remain immutable. Incoming connections are steered only to the
+workers hosting that service. `ConnectTcp` also uses the selected DPDK backend:
+native outgoing IPv4 sockets bind disjoint per-worker stripes of ports
+32768–60999, skipping configured listeners. An atomic port-ownership table
+routes replies to the initiating VNET, retains ownership through TIME_WAIT,
+and prevents a listener from reusing a client port within the runtime lifetime.
+Connect completions, refusal and cancellation use the same worker-owned
+completion contract as kernel connects; IPv6 is rejected rather than sent
+through a different network backend.
+
+Connections to the configured local IPv4 address also remain in native TCP.
+Each VNET has an active local host route with software checksums and the
+configured MTU. Its loopback output crosses the copied Ethernet-frame boundary
+and enters the destination worker's software RX ring, using the same listener
+placement and client-port ownership rules as remote traffic. Even same-worker
+delivery is deferred until output releases TCP locks. Local packets never
+require NIC or switch hairpin support and do not enter a kernel socket.
+The host marks this internal delivery explicitly; NIC and TAP packets retain
+FreeBSD's physical-interface source-address validation.
+
+Optional `rss` steering keeps ordinary TCP packets on the receiving queue's
+worker. Service subsets and outgoing-client replies still use explicit software
+ownership to reach the correct VNET. It requires one queue pair per worker and
 IPv4 TCP RSS support for multiple workers. The PMD's RSS mapping must remain
 stable for the process lifetime so every segment reaches its existing VNET;
 live RSS remapping and socket migration are unsupported. Control traffic still
@@ -89,8 +117,8 @@ BSD sockets use private worker-encoded handles rather than Linux file
 descriptors. Bycorf's close and peer-address helpers dispatch these handles to
 the stack. Applications that directly pass stream handles to Linux syscalls or
 transfer a live socket to another worker need explicit adaptation. Accepted
-IPv4 TCP uses BSD; outgoing `ConnectTcp` and Unix sockets currently retain the
-kernel path. IPv6 DPDK listeners are unsupported.
+and outgoing IPv4 TCP use BSD; Unix sockets retain the kernel path. IPv6 DPDK
+listeners and clients are unsupported.
 
 The prototype copies MTU-sized frames between DPDK and BSD and copies received
 bytes into per-connection buffers. It uses software checksums. Software queues

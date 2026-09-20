@@ -586,7 +586,7 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
 
 absl::Status IoUringBackend::SubmitCancelRecv(Connection* connection,
                                               IoCompletion* tag) {
-  if (connection == nullptr || tag == nullptr) {
+  if (connection == nullptr) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid recv cancel request");
   }
@@ -596,7 +596,10 @@ absl::Status IoUringBackend::SubmitCancelRecv(Connection* connection,
                         "failed to acquire recv cancel sqe");
   }
   io_uring_prep_cancel(sqe, EncodeMultishotData(connection), 0);
-  io_uring_sqe_set_data(sqe, tag);
+  // Close needs only the receive's terminal CQE; a paused handoff also awaits
+  // the cancellation request through its explicit completion tag.
+  io_uring_sqe_set_data(
+      sqe, tag != nullptr ? static_cast<void*>(tag) : &kCancelRequestTag);
   return absl::OkStatus();
 }
 
