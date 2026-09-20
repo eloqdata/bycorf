@@ -176,6 +176,12 @@ class TcpStream {
 
   bool IsOpen() const noexcept;
   int NativeFd() const noexcept;
+  // Pin Connection storage while session users can suspend after Close().
+  // Acquire on the owning worker before the first suspension; destroying the
+  // guard releases storage only, without closing or extending the transport.
+  [[nodiscard]] ConnectionStorageBorrow BorrowStorage() const noexcept {
+    return MakeConnectionStorageBorrow(connection_);
+  }
   // Observe transport disconnect without consuming application bytes. The
   // callback runs on this connection's worker and remains installed until it
   // is cleared or the one-shot disconnect event fires.

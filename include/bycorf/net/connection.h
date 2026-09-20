@@ -25,6 +25,7 @@
 #include <memory>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/statusor.h"
 
 namespace bycorf {
@@ -133,6 +134,17 @@ inline void ReleaseConnectionStorage(Connection* connection) noexcept {
   }
   --connection->storage_borrows_;
 }
+
+// Worker-local RAII borrow for a session that can outlive transport closure.
+// The worker must remain alive until this guard and all other users unwind.
+[[nodiscard]] inline auto MakeConnectionStorageBorrow(
+    Connection* connection) noexcept {
+  BorrowConnectionStorage(connection);
+  return absl::MakeCleanup(
+      [connection]() noexcept { ReleaseConnectionStorage(connection); });
+}
+
+using ConnectionStorageBorrow = decltype(MakeConnectionStorageBorrow(nullptr));
 
 }  // namespace bycorf
 

@@ -982,7 +982,7 @@ absl::Status DpdkBackend::SubmitCancelRecv(Connection* c, IoCompletion* tag) {
   if (at == impl_->reads.end()) return kernel_.SubmitCancelRecv(c, tag);
   impl_->reads.erase(at);
   impl_->FinishRead(c);
-  impl_->QueueCompletion(tag, 0);
+  if (tag != nullptr) impl_->QueueCompletion(tag, 0);
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::StartPeerDisconnectPoll(Connection* c) {

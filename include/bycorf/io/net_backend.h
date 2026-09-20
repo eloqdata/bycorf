@@ -90,6 +90,7 @@ class NetBackend {
 #endif
     return kernel_.StartRecvMultishot(connection);
   }
+  // Null tag requests cancellation without a separate completion consumer.
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->SubmitCancelRecv(connection, tag);

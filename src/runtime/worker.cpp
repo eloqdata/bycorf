@@ -362,6 +362,15 @@ void Worker::BeginClose(Connection* connection, absl::Status reason,
   // make the connection reclaimable.
   (void)backend_.CancelPeerDisconnectPoll(connection);
 
+  // close(fd) alone does not release a socket held by an io_uring receive.
+  // Cancel by operation identity before retiring it so the peer observes the
+  // close promptly and the receive CQE can release its storage reference.
+  // Unlike shutdown(), this preserves a duplicated socket after PauseRead()
+  // hands it to another worker. DPDK drains its corresponding receive here.
+  if (connection->recv_armed_) {
+    (void)backend_.SubmitCancelRecv(connection, nullptr);
+  }
+
   if (connection->file_.fd_ >= 0) {
     const int fd = connection->file_.fd_;
     connection->file_.fd_ = -1;

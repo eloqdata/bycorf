@@ -90,6 +90,8 @@ class IoUringBackend {
   absl::Status SubmitCancel(IoCompletion* target);
   absl::Status StartRecvMultishot(
       Connection* connection);  // multishot, idempotent
+  // A null tag discards the cancel request's CQE; the receive's own terminal
+  // CQE still drains its connection reference before reclamation.
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag);
   absl::Status StartPeerDisconnectPoll(Connection* connection);
   absl::Status CancelPeerDisconnectPoll(Connection* connection);

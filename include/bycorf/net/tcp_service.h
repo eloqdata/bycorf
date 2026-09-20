@@ -84,7 +84,8 @@ class TcpService : public Service {
   absl::Status StartSession(Worker& worker, Connection connection,
                             std::shared_ptr<TlsContext> tls);
   Task<absl::Status> RunSession(Worker& worker, Connection* connection,
-                                std::shared_ptr<TlsContext> tls);
+                                std::shared_ptr<TlsContext> tls,
+                                ConnectionStorageBorrow borrow);
   Task<absl::Status> AcceptLoop(Worker& worker, BoundListener* bound);
 
   std::uint16_t port_;

@@ -81,7 +81,8 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection,
     return absl::Status(absl::StatusCode::kInternal,
                         "failed to register accepted connection");
   }
-  worker.Spawn(RunSession(worker, registered, std::move(tls)));
+  worker.Spawn(RunSession(worker, registered, std::move(tls),
+                          MakeConnectionStorageBorrow(registered)));
   return absl::OkStatus();
 }
 
@@ -217,7 +218,11 @@ Task<absl::Status> TcpService::AcceptLoop(Worker& worker,
 
 Task<absl::Status> TcpService::RunSession(Worker& worker,
                                           Connection* connection,
-                                          std::shared_ptr<TlsContext> tls) {
+                                          std::shared_ptr<TlsContext> tls,
+                                          ConnectionStorageBorrow borrow) {
+  // The frame owns the borrow before Spawn, through protocol cleanup and final
+  // suspend, even when a timeout closes the transport during non-socket work.
+  (void)borrow;
   auto connection_slot = absl::MakeCleanup([this] { OnConnectionClosed(); });
   TcpStream stream(connection);
   absl::Status status;
