@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "absl/base/internal/cycleclock.h"
+#include "bycorf/net/connection_stats.h"
 #include "bycorf/net/socket_ops.h"
 #include "bycorf/runtime/cycle_clock.h"
 #if defined(__x86_64__)
@@ -48,6 +49,11 @@ std::uint64_t CrossCoreTraceNowNanos() noexcept {
 #endif
 
 namespace {
+
+// Connection lifetime accounting lets monitoring include control workers
+// without posting work to their event loops. Command execution never writes
+// this shared cache line.
+alignas(64) std::atomic<std::uint64_t> g_active_connections{0};
 
 std::int64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -150,7 +156,17 @@ void ForgetTaskScheduling(std::coroutine_handle<> handle) noexcept {
   }
 }
 
-Worker::~Worker() { Shutdown(); }
+std::uint64_t ProcessActiveConnectionCount() noexcept {
+  return g_active_connections.load(std::memory_order_relaxed);
+}
+
+Worker::~Worker() {
+  Shutdown();
+  // A worker that never initialized can still own manually registered streams.
+  // Normal shutdown has already removed every active stream through BeginClose.
+  g_active_connections.fetch_sub(active_connection_count_,
+                                 std::memory_order_relaxed);
+}
 
 absl::Status Worker::Init(const WorkerOptions& options) {
   if (initialized_) {
@@ -316,6 +332,7 @@ Connection* Worker::AddConnection(Connection connection) {
   raw->last_active_ms_ = NowMs();
   connections_[raw->id_] = std::move(owned);
   ++active_connection_count_;
+  g_active_connections.fetch_add(1, std::memory_order_relaxed);
   return raw;
 }
 
@@ -331,6 +348,7 @@ void Worker::BeginClose(Connection* connection, absl::Status reason,
   if (connection->state_ == ConnectionState::kActive) {
     assert(active_connection_count_ != 0);
     --active_connection_count_;
+    g_active_connections.fetch_sub(1, std::memory_order_relaxed);
   }
   if (!reason.ok() || connection->last_error_.ok()) {
     connection->last_error_ = std::move(reason);

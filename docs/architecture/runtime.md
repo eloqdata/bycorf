@@ -59,3 +59,8 @@ join; the runtime then releases the port and software packet queues.
 Sources: `src/runtime/runtime.cpp`, `src/runtime/worker.cpp`,
 `include/bycorf/runtime/cross_core.h`, `src/runtime/foreign_executor.cpp`,
 `src/net/server.cpp`.
+
+Active registered streams are counted across all workers and runtimes in the
+process. The atomic snapshot includes outgoing control connections and is
+updated only at connection open/close, so monitoring can read it without
+scheduling work on a control worker.
