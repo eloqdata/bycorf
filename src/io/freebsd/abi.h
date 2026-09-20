@@ -60,6 +60,9 @@ int bycorf_bsd_initialize(const struct bycorf_bsd_host* host, unsigned workers);
 int bycorf_bsd_attach_worker(unsigned worker);
 int bycorf_bsd_attach_interface(const struct bycorf_bsd_interface* config);
 void bycorf_bsd_input(const void* bytes, size_t length);
+// Trusted, internally queued output to the configured local IPv4 address.
+// Never pass NIC/TAP input here: ordinary input retains source-address checks.
+void bycorf_bsd_local_input(const void* bytes, size_t length);
 void bycorf_bsd_poll(void);
 uint64_t bycorf_bsd_deadline_ns(void);
 

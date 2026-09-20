@@ -296,13 +296,19 @@ class DpdkBackend::Impl {
             ? rte_pktmbuf_read(packet, 0, length, scratch.data())
             : nullptr;
     if (bytes) {
-      bycorf_bsd_input(bytes, length);
+      if (packet->port == RTE_MBUF_PORT_INVALID)
+        bycorf_bsd_local_input(bytes, length);
+      else
+        bycorf_bsd_input(bytes, length);
       ++rx;
     } else
       ++drops;
     rte_pktmbuf_free(packet);
   }
   void Route(rte_mbuf* packet) {
+    // This entry is only used for physical RX. Stamp its origin ourselves so
+    // even a PMD leaving port unset cannot bypass BSD source validation.
+    packet->port = fabric.port;
     std::array<unsigned char, kMaxFrame> scratch;
     const std::size_t length = rte_pktmbuf_pkt_len(packet);
     const auto* bytes = static_cast<const unsigned char*>(
@@ -359,6 +365,22 @@ class DpdkBackend::Impl {
       return 55;
     }
     std::memcpy(output, data, length);
+    if (length >= 34 && Read16(bytes + 12) == 0x0800 &&
+        std::memcmp(bytes + 30, &fabric.interface.address, 4) == 0) {
+      // Loopback is still native BSD TCP. Defer even same-worker delivery:
+      // synchronous input would re-enter TCP while output holds PCB locks.
+      // Listener placement and client-port ownership select the peer VNET;
+      // a physical NIC/switch is never asked to hairpin this packet.
+      const int local = Destination(bytes, length, self.id);
+      if (local < 0) {
+        rte_pktmbuf_free(packet);
+        ++self.drops;
+        return 22;  // BSD EINVAL: unsupported local packet.
+      }
+      if (static_cast<unsigned>(local) != self.id) ++self.forwarded_rx;
+      packet->port = RTE_MBUF_PORT_INVALID;  // Trusted locally generated frame.
+      return self.Enqueue(fabric.lanes[local].rx, packet, local) ? 0 : 55;
+    }
     const unsigned target = self.id % fabric.queues;
     if (target != self.id) ++self.forwarded_tx;
     return self.Enqueue(fabric.lanes[target].tx, packet, target) ? 0 : 55;

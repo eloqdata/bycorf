@@ -83,6 +83,16 @@ Connect completions, refusal and cancellation use the same worker-owned
 completion contract as kernel connects; IPv6 is rejected rather than sent
 through a different network backend.
 
+Connections to the configured local IPv4 address also remain in native TCP.
+Each VNET has an active local host route with software checksums and the
+configured MTU. Its loopback output crosses the copied Ethernet-frame boundary
+and enters the destination worker's software RX ring, using the same listener
+placement and client-port ownership rules as remote traffic. Even same-worker
+delivery is deferred until output releases TCP locks. Local packets never
+require NIC or switch hairpin support and do not enter a kernel socket.
+The host marks this internal delivery explicitly; NIC and TAP packets retain
+FreeBSD's physical-interface source-address validation.
+
 Optional `rss` steering keeps ordinary TCP packets on the receiving queue's
 worker. Service subsets and outgoing-client replies still use explicit software
 ownership to reach the correct VNET. It requires one queue pair per worker and

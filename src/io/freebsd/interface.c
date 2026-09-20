@@ -47,6 +47,26 @@ static int transmit(if_t ifp, struct mbuf* m) {
   m_freem(m);
   return error;
 }
+static int local_output(if_t ifp, struct mbuf* m,
+                        const struct sockaddr* destination,
+                        struct route* route) {
+  // The destination socket may belong to another worker's VNET. Use the same
+  // copied-frame boundary as physical output; the host queues local frames to
+  // their socket owner rather than recursively entering TCP under its lock.
+  if (destination->sa_family != AF_INET ||
+      ((const struct sockaddr_in*)destination)->sin_addr.s_addr !=
+          config.address) {
+    m_freem(m);
+    return EAFNOSUPPORT;
+  }
+  M_PREPEND(m, ETHER_HDR_LEN, M_NOWAIT);
+  if (!m) return ENOBUFS;
+  struct ether_header* header = mtod(m, struct ether_header*);
+  memcpy(header->ether_dhost, config.mac, ETHER_ADDR_LEN);
+  memcpy(header->ether_shost, config.mac, ETHER_ADDR_LEN);
+  header->ether_type = htons(ETHERTYPE_IP);
+  return transmit(interface, m);
+}
 static int control(if_t ifp, u_long command, caddr_t data) {
   if (command == SIOCSIFFLAGS) {
     if_setdrvflags(ifp, IFF_DRV_RUNNING);
@@ -64,6 +84,17 @@ int bycorf_bsd_attach_interface(const struct bycorf_bsd_interface* value) {
   if (!value || !value->transmit || value->mtu < 576 || value->mtu > ETHERMTU)
     return EINVAL;
   config = *value;
+  // Address installation creates a host route through lo0. FreeBSD creates
+  // lo0 down; without bringing it up, IP output rejects that route with
+  // EHOSTUNREACH. Local packets cross the host's frame queues, so compute real
+  // checksums and retain the physical MTU instead of loopback offload flags.
+  if (!V_loif) return ENXIO;
+  if_setflags(V_loif, if_getflags(V_loif) | IFF_UP);
+  if_setdrvflags(V_loif, IFF_DRV_RUNNING);
+  if_setmtu(V_loif, config.mtu);
+  if_sethwassist(V_loif, 0);
+  if_setoutputfn(V_loif, local_output);
+  if_link_state_change(V_loif, LINK_STATE_UP);
   interface = if_alloc(IFT_ETHER);
   if (!interface) return ENOMEM;
   if_initname(interface, "bycorf", 0);
@@ -110,8 +141,15 @@ int bycorf_bsd_attach_interface(const struct bycorf_bsd_interface* value) {
   }
   return error;
 }
-void bycorf_bsd_input(const void* bytes, size_t length) {
+static void input(const void* bytes, size_t length, bool local) {
   if (!interface || length < ETHER_HDR_LEN || length > ETHER_MAX_LEN) return;
+  if (local) {
+    const unsigned char* frame = bytes;
+    if (length < ETHER_HDR_LEN + 20 || frame[12] != 8 || frame[13] != 0 ||
+        memcmp(frame + 26, &config.address, 4) != 0 ||
+        memcmp(frame + 30, &config.address, 4) != 0)
+      return;
+  }
   struct mbuf* m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
   if (!m) {
     if_inc_counter(interface, IFCOUNTER_IQDROPS, 1);
@@ -122,6 +160,17 @@ void bycorf_bsd_input(const void* bytes, size_t length) {
   memcpy(mtod(m, void*), bytes, length);
   struct epoch_tracker epoch;
   NET_EPOCH_ENTER(epoch);
-  if_input(interface, m);
+  // Preserve the stack's anti-spoofing check for physical input. Only the
+  // host's trusted local queue may present a locally sourced packet via lo0.
+  if (local)
+    if_simloop(V_loif, m, AF_INET, ETHER_HDR_LEN);
+  else
+    if_input(interface, m);
   NET_EPOCH_EXIT(epoch);
+}
+void bycorf_bsd_input(const void* bytes, size_t length) {
+  input(bytes, length, false);
+}
+void bycorf_bsd_local_input(const void* bytes, size_t length) {
+  input(bytes, length, true);
 }
