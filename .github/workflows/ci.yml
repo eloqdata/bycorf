@@ -49,7 +49,7 @@ jobs:
         run: pre-commit run clang-format --all-files --show-diff-on-failure
 
   test:
-    name: Tests (${{ matrix.arch }})
+    name: Tests (${{ matrix.label }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -57,9 +57,31 @@ jobs:
       matrix:
         include:
           - arch: amd64
+            label: amd64
             runner: ubuntu-24.04
+            compiler: clang
+            cc: clang-18
+            cxx: clang++-18
           - arch: arm64
+            label: arm64
             runner: ubuntu-24.04-arm
+            compiler: clang
+            cc: clang-18
+            cxx: clang++-18
+          # GCC Debug needs its own coverage: Clang already preserves Task tail
+          # transfers without the public -foptimize-sibling-calls option.
+          - arch: amd64
+            label: amd64, GCC Debug
+            runner: ubuntu-24.04
+            compiler: gcc
+            cc: gcc-13
+            cxx: g++-13
+          - arch: arm64
+            label: arm64, GCC Debug
+            runner: ubuntu-24.04-arm
+            compiler: gcc
+            cc: gcc-13
+            cxx: g++-13
     steps:
       - uses: actions/checkout@v7
         with:
@@ -71,14 +93,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang-18 cmake ninja-build libssl-dev
+            build-essential clang-18 gcc-13 g++-13 cmake ninja-build libssl-dev
       - name: Enable io_uring
         run: sudo sysctl -w kernel.io_uring_disabled=0
       - name: Configure
         run: |
           cmake -S . -B build-ci -G Ninja \
-            -DCMAKE_C_COMPILER=clang-18 \
-            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTING=ON \
             -DBYCORF_BUILD_TESTS=ON \
@@ -97,7 +119,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: test-results-${{ matrix.arch }}
+          name: test-results-${{ matrix.arch }}-${{ matrix.compiler }}
           path: |
             build-ci/test-results/
             build-ci/Testing/Temporary/

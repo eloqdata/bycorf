@@ -41,7 +41,9 @@ connections, and asynchronous I/O; applications provide services above
 
 The default build uses Linux TCP and io_uring. It needs a C++23 compiler,
 CMake 3.20 or newer, Ninja, Make, and OpenSSL development files. CI uses
-Clang 18 on Ubuntu 24.04, natively on AMD64 and ARM64.
+Clang 18 and GCC 13 in Debug mode on Ubuntu 24.04, natively on AMD64 and
+ARM64. Both compilers run the bounded-stack Task regression and the full
+software regression suite.
 
 On Ubuntu 24.04, install the build tools:
 
