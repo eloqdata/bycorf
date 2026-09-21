@@ -41,7 +41,9 @@ connections, and asynchronous I/O; applications provide services above
 
 The default build uses Linux TCP and io_uring. It needs a C++23 compiler,
 CMake 3.20 or newer, Ninja, Make, and OpenSSL development files. CI uses
-GCC 13 on Ubuntu 24.04, natively on AMD64 and ARM64.
+Clang 18 and GCC 13 in Debug mode on Ubuntu 24.04, natively on AMD64 and
+ARM64. Both compilers run the bounded-stack Task regression and the full
+software regression suite.
 
 On Ubuntu 24.04, install the build tools:
 
@@ -222,13 +224,14 @@ ignored; imported sources retain their upstream formatting and notices.
 
 The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to
 `main`, and manual dispatch. One job checks all maintained sources using the
-pinned clang-format hook. Two independent jobs build the core library, RPC
-library, examples, and tests with GCC 13 in Debug, then run CTest natively
-on AMD64 (`ubuntu-24.04`) and ARM64 (`ubuntu-24.04-arm`). The workflow enables
+pinned clang-format hook. Four independent jobs build the core library, RPC
+library, examples, and tests with GCC 13 and Clang 18 in Debug, then run CTest
+natively with each compiler on AMD64 (`ubuntu-24.04`) and ARM64
+(`ubuntu-24.04-arm`). The workflow enables
 io_uring and raises the test shell's memlock limit on its disposable runners.
 
 CTest must discover at least one test. Its JUnit report and detailed logs are
-uploaded as per-architecture artifacts retained for seven days. Hosted CI
+uploaded as per-architecture/compiler artifacts retained for seven days. Hosted CI
 sets `BYCORF_KERNEL_BYPASS=OFF`; DPDK/SPDK hardware testing requires a separate host.
 
 ## License
