@@ -33,6 +33,17 @@ Coroutines cooperate: a long non-suspending handler can delay all work on its
 worker. Worker-local synchronization and cross-worker synchronization have
 separate ownership contracts.
 
+A worker resumes a ready coroutine directly. `Task` enters its child and
+returns to its parent continuation by symmetric transfer, within the same
+worker dispatch and task class. These transfers do not use a dispatcher or
+ready queue; actual I/O or queue waits return control to the scheduler. Native
+stack bounds rely on compiler tail transfers. The CMake target publishes
+`-foptimize-sibling-calls` for GCC, including Debug builds, to every consumer
+that compiles Task coroutine bodies. The bounded-stack regression exercises
+the selected toolchain and build configuration. Awaited child frames remain
+owned by the awaiting `Task` object, including when shutdown destroys a
+suspended root and its child chain.
+
 Cross-worker submissions enter destination mailboxes and resume waiting
 coroutines on their original workers. Workers use io_uring MSG_RING to wake a
 peer; foreign ingress and process control use the pre-created eventfds.
@@ -57,7 +68,7 @@ Worker-affine BSD sockets close and EAL thread registrations detach before
 join; the runtime then releases the port and software packet queues.
 
 Sources: `src/runtime/runtime.cpp`, `src/runtime/worker.cpp`,
-`include/bycorf/runtime/cross_core.h`, `src/runtime/foreign_executor.cpp`,
+`include/bycorf/runtime/task.h`, `include/bycorf/runtime/cross_core.h`, `src/runtime/foreign_executor.cpp`,
 `src/net/server.cpp`.
 
 Active registered streams are counted across all workers and runtimes in the

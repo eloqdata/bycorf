@@ -47,6 +47,10 @@ inline TaskClass CurrentTaskClass() noexcept {
 void RegisterBackgroundTask(std::coroutine_handle<> handle) noexcept;
 void ForgetTaskScheduling(std::coroutine_handle<> handle) noexcept;
 
+// Lazy, owner-local coroutine calls use symmetric transfer: entering a child
+// returns its handle, and final suspension returns the parent continuation.
+// Neither transfer enqueues a worker task. GCC needs -foptimize-sibling-calls
+// on the coroutine bodies, including Debug builds; bycorf::core publishes it.
 template <typename T>
 class Task {
  public:
@@ -99,12 +103,17 @@ class Task {
 
         std::coroutine_handle<> await_suspend(handle_type handle) noexcept {
           auto& promise = handle.promise();
-          if (promise.completion_ != nullptr) {
+          if (promise.completion_ != nullptr) [[unlikely]] {
             promise.completion_(promise.completion_context_, handle);
             return std::noop_coroutine();
           }
           auto continuation = promise.continuation_;
           if (continuation) {
+            // Return directly to the parent without a worker-queue hop. This
+            // requires a compiler tail transfer: ordinary calls accumulate
+            // native stack across repeated immediately completed co_awaits.
+            // bycorf::core propagates -foptimize-sibling-calls for GCC, even
+            // at -O0; the bounded-stack Task test covers this build contract.
             return continuation;
           }
           return std::noop_coroutine();
@@ -180,9 +189,13 @@ class Task {
     std::coroutine_handle<> await_suspend(
         std::coroutine_handle<> awaiting) noexcept {
       handle_.promise().continuation_ = awaiting;
-      if (CurrentTaskClass() == TaskClass::kBackground) {
+      if (CurrentTaskClass() == TaskClass::kBackground) [[unlikely]] {
         RegisterBackgroundTask(handle_);
       }
+      // Enter the child by symmetric transfer, not an explicit resume() call.
+      // Deep child chains also require compiler tail transfers to keep the
+      // native stack bounded. GCC coroutine callers must retain the public
+      // -foptimize-sibling-calls option, including in Debug builds.
       return handle_;
     }
 

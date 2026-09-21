@@ -41,14 +41,16 @@ connections, and asynchronous I/O; applications provide services above
 
 The default build uses Linux TCP and io_uring. It needs a C++23 compiler,
 CMake 3.20 or newer, Ninja, Make, and OpenSSL development files. CI uses
-Clang 18 on Ubuntu 24.04, natively on AMD64 and ARM64.
+Clang 18 and GCC 13 in Debug mode on Ubuntu 24.04, natively on AMD64 and
+ARM64. Both compilers run the bounded-stack Task regression and the full
+software regression suite.
 
 On Ubuntu 24.04, install the build tools:
 
 ```bash
 sudo apt-get update
 sudo apt-get install --no-install-recommends \
-  git build-essential clang-18 cmake ninja-build libssl-dev
+  git build-essential gcc-13 g++-13 cmake ninja-build libssl-dev
 ```
 
 For a new standalone checkout:
@@ -65,7 +67,7 @@ need initialization for the default build:
 ```bash
 git submodule update --init --depth 1 third_party/abseil third_party/liburing
 cmake -S . -B build -G Ninja \
-  -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+  -DCMAKE_C_COMPILER=gcc-13 -DCMAKE_CXX_COMPILER=g++-13 \
   -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
   -DBYCORF_KERNEL_BYPASS=OFF
 cmake --build build --parallel
@@ -75,15 +77,26 @@ ctest --test-dir build --output-on-failure --no-tests=error
 Use `-DCMAKE_BUILD_TYPE=Release` in a separate build directory for performance
 measurements. A Debug build is the default development and CI workflow above.
 
+`Task` uses direct symmetric coroutine transfers without an intermediate
+runtime dispatcher. GCC builds enable `-foptimize-sibling-calls` through the
+public CMake target, including at `-O0`, so immediate calls and returns do not
+accumulate native stack. Other Debug optimization settings and assertions are
+unchanged. Builds that include the headers without linking `bycorf::core` must
+supply this GCC flag themselves. The Task regression checks the selected build
+configuration with a 512 KiB native stack. Use Clang for AddressSanitizer builds;
+GCC sanitizer instrumentation can inhibit tail transfers.
+
 Runtime tests and examples need io_uring to be permitted by the host and
 container policy, and enough locked-memory allowance for registered buffers.
 If startup fails, check the host's `kernel.io_uring_disabled` setting and the
 shell's `ulimit -l`; compilation alone does not verify these runtime conditions.
 
-CTest registers three software regressions, each with a 90-second timeout:
+CTest registers four software regressions. The Task check has a 30-second
+timeout; the other checks have 90-second timeouts:
 
 | Test | Coverage |
 |---|---|
+| `bycorf_task_transfer_check` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
 | `bycorf_connect_timer_check` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
 | `bycorf_connection_storage_check` | Connection storage lifetime while suspended coroutines still borrow it |
 | `bycorf_backend_selection_check` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |
@@ -211,13 +224,14 @@ ignored; imported sources retain their upstream formatting and notices.
 
 The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to
 `main`, and manual dispatch. One job checks all maintained sources using the
-pinned clang-format hook. Two independent jobs build the core library, RPC
-library, examples, and tests with Clang 18 in Debug, then run CTest natively
-on AMD64 (`ubuntu-24.04`) and ARM64 (`ubuntu-24.04-arm`). The workflow enables
+pinned clang-format hook. Four independent jobs build the core library, RPC
+library, examples, and tests with GCC 13 and Clang 18 in Debug, then run CTest
+natively with each compiler on AMD64 (`ubuntu-24.04`) and ARM64
+(`ubuntu-24.04-arm`). The workflow enables
 io_uring and raises the test shell's memlock limit on its disposable runners.
 
 CTest must discover at least one test. Its JUnit report and detailed logs are
-uploaded as per-architecture artifacts retained for seven days. Hosted CI
+uploaded as per-architecture/compiler artifacts retained for seven days. Hosted CI
 sets `BYCORF_KERNEL_BYPASS=OFF`; DPDK/SPDK hardware testing requires a separate host.
 
 ## License
