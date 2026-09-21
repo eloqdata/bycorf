@@ -103,7 +103,7 @@ class Task {
 
         std::coroutine_handle<> await_suspend(handle_type handle) noexcept {
           auto& promise = handle.promise();
-          if (promise.completion_ != nullptr) {
+          if (promise.completion_ != nullptr) [[unlikely]] {
             promise.completion_(promise.completion_context_, handle);
             return std::noop_coroutine();
           }
