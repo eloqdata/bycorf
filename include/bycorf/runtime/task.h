@@ -189,7 +189,7 @@ class Task {
     std::coroutine_handle<> await_suspend(
         std::coroutine_handle<> awaiting) noexcept {
       handle_.promise().continuation_ = awaiting;
-      if (CurrentTaskClass() == TaskClass::kBackground) {
+      if (CurrentTaskClass() == TaskClass::kBackground) [[unlikely]] {
         RegisterBackgroundTask(handle_);
       }
       // Enter the child by symmetric transfer, not an explicit resume() call.
