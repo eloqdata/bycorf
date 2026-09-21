@@ -109,6 +109,11 @@ class Task {
           }
           auto continuation = promise.continuation_;
           if (continuation) {
+            // Return directly to the parent without a worker-queue hop. This
+            // requires a compiler tail transfer: ordinary calls accumulate
+            // native stack across repeated immediately completed co_awaits.
+            // bycorf::core propagates -foptimize-sibling-calls for GCC, even
+            // at -O0; the bounded-stack Task test covers this build contract.
             return continuation;
           }
           return std::noop_coroutine();
@@ -187,6 +192,10 @@ class Task {
       if (CurrentTaskClass() == TaskClass::kBackground) {
         RegisterBackgroundTask(handle_);
       }
+      // Enter the child by symmetric transfer, not an explicit resume() call.
+      // Deep child chains also require compiler tail transfers to keep the
+      // native stack bounded. GCC coroutine callers must retain the public
+      // -foptimize-sibling-calls option, including in Debug builds.
       return handle_;
     }
 
