@@ -75,10 +75,14 @@ ctest --test-dir build --output-on-failure --no-tests=error
 Use `-DCMAKE_BUILD_TYPE=Release` in a separate build directory for performance
 measurements. A Debug build is the default development and CI workflow above.
 
-`Task` advances immediate child/continuation transfers through an iterative
-thread-local dispatcher. Its native stack bound does not require compiler
-sibling-call optimization. The Task regression explicitly disables general
-and sibling-call optimization, including in otherwise optimized builds.
+`Task` uses direct symmetric coroutine transfers without an intermediate
+runtime dispatcher. GCC builds enable `-foptimize-sibling-calls` through the
+public CMake target, including at `-O0`, so immediate calls and returns do not
+accumulate native stack. Other Debug optimization settings and assertions are
+unchanged. Builds that include the headers without linking `bycorf::core` must
+supply this GCC flag themselves. The Task regression checks the selected build
+configuration with a 512 KiB native stack. Use Clang for AddressSanitizer builds;
+GCC sanitizer instrumentation can inhibit tail transfers.
 
 Runtime tests and examples need io_uring to be permitted by the host and
 container policy, and enough locked-memory allowance for registered buffers.

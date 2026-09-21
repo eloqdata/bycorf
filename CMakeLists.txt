@@ -344,6 +344,13 @@ target_link_libraries(bycorf PUBLIC
 target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto
   absl::flat_hash_map)
 
+# GCC lowers symmetric coroutine transfers to growing native calls unless
+# sibling-call optimization is enabled, including at -O0. Task is a public
+# header: consumers must compile their own coroutine bodies with this option.
+# Keep other Debug optimizations, assertions and debug information unchanged.
+target_compile_options(bycorf PUBLIC
+  $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-foptimize-sibling-calls>)
+
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(bycorf PRIVATE -Wall -Wextra -Wpedantic)
   if (BYCORF_ENABLE_WERROR)
@@ -379,11 +386,11 @@ endif()
 if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
   add_executable(bycorf_task_transfer_check tests/task_transfer_check.cpp)
   target_include_directories(bycorf_task_transfer_check PRIVATE include)
-  # Stack safety must hold even when the compiler cannot turn calls into jumps.
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(bycorf_task_transfer_check PRIVATE
-      -O0 -fno-optimize-sibling-calls)
-  endif()
+  # Exercise the public compile policy with this build's actual optimization
+  # level. Avoid linking Worker because this isolated check supplies its own
+  # scheduling hooks to observe Task ownership and background classification.
+  target_compile_options(bycorf_task_transfer_check PRIVATE
+    $<TARGET_PROPERTY:bycorf,INTERFACE_COMPILE_OPTIONS>)
 
   add_executable(bycorf_connect_timer_check
     example/connect_timer_check.cpp

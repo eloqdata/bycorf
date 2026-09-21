@@ -33,15 +33,16 @@ Coroutines cooperate: a long non-suspending handler can delay all work on its
 worker. Worker-local synchronization and cross-worker synchronization have
 separate ownership contracts.
 
-Every worker resume enters a thread-local iterative dispatcher. `Task` yields
-its child or parent continuation to that dispatcher; the current resume returns
-before the next handle is resumed. Synchronous completion and nested awaits
-therefore do not depend on compiler tail-call optimization to bound native
-stack use. Transfers preserve the current task class and bypass the worker's
-ready queue; actual I/O or queue waits return control to the scheduler. Pending
-transfers remain distinct when completion callbacks start Tasks reentrantly.
-Awaited child frames remain owned by the awaiting `Task` object, including
-when shutdown destroys a suspended root and its child chain.
+A worker resumes a ready coroutine directly. `Task` enters its child and
+returns to its parent continuation by symmetric transfer, within the same
+worker dispatch and task class. These transfers do not use a dispatcher or
+ready queue; actual I/O or queue waits return control to the scheduler. Native
+stack bounds rely on compiler tail transfers. The CMake target publishes
+`-foptimize-sibling-calls` for GCC, including Debug builds, to every consumer
+that compiles Task coroutine bodies. The bounded-stack regression exercises
+the selected toolchain and build configuration. Awaited child frames remain
+owned by the awaiting `Task` object, including when shutdown destroys a
+suspended root and its child chain.
 
 Cross-worker submissions enter destination mailboxes and resume waiting
 coroutines on their original workers. Workers use io_uring MSG_RING to wake a

@@ -131,7 +131,7 @@ int Check() {
       });
   std::move(reentrant).ReleaseHandle().resume();
   if (completions != 3 || live != 0) return 1;
-  std::cout << "PASS reentrant completions retain every pending transfer\n";
+  std::cout << "PASS reentrant completions run every child\n";
   return 0;
 }
 }  // namespace
