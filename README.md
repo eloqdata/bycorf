@@ -75,15 +75,22 @@ ctest --test-dir build --output-on-failure --no-tests=error
 Use `-DCMAKE_BUILD_TYPE=Release` in a separate build directory for performance
 measurements. A Debug build is the default development and CI workflow above.
 
+`Task` advances immediate child/continuation transfers through an iterative
+thread-local dispatcher. Its native stack bound does not require compiler
+sibling-call optimization. The Task regression explicitly disables general
+and sibling-call optimization, including in otherwise optimized builds.
+
 Runtime tests and examples need io_uring to be permitted by the host and
 container policy, and enough locked-memory allowance for registered buffers.
 If startup fails, check the host's `kernel.io_uring_disabled` setting and the
 shell's `ulimit -l`; compilation alone does not verify these runtime conditions.
 
-CTest registers three software regressions, each with a 90-second timeout:
+CTest registers four software regressions. The Task check has a 30-second
+timeout; the other checks have 90-second timeouts:
 
 | Test | Coverage |
 |---|---|
+| `bycorf_task_transfer_check` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
 | `bycorf_connect_timer_check` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
 | `bycorf_connection_storage_check` | Connection storage lifetime while suspended coroutines still borrow it |
 | `bycorf_backend_selection_check` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |

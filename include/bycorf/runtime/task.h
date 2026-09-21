@@ -23,6 +23,7 @@
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "bycorf/runtime/coroutine_frame_pool.h"
 
@@ -46,6 +47,32 @@ inline TaskClass CurrentTaskClass() noexcept {
 // every later I/O, lock, or cross-core resume returns to the background queue.
 void RegisterBackgroundTask(std::coroutine_handle<> handle) noexcept;
 void ForgetTaskScheduling(std::coroutine_handle<> handle) noexcept;
+
+namespace detail {
+
+// Drive immediate Task transfers on this native thread without nesting resume
+// calls. Each child/continuation is resumed only after the preceding resume
+// returns, so stack bounds do not depend on compiler tail-call optimization.
+// A real I/O or queue suspension submits no transfer. Completion callbacks may
+// start several Tasks reentrantly; retain all of their pending continuations.
+inline void TransferTask(std::coroutine_handle<> handle) noexcept {
+  struct Transfers {
+    bool running = false;
+    std::vector<std::coroutine_handle<>> pending;
+  };
+  static thread_local Transfers transfers;
+  transfers.pending.push_back(handle);
+  if (transfers.running) return;
+  transfers.running = true;
+  while (!transfers.pending.empty()) {
+    handle = transfers.pending.back();
+    transfers.pending.pop_back();
+    handle.resume();
+  }
+  transfers.running = false;
+}
+
+}  // namespace detail
 
 template <typename T>
 class Task {
@@ -105,7 +132,7 @@ class Task {
           }
           auto continuation = promise.continuation_;
           if (continuation) {
-            return continuation;
+            detail::TransferTask(continuation);
           }
           return std::noop_coroutine();
         }
@@ -183,7 +210,8 @@ class Task {
       if (CurrentTaskClass() == TaskClass::kBackground) {
         RegisterBackgroundTask(handle_);
       }
-      return handle_;
+      detail::TransferTask(handle_);
+      return std::noop_coroutine();
     }
 
     // The owning Task remains alive through the co_await full expression, so

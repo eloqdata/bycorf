@@ -33,6 +33,16 @@ Coroutines cooperate: a long non-suspending handler can delay all work on its
 worker. Worker-local synchronization and cross-worker synchronization have
 separate ownership contracts.
 
+Every worker resume enters a thread-local iterative dispatcher. `Task` yields
+its child or parent continuation to that dispatcher; the current resume returns
+before the next handle is resumed. Synchronous completion and nested awaits
+therefore do not depend on compiler tail-call optimization to bound native
+stack use. Transfers preserve the current task class and bypass the worker's
+ready queue; actual I/O or queue waits return control to the scheduler. Pending
+transfers remain distinct when completion callbacks start Tasks reentrantly.
+Awaited child frames remain owned by the awaiting `Task` object, including
+when shutdown destroys a suspended root and its child chain.
+
 Cross-worker submissions enter destination mailboxes and resume waiting
 coroutines on their original workers. Workers use io_uring MSG_RING to wake a
 peer; foreign ingress and process control use the pre-created eventfds.
@@ -57,7 +67,7 @@ Worker-affine BSD sockets close and EAL thread registrations detach before
 join; the runtime then releases the port and software packet queues.
 
 Sources: `src/runtime/runtime.cpp`, `src/runtime/worker.cpp`,
-`include/bycorf/runtime/cross_core.h`, `src/runtime/foreign_executor.cpp`,
+`include/bycorf/runtime/task.h`, `include/bycorf/runtime/cross_core.h`, `src/runtime/foreign_executor.cpp`,
 `src/net/server.cpp`.
 
 Active registered streams are counted across all workers and runtimes in the

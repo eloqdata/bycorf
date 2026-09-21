@@ -377,6 +377,14 @@ if (BYCORF_BUILD_EXAMPLES)
 endif()
 
 if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
+  add_executable(bycorf_task_transfer_check tests/task_transfer_check.cpp)
+  target_include_directories(bycorf_task_transfer_check PRIVATE include)
+  # Stack safety must hold even when the compiler cannot turn calls into jumps.
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(bycorf_task_transfer_check PRIVATE
+      -O0 -fno-optimize-sibling-calls)
+  endif()
+
   add_executable(bycorf_connect_timer_check
     example/connect_timer_check.cpp
   )
@@ -406,6 +414,9 @@ endif()
 
 if (BYCORF_BUILD_TESTS)
   enable_testing()
+  add_test(NAME bycorf_task_transfer_check COMMAND bycorf_task_transfer_check)
+  set_tests_properties(bycorf_task_transfer_check PROPERTIES
+    TIMEOUT 30 LABELS "runtime;task")
   if (BYCORF_KERNEL_BYPASS)
     add_executable(bycorf_freebsd_local_connect_check
       tests/freebsd_local_connect_check.cpp)

@@ -566,7 +566,7 @@ void Worker::ResumeReady(ReadyTask ready, TaskClass task_class) {
     return;
   }
   TaskClassGuard task_class_guard(task_class);
-  handle.resume();
+  detail::TransferTask(handle);
 }
 
 std::size_t Worker::DrainReadyUntil(std::int64_t deadline_cycles) {
