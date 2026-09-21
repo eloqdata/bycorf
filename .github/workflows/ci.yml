@@ -49,7 +49,7 @@ jobs:
         run: pre-commit run clang-format --all-files --show-diff-on-failure
 
   test:
-    name: Tests (${{ matrix.arch }})
+    name: Tests (GCC 13 Debug, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -71,14 +71,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang-18 cmake ninja-build libssl-dev
+            build-essential gcc-13 g++-13 cmake ninja-build libssl-dev
       - name: Enable io_uring
         run: sudo sysctl -w kernel.io_uring_disabled=0
       - name: Configure
         run: |
           cmake -S . -B build-ci -G Ninja \
-            -DCMAKE_C_COMPILER=clang-18 \
-            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_C_COMPILER=gcc-13 \
+            -DCMAKE_CXX_COMPILER=g++-13 \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTING=ON \
             -DBYCORF_BUILD_TESTS=ON \

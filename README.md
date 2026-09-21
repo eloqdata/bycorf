@@ -41,14 +41,14 @@ connections, and asynchronous I/O; applications provide services above
 
 The default build uses Linux TCP and io_uring. It needs a C++23 compiler,
 CMake 3.20 or newer, Ninja, Make, and OpenSSL development files. CI uses
-Clang 18 on Ubuntu 24.04, natively on AMD64 and ARM64.
+GCC 13 on Ubuntu 24.04, natively on AMD64 and ARM64.
 
 On Ubuntu 24.04, install the build tools:
 
 ```bash
 sudo apt-get update
 sudo apt-get install --no-install-recommends \
-  git build-essential clang-18 cmake ninja-build libssl-dev
+  git build-essential gcc-13 g++-13 cmake ninja-build libssl-dev
 ```
 
 For a new standalone checkout:
@@ -65,7 +65,7 @@ need initialization for the default build:
 ```bash
 git submodule update --init --depth 1 third_party/abseil third_party/liburing
 cmake -S . -B build -G Ninja \
-  -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+  -DCMAKE_C_COMPILER=gcc-13 -DCMAKE_CXX_COMPILER=g++-13 \
   -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
   -DBYCORF_KERNEL_BYPASS=OFF
 cmake --build build --parallel
@@ -223,7 +223,7 @@ ignored; imported sources retain their upstream formatting and notices.
 The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to
 `main`, and manual dispatch. One job checks all maintained sources using the
 pinned clang-format hook. Two independent jobs build the core library, RPC
-library, examples, and tests with Clang 18 in Debug, then run CTest natively
+library, examples, and tests with GCC 13 in Debug, then run CTest natively
 on AMD64 (`ubuntu-24.04`) and ARM64 (`ubuntu-24.04-arm`). The workflow enables
 io_uring and raises the test shell's memlock limit on its disposable runners.
 
