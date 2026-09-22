@@ -188,6 +188,22 @@ if (BYCORF_KERNEL_BYPASS)
   endif()
   find_program(BYCORF_PKG_CONFIG_EXECUTABLE NAMES pkg-config REQUIRED)
   find_package(OpenSSL REQUIRED)
+  # SPDK's nested assembly libraries may need a different compiler from the
+  # application. Pass it explicitly to both configure and make, since CMake
+  # can replace the inherited CC/CXX environment during compiler detection.
+  set(BYCORF_SPDK_C_COMPILER "${CMAKE_C_COMPILER}" CACHE FILEPATH
+    "C compiler for SPDK and its nested dependencies")
+  set(BYCORF_SPDK_CXX_COMPILER "${CMAKE_CXX_COMPILER}" CACHE FILEPATH
+    "C++ compiler for SPDK and its nested dependencies")
+  set(BYCORF_SPDK_COMPILER_ENV
+    "CC=${BYCORF_SPDK_C_COMPILER}" "CXX=${BYCORF_SPDK_CXX_COMPILER}")
+  set(BYCORF_SPDK_CONFIGURED_COMPILERS "")
+  if (EXISTS "${BYCORF_SPDK_SOURCE_DIR}/mk/cc.mk")
+    file(STRINGS "${BYCORF_SPDK_SOURCE_DIR}/mk/cc.mk"
+      BYCORF_SPDK_CONFIGURED_COMPILERS REGEX "^DEFAULT_(CC|CXX)=")
+  endif()
+  set(BYCORF_SPDK_EXPECTED_COMPILERS
+    "DEFAULT_CC=${BYCORF_SPDK_C_COMPILER};DEFAULT_CXX=${BYCORF_SPDK_CXX_COMPILER}")
   set(BYCORF_SPDK_CONFIGURED_DPDK "")
   set(BYCORF_SPDK_CONFIGURED_LCORES "")
   if (EXISTS "${BYCORF_SPDK_SOURCE_DIR}/mk/config.mk")
@@ -201,9 +217,11 @@ if (BYCORF_KERNEL_BYPASS)
   # A capacity change can rebuild DPDK at the same prefix. Reconfigure SPDK
   # too, so its own capacity and all rebuilt consumers use compatible headers.
   if (NOT BYCORF_SPDK_CONFIGURED_DPDK STREQUAL BYCORF_DPDK_PREFIX OR
-      NOT BYCORF_SPDK_CONFIGURED_LCORES STREQUAL BYCORF_DPDK_LCORE_CAPACITY)
+      NOT BYCORF_SPDK_CONFIGURED_LCORES STREQUAL BYCORF_DPDK_LCORE_CAPACITY OR
+      NOT BYCORF_SPDK_CONFIGURED_COMPILERS STREQUAL BYCORF_SPDK_EXPECTED_COMPILERS)
     execute_process(
-      COMMAND "${BYCORF_SPDK_SOURCE_DIR}/configure"
+      COMMAND "${CMAKE_COMMAND}" -E env ${BYCORF_SPDK_COMPILER_ENV}
+        "${BYCORF_SPDK_SOURCE_DIR}/configure"
         --disable-tests --disable-unit-tests --disable-examples --disable-apps
         --without-crypto --without-vhost --without-virtio --without-nvme-cuse
         --without-fsdev --without-shared
@@ -217,7 +235,8 @@ if (BYCORF_KERNEL_BYPASS)
     endif()
   endif()
   execute_process(
-    COMMAND "${BYCORF_MAKE_EXECUTABLE}" -j8
+    COMMAND "${CMAKE_COMMAND}" -E env ${BYCORF_SPDK_COMPILER_ENV}
+      "${BYCORF_MAKE_EXECUTABLE}" -j8
     WORKING_DIRECTORY "${BYCORF_SPDK_SOURCE_DIR}"
     RESULT_VARIABLE BYCORF_SPDK_BUILD_RESULT
   )

@@ -144,10 +144,11 @@ jobs:
         run: |
           # SPDK's pinned ISA-L Crypto AArch64 assembly needs GNU as. Use
           # GCC for SPDK and its nested libraries in this combination only.
-          # Bycorf uses the explicit CMake compilers below; DPDK's Meson
-          # invocation also explicitly receives those CMake compilers.
+          # Bycorf and DPDK keep the matrix compiler.
+          spdk_compilers=()
           if [[ '${{ matrix.bypass }}' == ON && '${{ matrix.arch }}' == arm64 && '${{ matrix.compiler }}' == clang ]]; then
-            export CC=gcc-13 CXX=g++-13
+            spdk_compilers=(-DBYCORF_SPDK_C_COMPILER=/usr/bin/gcc-13
+              -DBYCORF_SPDK_CXX_COMPILER=/usr/bin/g++-13)
           fi
           cmake -S . -B build-ci -G Ninja \
             -DCMAKE_C_COMPILER=${{ matrix.cc }} \
@@ -156,7 +157,8 @@ jobs:
             -DBUILD_TESTING=ON \
             -DBYCORF_BUILD_TESTS=ON \
             -DBYCORF_BUILD_EXAMPLES=ON \
-            -DBYCORF_KERNEL_BYPASS=${{ matrix.bypass }}
+            -DBYCORF_KERNEL_BYPASS=${{ matrix.bypass }} \
+            "${spdk_compilers[@]}"
       - name: Build all targets
         run: cmake --build build-ci --parallel "$(nproc)"
       - name: Run regression tests
