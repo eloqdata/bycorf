@@ -87,13 +87,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize runtime dependencies
-        # SPDK and its transitive dependencies are only needed by hardware builds.
-        run: git submodule update --init --depth 1 third_party/abseil third_party/liburing
+        # Compile the complete backend set on every PR. The CTest suite keeps
+        # using its software-selected io_uring paths; hardware smoke tests are
+        # separate because they require TAP and network capabilities.
+        run: |
+          git submodule update --init --depth 1 \
+            third_party/abseil third_party/liburing third_party/dpdk third_party/spdk
+          git -C third_party/spdk submodule update --init --depth 1 isa-l isa-l-crypto
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang-18 gcc-13 g++-13 cmake ninja-build libssl-dev
+            build-essential clang-18 gcc-13 g++-13 cmake ninja-build libssl-dev \
+            meson python3-pyelftools python3-dev python3-jinja2 python3-tabulate \
+            autoconf automake libtool nasm help2man patch libnuma-dev uuid-dev \
+            libaio-dev libjson-c-dev libncurses-dev libkeyutils-dev pkg-config
       - name: Enable io_uring
         run: sudo sysctl -w kernel.io_uring_disabled=0
       - name: Configure
@@ -105,7 +113,7 @@ jobs:
             -DBUILD_TESTING=ON \
             -DBYCORF_BUILD_TESTS=ON \
             -DBYCORF_BUILD_EXAMPLES=ON \
-            -DBYCORF_KERNEL_BYPASS=OFF
+            -DBYCORF_KERNEL_BYPASS=ON
       - name: Build all targets
         run: cmake --build build-ci --parallel "$(nproc)"
       - name: Run regression tests
