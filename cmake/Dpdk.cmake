@@ -37,7 +37,11 @@ if (NOT BYCORF_DPDK_PREFIX)
   if (EXISTS "${BYCORF_DPDK_BUILD}/build.ninja")
     set(BYCORF_DPDK_RECONFIGURE --reconfigure)
   endif()
-  execute_process(COMMAND "${BYCORF_MESON_EXECUTABLE}" setup
+  # Honor the selected project compiler even when an embedding build sets CC
+  # or CXX for another configure-time dependency such as SPDK.
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E env
+      "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}"
+      "${BYCORF_MESON_EXECUTABLE}" setup
       ${BYCORF_DPDK_RECONFIGURE}
       "${BYCORF_DPDK_BUILD}" "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dpdk"
       "--prefix=${BYCORF_DPDK_PREFIX}" --libdir=lib --buildtype=release
