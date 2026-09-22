@@ -312,6 +312,10 @@ if (BYCORF_KERNEL_BYPASS)
     ${BYCORF_SPDK_SYSTEM_ARCHIVES}
     "-Wl,-Bdynamic"
     ${BYCORF_DPDK_SYSTEM_FLAGS}
+    # CMake de-duplicates imported targets in a final consumer's link line.
+    # Keep this explicit archive scan after SPDK: spdk_sock_posix can introduce
+    # TLS references after an earlier OpenSSL::SSL occurrence was discarded.
+    "-Wl,${OPENSSL_SSL_LIBRARY},${OPENSSL_CRYPTO_LIBRARY}"
     OpenSSL::SSL
     OpenSSL::Crypto
     uuid
