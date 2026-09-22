@@ -142,6 +142,13 @@ jobs:
         run: sudo sysctl -w kernel.io_uring_disabled=0
       - name: Configure
         run: |
+          # The pinned ISA-L Crypto AArch64 assembly is accepted by GCC but
+          # rejected by Clang's integrated assembler. Keep compiling Bycorf
+          # and DPDK with the matrix compiler; select GCC only for SPDK's
+          # configure-time dependency build inherited from this environment.
+          if [[ '${{ matrix.bypass }}' == ON && '${{ matrix.arch }}' == arm64 && '${{ matrix.compiler }}' == clang ]]; then
+            export CC=gcc-13 CXX=g++-13
+          fi
           cmake -S . -B build-ci -G Ninja \
             -DCMAKE_C_COMPILER=${{ matrix.cc }} \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
