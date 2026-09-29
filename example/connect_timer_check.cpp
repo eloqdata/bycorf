@@ -35,6 +35,7 @@
 
 #include "absl/status/status.h"
 #include "bycorf/io/storage.h"
+#include "bycorf/net/tcp_connect.h"
 #include "bycorf/net/tcp_listener.h"
 #include "bycorf/net/tcp_stream.h"
 #include "bycorf/runtime/runtime.h"
@@ -205,7 +206,11 @@ bycorf::Task<absl::Status> CheckConnectSuccess(bycorf::Worker& worker) {
     co_return port.status();
   }
 
-  auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 2s);
+  bycorf::TcpConnectCancellation cancellation;
+  auto client = co_await bycorf::ConnectTcpCancellable(
+      worker, "127.0.0.1", *port, 2s, &cancellation);
+  cancellation.Cancel();
+  cancellation.Cancel();
   Check(client.ok(), "connect-success: ConnectTcp to local listener");
   if (!client.ok()) {
     co_return client.status();
@@ -397,6 +402,53 @@ bycorf::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
   co_return absl::OkStatus();
 }
 
+bycorf::Task<absl::Status> CancelConnectAfter(
+    bycorf::Worker& worker,
+    std::shared_ptr<bycorf::TcpConnectCancellation> cancellation) {
+  (void)co_await bycorf::SleepFor(worker, 10ms);
+  cancellation->Cancel();
+  cancellation->Cancel();
+  co_return absl::OkStatus();
+}
+
+bycorf::Task<absl::Status> CheckConnectCancellation(bycorf::Worker& worker) {
+  bycorf::TcpConnectCancellation before;
+  before.Cancel();
+  auto cancelled = co_await bycorf::ConnectTcpCancellable(worker, "127.0.0.1",
+                                                          1, 5s, &before);
+  Check(!cancelled.ok() && absl::IsCancelled(cancelled.status()),
+        "connect: cancel before submission");
+
+  // A full, zero-length listen backlog drops subsequent SYNs on loopback.
+  // Exercise a real pending connect without relying on an external route or
+  // privileged firewall rules. Keep the first connection queued until done.
+  bycorf::TcpListener listener;
+  auto bound = listener.Bind(&worker, "127.0.0.1", 0);
+  if (!bound.ok()) co_return bound;
+  Check(::listen(listener.NativeFd(), 0) == 0, "connect-cancel: tiny backlog");
+  auto port = BoundPort(listener);
+  if (!port.ok()) co_return port.status();
+  auto filler = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 1s);
+  if (!filler.ok()) co_return filler.status();
+
+  for (unsigned attempt = 0; attempt < 32; ++attempt) {
+    auto cancellation = std::make_shared<bycorf::TcpConnectCancellation>();
+    worker.Spawn(CancelConnectAfter(worker, cancellation));
+    const auto started = std::chrono::steady_clock::now();
+    auto client = co_await bycorf::ConnectTcpCancellable(
+        worker, "127.0.0.1", *port, 1s, cancellation.get());
+    Check(!client.ok() && absl::IsCancelled(client.status()),
+          "connect: pending attempt resolves Cancelled");
+    Check(ElapsedMs(started) < 500, "connect: cancellation beats deadline");
+    if (client.ok()) client->Close().IgnoreError();
+  }
+  (void)co_await bycorf::SleepFor(worker, 1100ms);
+  Check(true, "connect: cancelled frames have no late deadline completion");
+  filler->Close().IgnoreError();
+  listener.Close().IgnoreError();
+  co_return absl::OkStatus();
+}
+
 bycorf::Task<absl::Status> RunAllChecks(bycorf::Worker& worker) {
   co_await CheckTimerFire(worker);
   co_await CheckTimerCancelOnWorker(worker);
@@ -404,6 +456,8 @@ bycorf::Task<absl::Status> RunAllChecks(bycorf::Worker& worker) {
   co_await CheckTimerCancelAfterFire(worker);
   co_await CheckTimerCancelBeforeAwait(worker);
   co_await CheckConnectSuccess(worker);
+  const auto cancellation = co_await CheckConnectCancellation(worker);
+  Check(cancellation.ok(), "connect: cancellation scenario completed");
   co_await CheckConnectRefused(worker);
   co_await CheckConnectTimeout(worker);
   co_await CheckConnectRejectsHostname(worker);
