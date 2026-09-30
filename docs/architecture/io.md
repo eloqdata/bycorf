@@ -41,7 +41,11 @@ not create a second ring or worker pool for either accelerator.
 SPDK storage uses DMA buffers, NVMe namespaces and worker-owned queue pairs.
 The io_uring selection uses ordinary aligned buffers and kernel file/block I/O.
 SPDK completion polling is inactive when storage uses io_uring; in-flight SPDK
-storage prevents sleeping before its completions can be polled.
+storage prevents sleeping before its completions can be polled. As with the
+NVMe FLUSH command, SPDK durability barriers cover previously completed writes;
+callers await data writes before requesting a barrier. Controllers that report
+no volatile write cache already make completed writes durable, so their no-op
+FLUSH completes through the worker's deferred completion queue.
 
 Either accelerator can initialize the one process-wide DPDK EAL, through the
 shared `spdk_env_init` wrapper. Calling this wrapper alone does not activate
