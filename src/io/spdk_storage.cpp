@@ -623,6 +623,18 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid SPDK flush request");
   }
+  auto* device = static_cast<SpdkDevice*>(opened->device_);
+  const auto* data = spdk_nvme_ctrlr_get_data(device->controller_->ctrlr_);
+  if (!data->vwc.present) {
+    // NVMe defines FLUSH as a no-op without a volatile write cache. Its scope
+    // is writes completed before submission, not still-outstanding I/O; callers
+    // must await their data writes before submitting a durability barrier.
+    // Preserve deferred completion: the awaitable installs its continuation
+    // after submit returns. Concurrent reads do not require a hardware round
+    // trip.
+    pending_completions_.emplace_back(tag, 0);
+    return absl::OkStatus();
+  }
   AsyncRequest* request = AcquireRequest();
   if (request == nullptr) {
     return absl::Status(absl::StatusCode::kResourceExhausted,
@@ -631,7 +643,6 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
   request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = 0;
-  auto* device = static_cast<SpdkDevice*>(opened->device_);
   if (spdk_nvme_ns_cmd_flush(device->ns_, opened->qpair_, CompleteAsync,
                              request) != 0) {
     ReleaseRequest(request);
