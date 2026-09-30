@@ -31,6 +31,7 @@
 
 #include "bycorf/io/completion.h"
 #include "bycorf/net/socket_ops.h"
+#include "bycorf/net/tcp_connect.h"
 #include "bycorf/net/tls.h"
 #include "bycorf/runtime/worker.h"
 
@@ -689,9 +690,61 @@ absl::Status TcpStream::Close() noexcept {
   return absl::OkStatus();
 }
 
+void TcpConnectCancellation::Cancel() noexcept {
+  if (cancelled_) return;
+  cancelled_ = true;
+  if (operation_ != nullptr) (void)worker_->SubmitCancel(operation_);
+}
+
+// Register cancellation only after the existing awaitable has submitted its
+// connect and timer. Submission may dispatch nested completions while making
+// SQ space: an earlier Cancel records intent and is replayed after binding.
+// The existing awaitable still owns retirement of both completion tags.
+class CancellableConnectAwaitable {
+ public:
+  CancellableConnectAwaitable(Worker& worker, int fd, const sockaddr* address,
+                              socklen_t length,
+                              std::chrono::nanoseconds timeout,
+                              TcpConnectCancellation* cancellation)
+      : worker_(worker),
+        operation_(worker, fd, address, length, timeout),
+        cancellation_(cancellation) {}
+
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting) {
+    const bool suspended = operation_.await_suspend(awaiting);
+    if (suspended && cancellation_ != nullptr) {
+      cancellation_->worker_ = &worker_;
+      cancellation_->operation_ = &operation_;
+      if (cancellation_->cancelled_) (void)worker_.SubmitCancel(&operation_);
+    }
+    return suspended;
+  }
+  absl::Status await_resume() {
+    if (cancellation_ != nullptr) cancellation_->operation_ = nullptr;
+    auto status = operation_.await_resume();
+    if (cancellation_ != nullptr && cancellation_->cancelled())
+      return absl::CancelledError("connect cancelled");
+    return status;
+  }
+
+ private:
+  Worker& worker_;
+  ConnectOperation operation_;
+  TcpConnectCancellation* cancellation_;
+};
+
 Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
                                            std::uint16_t port,
                                            std::chrono::nanoseconds timeout) {
+  co_return co_await ConnectTcpCancellable(worker, ip, port, timeout, nullptr);
+}
+
+Task<absl::StatusOr<TcpStream>> ConnectTcpCancellable(
+    Worker& worker, std::string_view ip, std::uint16_t port,
+    std::chrono::nanoseconds timeout, TcpConnectCancellation* cancellation) {
+  if (cancellation != nullptr && cancellation->cancelled())
+    co_return absl::CancelledError("connect cancelled");
   // Numeric endpoints only: DNS resolution does not belong on a worker loop.
   sockaddr_storage address{};
   socklen_t address_length = 0;
@@ -743,9 +796,9 @@ Task<absl::StatusOr<TcpStream>> ConnectTcp(Worker& worker, std::string_view ip,
     co_return ErrnoToStatus(error, "setsockopt(TCP_NODELAY) failed");
   }
 
-  ConnectOperation operation(worker, fd,
-                             reinterpret_cast<const sockaddr*>(&address),
-                             address_length, timeout);
+  CancellableConnectAwaitable operation(
+      worker, fd, reinterpret_cast<const sockaddr*>(&address), address_length,
+      timeout, cancellation);
   absl::Status connected = co_await operation;
   if (!connected.ok()) {
     // The operation retired fully (both CQEs consumed), so the ring no longer

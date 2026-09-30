@@ -32,6 +32,12 @@ drain before the owning worker is destroyed. TCP service shutdown posts
 listener-close work through each worker's foreign executor when the DPDK
 backend is selected.
 
+Outbound numeric connects own their socket until connect and deadline completions
+have both retired. `ConnectTcpCancellable` additionally accepts a caller-owned,
+one-attempt cancellation object on the same worker. Cancelling requests retirement;
+callers still join the connecting coroutine before releasing its cancellation
+object or worker. Cancellation after return cannot affect the resulting stream.
+
 ## Kernel TCP
 
 Linux owns the TCP state and NIC receive processing. An accepted Linux socket
