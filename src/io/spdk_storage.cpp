@@ -665,8 +665,12 @@ SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
     result.completions_ = static_cast<std::uint32_t>(completions.size());
   }
   const std::size_t channel_count = channels_.size();
+  // Keep this pass's origin fixed while advancing the next-pass cursor below.
+  // Using the mutable cursor in the index skips channels (with six channels,
+  // two qpairs can remain unpolled forever and stall reads or flushes).
+  const std::size_t first_channel = next_poll_channel_;
   for (std::size_t visited = 0; visited < channel_count; ++visited) {
-    const std::size_t index = (next_poll_channel_ + visited) % channel_count;
+    const std::size_t index = (first_channel + visited) % channel_count;
     ControllerChannel& channel = channels_[index];
     const unsigned remaining =
         max_completions == 0 ? 0
