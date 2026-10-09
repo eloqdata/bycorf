@@ -573,14 +573,15 @@ absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
   request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = static_cast<int>(bytes);
-  request->ns_ = device->ns_;
-  request->qpair_ = opened->qpair_;
+  request->file_ = file;
   request->buffer_ = buffer;
   request->lba_ = offset / sector;
   request->count_ = static_cast<std::uint32_t>(bytes / sector);
   request->operation_ =
       write ? AsyncRequest::Operation::kWrite : AsyncRequest::Operation::kRead;
-  return SubmitOrDefer(request);
+  // Reuse the lookup needed for validation on the ordinary submission path;
+  // only a deferred retry needs to resolve the saved file index again.
+  return SubmitOrDefer(request, device->ns_, opened->qpair_);
 }
 
 absl::Status SpdkStorageBackend::SubmitReadFixed(FixedFile file,
@@ -639,41 +640,38 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
   request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = 0;
-  request->ns_ = device->ns_;
-  request->qpair_ = opened->qpair_;
+  request->file_ = file;
   request->operation_ = AsyncRequest::Operation::kFlush;
-  return SubmitOrDefer(request);
+  return SubmitOrDefer(request, device->ns_, opened->qpair_);
 }
 
-int SpdkStorageBackend::TrySubmit(AsyncRequest* request) {
+int SpdkStorageBackend::TrySubmit(AsyncRequest* request, spdk_nvme_ns* ns,
+                                  spdk_nvme_qpair* qpair) {
   switch (request->operation_) {
     case AsyncRequest::Operation::kRead:
-      return spdk_nvme_ns_cmd_read(request->ns_, request->qpair_,
-                                   request->buffer_, request->lba_,
+      return spdk_nvme_ns_cmd_read(ns, qpair, request->buffer_, request->lba_,
                                    request->count_, CompleteAsync, request, 0);
     case AsyncRequest::Operation::kWrite:
-      return spdk_nvme_ns_cmd_write(request->ns_, request->qpair_,
-                                    request->buffer_, request->lba_,
+      return spdk_nvme_ns_cmd_write(ns, qpair, request->buffer_, request->lba_,
                                     request->count_, CompleteAsync, request, 0);
     case AsyncRequest::Operation::kFlush:
-      return spdk_nvme_ns_cmd_flush(request->ns_, request->qpair_,
-                                    CompleteAsync, request);
+      return spdk_nvme_ns_cmd_flush(ns, qpair, CompleteAsync, request);
   }
   return -EINVAL;
 }
 
-absl::Status SpdkStorageBackend::SubmitOrDefer(AsyncRequest* request) {
-  const int rc = TrySubmit(request);
-  if (rc == -ENOMEM &&
-      spdk_nvme_qpair_get_num_outstanding_reqs(request->qpair_) != 0) {
+absl::Status SpdkStorageBackend::SubmitOrDefer(AsyncRequest* request,
+                                               spdk_nvme_ns* ns,
+                                               spdk_nvme_qpair* qpair) {
+  const int rc = TrySubmit(request, ns, qpair);
+  if (rc == -ENOMEM && spdk_nvme_qpair_get_num_outstanding_reqs(qpair) != 0) {
     // SPDK request descriptors are bounded independently of our DMA slots.
     // A rejected command has not taken ownership of the buffer or callback.
     // Keep both alive in the worker-local pool and retry after polling, never
     // poll inline: the awaitable has not installed its continuation yet.
-    auto channel = std::find_if(channels_.begin(), channels_.end(),
-                                [request](const auto& candidate) {
-                                  return candidate.qpair_ == request->qpair_;
-                                });
+    auto channel = std::find_if(
+        channels_.begin(), channels_.end(),
+        [qpair](const auto& candidate) { return candidate.qpair_ == qpair; });
     assert(channel != channels_.end());
     if (channel->pending_tail_ != nullptr) {
       channel->pending_tail_->next_ = request;
@@ -698,7 +696,10 @@ void SpdkStorageBackend::RetryDeferred(ControllerChannel& channel,
        channel.pending_head_ != nullptr && (limit == 0 || submitted < limit);
        ++submitted) {
     AsyncRequest* request = channel.pending_head_;
-    const int rc = TrySubmit(request);
+    const OpenFile& opened = files_[request->file_.index_];
+    assert(opened.qpair_ == channel.qpair_);
+    auto* device = static_cast<SpdkDevice*>(opened.device_);
+    const int rc = TrySubmit(request, device->ns_, channel.qpair_);
     if (rc == -ENOMEM &&
         spdk_nvme_qpair_get_num_outstanding_reqs(channel.qpair_) != 0) {
       break;
