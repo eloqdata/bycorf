@@ -447,12 +447,35 @@ if (BYCORF_BUILD_TESTS)
     # Explicit hardware paths/allowlists are required; do not run in ctest.
     add_executable(bycorf_spdk_backpressure_check tests/spdk_backpressure_check.cpp)
     target_link_libraries(bycorf_spdk_backpressure_check PRIVATE bycorf::core)
+
+    # Run the real backend against link-time NVMe stubs in hosted CI. Keep
+    # device emulation out of the production request path and use SPDK's own
+    # headers so API changes also type-check the stub signatures.
+    add_executable(bycorf_spdk_backpressure_stub_check
+      tests/spdk_backpressure_stub_check.cpp)
+    target_link_libraries(bycorf_spdk_backpressure_stub_check PRIVATE bycorf::core)
+    target_include_directories(bycorf_spdk_backpressure_stub_check PRIVATE
+      "${BYCORF_SPDK_SOURCE_DIR}/include")
+    foreach(symbol IN ITEMS
+        spdk_env_init spdk_nvme_probe spdk_nvme_ctrlr_get_ns
+        spdk_nvme_ns_is_active spdk_nvme_ns_get_sector_size spdk_nvme_ns_get_size
+        spdk_nvme_ctrlr_get_data spdk_nvme_ctrlr_alloc_io_qpair
+        spdk_nvme_ctrlr_free_io_qpair spdk_nvme_qpair_get_num_outstanding_reqs
+        spdk_nvme_qpair_process_completions spdk_nvme_ns_cmd_read
+        spdk_nvme_ns_cmd_write spdk_nvme_ns_cmd_flush)
+      target_link_options(bycorf_spdk_backpressure_stub_check PRIVATE
+        "LINKER:--wrap=${symbol}")
+    endforeach()
   endif()
   enable_testing()
   add_test(NAME bycorf_task_transfer_check COMMAND bycorf_task_transfer_check)
   set_tests_properties(bycorf_task_transfer_check PROPERTIES
     TIMEOUT 30 LABELS "runtime;task")
   if (BYCORF_KERNEL_BYPASS)
+    add_test(NAME bycorf_spdk_backpressure_stub_check
+      COMMAND bycorf_spdk_backpressure_stub_check)
+    set_tests_properties(bycorf_spdk_backpressure_stub_check PROPERTIES
+      TIMEOUT 30 LABELS "runtime;storage;spdk;stub")
     add_executable(bycorf_freebsd_local_connect_check
       tests/freebsd_local_connect_check.cpp)
     target_link_libraries(bycorf_freebsd_local_connect_check PRIVATE bycorf_freebsd)

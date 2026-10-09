@@ -119,9 +119,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize runtime dependencies
-        # Software coverage remains independent of hardware source trees. The
-        # bypass half compiles the complete backend set; CTest still selects
-        # io_uring and hardware smoke tests remain separate.
+        # Non-bypass jobs need only the kernel runtime dependencies. The
+        # bypass half compiles the complete backend set; CTest covers SPDK
+        # backpressure with device stubs and otherwise selects io_uring.
+        # Hardware smoke tests remain separate.
         run: |
           git submodule update --init --depth 1 third_party/abseil third_party/liburing
           if [[ '${{ matrix.bypass }}' == ON ]]; then
