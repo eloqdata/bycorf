@@ -83,6 +83,7 @@ class SpdkStorageBackend {
   SpdkStorageBackend& operator=(const SpdkStorageBackend&) = delete;
   ~SpdkStorageBackend();
 
+  // Initialize only the storage backend embedded in worker.
   absl::Status Init(Worker* worker);
   void Shutdown();
 
@@ -101,6 +102,8 @@ class SpdkStorageBackend {
                                 std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
 
+  // Deliver completions on the owning worker, with its worker TLS bound.
+  // This also applies when Shutdown drains outstanding requests.
   SpdkPollResult Poll(unsigned max_completions = 0);
   bool HasOutstanding() const noexcept {
     return outstanding_ != 0 || !pending_completions_.empty();
@@ -109,7 +112,6 @@ class SpdkStorageBackend {
 
  private:
   struct AsyncRequest {
-    SpdkStorageBackend* backend_ = nullptr;
     IoCompletion* tag_ = nullptr;
     AsyncRequest* next_ = nullptr;
     void* buffer_ = nullptr;

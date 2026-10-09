@@ -396,6 +396,12 @@ class Worker {
   void SpawnBackground(Task<absl::Status> task);
 
  private:
+#if BYCORF_KERNEL_BYPASS
+  // SPDK callbacks resolve this worker's sole storage backend through the
+  // existing worker TLS instead of storing an owner pointer in every request.
+  friend class SpdkStorageBackend;
+#endif
+
   struct StorageFileIoStats {
     std::uint64_t submitted_write_bytes_ = 0;
     std::uint64_t durable_write_bytes_ = 0;

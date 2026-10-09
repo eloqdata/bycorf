@@ -376,7 +376,9 @@ void SpdkStorageBackend::CompleteAsync(void* context,
   auto* request = static_cast<AsyncRequest*>(context);
   const int result =
       spdk_nvme_cpl_is_error(completion) ? -EIO : request->success_result_;
-  SpdkStorageBackend* backend = request->backend_;
+  Worker* worker = ThisWorker().self_;
+  assert(worker != nullptr);
+  SpdkStorageBackend* backend = &worker->storage_backend_;
   IoCompletion* tag = request->tag_;
   backend->CompleteRequest(tag, result);
   backend->ReleaseRequest(request);
@@ -390,9 +392,9 @@ void SpdkStorageBackend::CompleteRequest(IoCompletion* tag, int result) {
 }
 
 absl::Status SpdkStorageBackend::Init(Worker* worker) {
-  if (worker == nullptr) {
+  if (worker == nullptr || &worker->storage_backend_ != this) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
-                        "SPDK storage backend requires a worker");
+                        "SPDK storage backend must be owned by its worker");
   }
   worker_ = worker;
   // Bound accepted foreground/background I/O, including requests waiting for
@@ -473,7 +475,6 @@ SpdkStorageBackend::AcquireRequest() noexcept {
 }
 
 void SpdkStorageBackend::ReleaseRequest(AsyncRequest* request) noexcept {
-  request->backend_ = nullptr;
   request->tag_ = nullptr;
   request->success_result_ = 0;
   request->next_ = free_requests_;
@@ -570,7 +571,6 @@ absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
     return absl::Status(absl::StatusCode::kResourceExhausted,
                         "SPDK request pool exhausted");
   }
-  request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = static_cast<int>(bytes);
   request->file_ = file;
@@ -637,7 +637,6 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
     return absl::Status(absl::StatusCode::kResourceExhausted,
                         "SPDK request pool exhausted");
   }
-  request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = 0;
   request->file_ = file;
@@ -720,6 +719,7 @@ void SpdkStorageBackend::RetryDeferred(ControllerChannel& channel,
 }
 
 SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
+  assert(!initialized_ || ThisWorker().self_ == worker_);
   SpdkPollResult result;
   if (!pending_completions_.empty()) {
     std::vector<std::pair<IoCompletion*, int>> completions;

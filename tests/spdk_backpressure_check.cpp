@@ -15,6 +15,8 @@
  */
 
 #include <fcntl.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -29,17 +31,21 @@ namespace {
 struct Completion : bycorf::IoCompletion {
   unsigned calls = 0;
   int result = -1;
+  unsigned* completed_total = nullptr;
   void Complete(bycorf::Worker&, int value, unsigned) override {
     ++calls;
     result = value;
+    if (completed_total != nullptr) ++*completed_total;
   }
 };
 
-void Drain(bycorf::SpdkStorageBackend& backend) {
+template <typename Done>
+void Drain(bycorf::Worker& worker, Done done) {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(30);
-  while (backend.HasOutstanding()) {
-    backend.Poll(16);
+  while (!done()) {
+    // An empty poll is not a failure; NVMe may complete on a later pass.
+    worker.RunOnce(false);
     if (std::chrono::steady_clock::now() > deadline) {
       std::cerr << "FAIL timed out draining accepted I/O\n";
       // Never reclaim DMA buffers while the device may still use them.
@@ -71,21 +77,28 @@ int main(int argc, char** argv) {
     }
   }
   bycorf::ReleaseSpdkStorageMetadataQpairs();
+  // Use the real one-backend-per-worker ownership and callback context.
+  bycorf::CrossCore cross_core(1);
+  const int wake_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (wake_fd < 0) return 1;
+  cross_core.mailbox(0).wake_fd_ = wake_fd;
   bycorf::Worker worker;
-  bycorf::SpdkStorageBackend backend;
+  worker.BindCrossCore(0, &cross_core);
+  bycorf::SetThisWorker(0, &cross_core, &worker);
   const unsigned files = argc - 1;
-  if (!backend.Init(&worker).ok() || !backend.RegisterFixedFiles(files).ok())
+  if (!worker.Init({.spdk_max_completions_per_poll_ = 16}).ok() ||
+      !worker.RegisterFixedFiles(files).ok())
     return 1;
   for (unsigned i = 0; i < files; ++i) {
     Completion opened;
     const auto status =
-        backend.SubmitOpenDirect(argv[i + 1], O_RDWR, 0, {i}, &opened);
+        worker.SubmitOpenDirect(argv[i + 1], O_RDWR, 0, {i}, &opened);
     if (!status.ok()) {
       std::cerr << status << '\n';
       return 1;
     }
     if (opened.calls != 0) return 1;
-    Drain(backend);
+    Drain(worker, [&] { return opened.calls != 0; });
     if (opened.calls != 1 || opened.result != 0) return 1;
   }
   constexpr unsigned per_file = 1024;
@@ -99,16 +112,18 @@ int main(int argc, char** argv) {
     std::vector<Completion> tags(count);
     std::vector<bool> accepted(count);
     unsigned rejected = 0;
+    unsigned delivered = 0;
     for (unsigned i = 0; i < count; ++i) {
-      const auto status = backend.SubmitRead(
+      tags[i].completed_total = &delivered;
+      const auto status = worker.SubmitRead(
           {i % files}, {buffers + i * bytes, bytes}, 0, &tags[i]);
       accepted[i] = status.ok();
       rejected += !status.ok();
       passed &= tags[i].calls == 0;
     }
     Completion closed;
-    passed &= !backend.SubmitCloseDirect({0}, &closed).ok();
-    Drain(backend);
+    passed &= !worker.SubmitCloseDirect({0}, &closed).ok();
+    Drain(worker, [&] { return delivered == count - rejected; });
     unsigned completed = 0;
     for (unsigned i = 0; i < count; ++i) {
       if (!accepted[i]) continue;
@@ -122,14 +137,26 @@ int main(int argc, char** argv) {
     std::cout << "round=" << round << " submitted=" << count
               << " rejected=" << rejected << " completed=" << completed << '\n';
   }
-  bycorf::FreeStorageBuffer(buffers, bytes);
   for (unsigned i = 0; i < files; ++i) {
     Completion closed;
-    passed &= backend.SubmitCloseDirect({i}, &closed).ok();
-    Drain(backend);
+    passed &= worker.SubmitCloseDirect({i}, &closed).ok();
+    Drain(worker, [&] { return closed.calls != 0; });
     passed &= closed.calls == 1 && closed.result == 0;
   }
-  backend.Shutdown();
+  // Shutdown must finish an accepted read under the same worker TLS before
+  // its caller-owned buffer and completion tag are reclaimed.
+  Completion reopened;
+  if (!worker.SubmitOpenDirect(argv[1], O_RDWR, 0, {0}, &reopened).ok())
+    return 1;
+  Drain(worker, [&] { return reopened.calls != 0; });
+  passed &= reopened.calls == 1 && reopened.result == 0;
+  Completion shutdown;
+  if (!worker.SubmitRead({0}, {buffers, bytes}, 0, &shutdown).ok()) return 1;
+  passed &= shutdown.calls == 0;
+  worker.Shutdown();
+  passed &= shutdown.calls == 1 && shutdown.result == bytes;
+  bycorf::FreeStorageBuffer(buffers, bytes);
+  close(wake_fd);
   std::cout << (passed ? "PASS" : "FAIL") << " SPDK request backpressure\n";
   return passed ? 0 : 1;
 }
