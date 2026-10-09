@@ -91,8 +91,8 @@ container policy, and enough locked-memory allowance for registered buffers.
 If startup fails, check the host's `kernel.io_uring_disabled` setting and the
 shell's `ulimit -l`; compilation alone does not verify these runtime conditions.
 
-CTest registers four software regressions. The Task check has a 30-second
-timeout; the other checks have 90-second timeouts:
+CTest always registers the following software regressions. The Task check has
+a 30-second timeout; the other checks below have 90-second timeouts:
 
 | Test | Coverage |
 |---|---|
@@ -106,6 +106,22 @@ connection-timeout probe warns if the host rejects its unreachable destination
 immediately, since that exercises connection failure instead of the deadline.
 These software tests also run in a bypass-capable build with the default
 kernel/io_uring selection, without activating EAL or accessing devices.
+
+With `BYCORF_KERNEL_BYPASS=ON`, CTest also runs the FreeBSD local-connect
+regression and `bycorf_spdk_backpressure_stub_check`. The SPDK check uses the
+real backend and Worker with link-time stubs for EAL initialization and NVMe
+device calls. It covers queue exhaustion, FIFO retries, independent qpairs,
+submission/completion errors, request-pool reuse, and shutdown draining without
+NVMe hardware, hugepages, or device binding. It still requires working io_uring
+and the normal runtime memlock allowance. Run it alone with:
+
+```bash
+ctest --test-dir build -R '^bycorf_spdk_backpressure_stub_check$' --output-on-failure
+```
+
+`bycorf_spdk_backpressure_check` is a separate read-only hardware check. It is
+built in bypass test builds but excluded from CTest; running it requires
+explicit SPDK device paths and a configured device allowlist.
 
 To build tests without the example applications:
 
@@ -224,15 +240,17 @@ ignored; imported sources retain their upstream formatting and notices.
 
 The [CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to
 `main`, and manual dispatch. One job checks all maintained sources using the
-pinned clang-format hook. Four independent jobs build the core library, RPC
+pinned clang-format hook. Eight independent jobs build the core library, RPC
 library, examples, and tests with GCC 13 and Clang 18 in Debug, then run CTest
 natively with each compiler on AMD64 (`ubuntu-24.04`) and ARM64
-(`ubuntu-24.04-arm`). The workflow enables
-io_uring and raises the test shell's memlock limit on its disposable runners.
+(`ubuntu-24.04-arm`), with `BYCORF_KERNEL_BYPASS` both `OFF` and `ON`. The
+workflow enables io_uring and raises the test shell's memlock limit on its
+disposable runners.
 
 CTest must discover at least one test. Its JUnit report and detailed logs are
-uploaded as per-architecture/compiler artifacts retained for seven days. Hosted CI
-sets `BYCORF_KERNEL_BYPASS=OFF`; DPDK/SPDK hardware testing requires a separate host.
+uploaded as per-architecture/compiler/bypass artifacts retained for seven days.
+The bypass jobs run the SPDK stub regression; DPDK/SPDK hardware testing
+requires a separate host.
 
 ## License
 
