@@ -663,6 +663,10 @@ absl::Status SpdkStorageBackend::SubmitOrDefer(AsyncRequest* request,
                                                spdk_nvme_ns* ns,
                                                spdk_nvme_qpair* qpair) {
   const int rc = TrySubmit(request, ns, qpair);
+  if (rc == 0) [[likely]] {
+    ++outstanding_;
+    return absl::OkStatus();
+  }
   if (rc == -ENOMEM && spdk_nvme_qpair_get_num_outstanding_reqs(qpair) != 0) {
     // SPDK request descriptors are bounded independently of our DMA slots.
     // A rejected command has not taken ownership of the buffer or callback.
@@ -678,15 +682,14 @@ absl::Status SpdkStorageBackend::SubmitOrDefer(AsyncRequest* request,
       channel->pending_head_ = request;
     }
     channel->pending_tail_ = request;
-  } else if (rc != 0) {
-    ReleaseRequest(request);
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "SPDK I/O submission failed: rc=" + std::to_string(rc));
+    // Count deferred commands too: close/shutdown and worker sleep must not
+    // discard a buffer or qpair while a command is waiting to be submitted.
+    ++outstanding_;
+    return absl::OkStatus();
   }
-  // Count deferred commands too: close/shutdown and worker sleep must not
-  // discard a buffer or qpair while a command is waiting to be submitted.
-  ++outstanding_;
-  return absl::OkStatus();
+  ReleaseRequest(request);
+  return absl::Status(absl::StatusCode::kUnavailable,
+                      "SPDK I/O submission failed: rc=" + std::to_string(rc));
 }
 
 void SpdkStorageBackend::RetryDeferred(ControllerChannel& channel,
@@ -753,7 +756,9 @@ SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
       result.did_work_ = true;
       result.completions_ += static_cast<std::uint32_t>(completed);
     }
-    RetryDeferred(channel, max_completions, result);
+    if (channel.pending_head_ != nullptr) [[unlikely]] {
+      RetryDeferred(channel, max_completions, result);
+    }
     next_poll_channel_ = (index + 1) % channel_count;
   }
   return result;
