@@ -443,6 +443,11 @@ if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
 endif()
 
 if (BYCORF_BUILD_TESTS)
+  if (BYCORF_KERNEL_BYPASS)
+    # Explicit hardware paths/allowlists are required; do not run in ctest.
+    add_executable(bycorf_spdk_backpressure_check tests/spdk_backpressure_check.cpp)
+    target_link_libraries(bycorf_spdk_backpressure_check PRIVATE bycorf::core)
+  endif()
   enable_testing()
   add_test(NAME bycorf_task_transfer_check COMMAND bycorf_task_transfer_check)
   set_tests_properties(bycorf_task_transfer_check PROPERTIES

@@ -34,6 +34,7 @@
 #include "bycorf/io/storage.h"
 
 struct spdk_nvme_qpair;
+struct spdk_nvme_ns;
 struct spdk_nvme_cpl;
 
 namespace bycorf {
@@ -72,6 +73,9 @@ void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept;
 
 #if BYCORF_KERNEL_BYPASS
 
+// Worker-owned asynchronous storage. Successful submissions retain access to
+// the caller's buffer/tag until completion, including while waiting for qpair
+// capacity. Poll drives both device completions and deferred submissions.
 class SpdkStorageBackend {
  public:
   SpdkStorageBackend() = default;
@@ -109,6 +113,16 @@ class SpdkStorageBackend {
     IoCompletion* tag_ = nullptr;
     int success_result_ = 0;
     AsyncRequest* next_ = nullptr;
+    spdk_nvme_ns* ns_ = nullptr;
+    spdk_nvme_qpair* qpair_ = nullptr;
+    void* buffer_ = nullptr;
+    std::uint64_t lba_ = 0;
+    std::uint32_t count_ = 0;
+    enum class Operation {
+      kRead,
+      kWrite,
+      kFlush
+    } operation_ = Operation::kRead;
   };
 
   struct OpenFile {
@@ -120,10 +134,18 @@ class SpdkStorageBackend {
     void* controller_ = nullptr;
     spdk_nvme_qpair* qpair_ = nullptr;
     unsigned open_files_ = 0;
+    AsyncRequest* pending_head_ = nullptr;
+    AsyncRequest* pending_tail_ = nullptr;
   };
 
   absl::Status SubmitIo(FixedFile file, void* buffer, std::size_t bytes,
                         std::uint64_t offset, bool write, IoCompletion* tag);
+  // Accepted requests retain their caller-owned buffers until completion,
+  // including time spent waiting for an SPDK request descriptor.
+  int TrySubmit(AsyncRequest* request);
+  absl::Status SubmitOrDefer(AsyncRequest* request);
+  void RetryDeferred(ControllerChannel& channel, unsigned limit,
+                     SpdkPollResult& result);
   OpenFile* Lookup(FixedFile file);
   AsyncRequest* AcquireRequest() noexcept;
   void ReleaseRequest(AsyncRequest* request) noexcept;

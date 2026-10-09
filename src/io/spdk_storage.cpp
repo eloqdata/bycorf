@@ -395,8 +395,9 @@ absl::Status SpdkStorageBackend::Init(Worker* worker) {
                         "SPDK storage backend requires a worker");
   }
   worker_ = worker;
-  // This is deliberately much larger than the registered read-buffer count.
-  // It covers foreground reads plus writes/flushes without a hot-path malloc.
+  // Bound accepted foreground/background I/O, including requests waiting for
+  // qpair capacity, without a hot-path malloc. Read-buffer counts may exceed
+  // this bound; callers still receive ResourceExhausted if this pool is full.
   request_pool_.resize(4096);
   free_requests_ = nullptr;
   for (AsyncRequest& request : request_pool_) {
@@ -572,19 +573,14 @@ absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
   request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = static_cast<int>(bytes);
-  const std::uint64_t lba = offset / sector;
-  const std::uint32_t count = static_cast<std::uint32_t>(bytes / sector);
-  int rc = write ? spdk_nvme_ns_cmd_write(device->ns_, opened->qpair_, buffer,
-                                          lba, count, CompleteAsync, request, 0)
-                 : spdk_nvme_ns_cmd_read(device->ns_, opened->qpair_, buffer,
-                                         lba, count, CompleteAsync, request, 0);
-  if (rc != 0) {
-    ReleaseRequest(request);
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "SPDK I/O submission failed");
-  }
-  ++outstanding_;
-  return absl::OkStatus();
+  request->ns_ = device->ns_;
+  request->qpair_ = opened->qpair_;
+  request->buffer_ = buffer;
+  request->lba_ = offset / sector;
+  request->count_ = static_cast<std::uint32_t>(bytes / sector);
+  request->operation_ =
+      write ? AsyncRequest::Operation::kWrite : AsyncRequest::Operation::kRead;
+  return SubmitOrDefer(request);
 }
 
 absl::Status SpdkStorageBackend::SubmitReadFixed(FixedFile file,
@@ -643,14 +639,83 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
   request->backend_ = this;
   request->tag_ = tag;
   request->success_result_ = 0;
-  if (spdk_nvme_ns_cmd_flush(device->ns_, opened->qpair_, CompleteAsync,
-                             request) != 0) {
+  request->ns_ = device->ns_;
+  request->qpair_ = opened->qpair_;
+  request->operation_ = AsyncRequest::Operation::kFlush;
+  return SubmitOrDefer(request);
+}
+
+int SpdkStorageBackend::TrySubmit(AsyncRequest* request) {
+  switch (request->operation_) {
+    case AsyncRequest::Operation::kRead:
+      return spdk_nvme_ns_cmd_read(request->ns_, request->qpair_,
+                                   request->buffer_, request->lba_,
+                                   request->count_, CompleteAsync, request, 0);
+    case AsyncRequest::Operation::kWrite:
+      return spdk_nvme_ns_cmd_write(request->ns_, request->qpair_,
+                                    request->buffer_, request->lba_,
+                                    request->count_, CompleteAsync, request, 0);
+    case AsyncRequest::Operation::kFlush:
+      return spdk_nvme_ns_cmd_flush(request->ns_, request->qpair_,
+                                    CompleteAsync, request);
+  }
+  return -EINVAL;
+}
+
+absl::Status SpdkStorageBackend::SubmitOrDefer(AsyncRequest* request) {
+  const int rc = TrySubmit(request);
+  if (rc == -ENOMEM &&
+      spdk_nvme_qpair_get_num_outstanding_reqs(request->qpair_) != 0) {
+    // SPDK request descriptors are bounded independently of our DMA slots.
+    // A rejected command has not taken ownership of the buffer or callback.
+    // Keep both alive in the worker-local pool and retry after polling, never
+    // poll inline: the awaitable has not installed its continuation yet.
+    auto channel = std::find_if(channels_.begin(), channels_.end(),
+                                [request](const auto& candidate) {
+                                  return candidate.qpair_ == request->qpair_;
+                                });
+    assert(channel != channels_.end());
+    if (channel->pending_tail_ != nullptr) {
+      channel->pending_tail_->next_ = request;
+    } else {
+      channel->pending_head_ = request;
+    }
+    channel->pending_tail_ = request;
+  } else if (rc != 0) {
     ReleaseRequest(request);
     return absl::Status(absl::StatusCode::kUnavailable,
-                        "SPDK flush submission failed");
+                        "SPDK I/O submission failed: rc=" + std::to_string(rc));
   }
+  // Count deferred commands too: close/shutdown and worker sleep must not
+  // discard a buffer or qpair while a command is waiting to be submitted.
   ++outstanding_;
   return absl::OkStatus();
+}
+
+void SpdkStorageBackend::RetryDeferred(ControllerChannel& channel,
+                                       unsigned limit, SpdkPollResult& result) {
+  for (unsigned submitted = 0;
+       channel.pending_head_ != nullptr && (limit == 0 || submitted < limit);
+       ++submitted) {
+    AsyncRequest* request = channel.pending_head_;
+    const int rc = TrySubmit(request);
+    if (rc == -ENOMEM &&
+        spdk_nvme_qpair_get_num_outstanding_reqs(channel.qpair_) != 0) {
+      break;
+    }
+    channel.pending_head_ = request->next_;
+    if (channel.pending_head_ == nullptr) channel.pending_tail_ = nullptr;
+    request->next_ = nullptr;
+    result.did_work_ = true;
+    if (rc != 0) {
+      // With no in-flight command on this qpair, ENOMEM cannot be cured by
+      // waiting for a completion (e.g. an unsplittable oversized request).
+      // Surface that failure instead of stranding shutdown forever.
+      CompleteRequest(request->tag_, rc);
+      ReleaseRequest(request);
+      ++result.completions_;
+    }
+  }
 }
 
 SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
@@ -687,6 +752,7 @@ SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
       result.did_work_ = true;
       result.completions_ += static_cast<std::uint32_t>(completed);
     }
+    RetryDeferred(channel, max_completions, result);
     next_poll_channel_ = (index + 1) % channel_count;
   }
   return result;
