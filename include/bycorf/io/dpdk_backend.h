@@ -33,6 +33,8 @@ class DpdkBackend {
   // port and bounded software queues using BYCORF_DPDK_* environment settings.
   // Rejects counts exceeding build capacity or available EAL registrations
   // before configuring the port. RSS additionally requires one pair per worker.
+  // Adaptive mode requires usable RX notifications on every queue; unsupported
+  // devices fail startup rather than silently selecting poll mode.
   static absl::Status PrepareRuntime(unsigned workers);
   // Startup-only port placement. Every segment is steered to the same member
   // of this service's worker set; non-listening control workers are excluded.
