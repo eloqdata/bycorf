@@ -144,10 +144,16 @@ for a timer tick. RX interrupts are disabled on returning to polling.
 
 A TAP virtual device provides a readable packet descriptor instead of a
 physical interrupt eventfd. The notification code preserves that distinction:
-reading an eventfd acknowledgement from TAP would consume a packet. If the PMD
-cannot provide the required notification capability, its queue owner keeps
-polling. Virtual-device tests cover this wake protocol but do not validate
-physical NIC interrupt behavior or predict kernel-bypass throughput. The TAP
+reading an eventfd acknowledgement from TAP would consume a packet. The mlx5
+PMD instead owns acknowledgement of its RDMA event channel; an empty channel
+after a timer or mailbox wake does not indicate lost interrupt support. If the
+PMD cannot provide the required notification capability on every RX queue,
+adaptive startup fails before services start. Configuration, notification
+registration, and interrupt-arm failures never silently select polling; the
+error identifies an explicit `BYCORF_DPDK_MODE=poll` override. A notification
+failure during a wait terminates the worker loop and stops peer workers before
+teardown barriers, producing a nonzero server exit. Virtual-device tests cover
+this wake protocol but do not validate physical NIC interrupt behavior or predict kernel-bypass throughput. The TAP
 PMD additionally uses Linux realtime signals for its internal RX trigger in
 both modes; this is separate from Bycorf's worker sleep protocol.
 

@@ -106,6 +106,7 @@ struct alignas(64) Lane {
   rte_ring* tx = nullptr;
   std::atomic<bool> parked{false};
   int ring_fd = -1;
+  int rx_notification_fd = -1;
 };
 struct Fabric {
   std::mutex mutex;
@@ -118,7 +119,7 @@ struct Fabric {
   std::uint16_t port = RTE_MAX_ETHPORTS;
   rte_mempool* pool = nullptr;
   bycorf_bsd_interface interface{};
-  bool adaptive = false, tap = false, rss_owner = false;
+  bool adaptive = false, tap = false, mlx5 = false, rss_owner = false;
   // Populated before workers start, immutable throughout their lifetime.
   absl::flat_hash_map<std::uint16_t, std::vector<unsigned>> listener_workers;
   // A source port retains its owner through TIME_WAIT and is reused only by
@@ -191,9 +192,23 @@ void StopPort() {
     fabric.pool = nullptr;
   }
 }
+int DisableRxInterrupt(unsigned queue) {
+  const int rc = rte_eth_dev_rx_intr_disable(fabric.port, queue);
+  // mlx5 uses disable to consume a one-shot CQ event. A timer/mailbox wake,
+  // or the startup capability probe, can precede that event; EAGAIN means
+  // there was nothing to acknowledge, not that interrupts are unsupported.
+  return fabric.mlx5 && rc == -EAGAIN ? 0 : rc;
+}
 absl::Status DeviceError(const char* operation, int rc) {
   return absl::FailedPreconditionError(std::string(operation) + ": " +
                                        rte_strerror(rc < 0 ? -rc : rc));
+}
+absl::Status AdaptiveError(const char* operation, int rc) {
+  const auto status = DeviceError(operation, rc);
+  return absl::FailedPreconditionError(
+      std::string(status.message()) +
+      "; adaptive mode requires RX notification support; "
+      "set BYCORF_DPDK_MODE=poll explicitly to use polling");
 }
 }  // namespace
 
@@ -233,14 +248,19 @@ class DpdkBackend::Impl {
     void Complete(Worker&, int result, unsigned) override {
       armed = false;
       if (result < 0) {
+        if (result == -ECANCELED && owner->worker->stop_requested()) return;
         owner->rx_can_wait = false;
+        std::fprintf(stderr, "DPDK worker %u: %s\n", owner->id,
+                     AdaptiveError("RX notification completion", result)
+                         .ToString()
+                         .c_str());
         return;
       }
       ++owner->notifications;
-      // TAP's notification descriptor IS its packet stream. Reading an
-      // eventfd word from it would consume/corrupt a packet. Hardware eventfds
-      // are acknowledged here, then RX interrupts are disabled before polling.
-      if (!fabric.tap) {
+      // TAP exposes packets, and mlx5 exposes an RDMA event channel whose
+      // records must be consumed by the PMD's interrupt-disable callback.
+      // Only ordinary hardware eventfds accept a uint64_t acknowledgement.
+      if (!fabric.tap && !fabric.mlx5) {
         std::uint64_t value;
         (void)::read(fd, &value, sizeof(value));
       }
@@ -641,6 +661,9 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   if (rc) return DeviceError("ethdev info", rc);
   fabric.tap =
       info.driver_name && std::string_view(info.driver_name) == "net_tap";
+  const std::string_view driver = info.driver_name ? info.driver_name : "";
+  fabric.mlx5 = driver == "mlx5_pci" || driver == "mlx5_auxiliary" ||
+                driver == "net_mlx5";
   unsigned requested = workers;
   if (const char* queues = std::getenv("BYCORF_DPDK_QUEUES")) {
     char* end = nullptr;
@@ -669,16 +692,10 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   }
   rc =
       rte_eth_dev_configure(fabric.port, fabric.queues, fabric.queues, &config);
-  if (rc && fabric.adaptive) {
-    config.intr_conf.rxq = 0;
-    fabric.adaptive = false;
-    std::fprintf(stderr, "DPDK RX interrupts unavailable; using polling\n");
-    rc = rte_eth_dev_configure(fabric.port, fabric.queues, fabric.queues,
-                               &config);
-  }
   if (rc) {
     StopPort();
-    return DeviceError("ethdev configure", rc);
+    return fabric.adaptive ? AdaptiveError("ethdev configure RX interrupts", rc)
+                           : DeviceError("ethdev configure", rc);
   }
   std::uint16_t rx_desc = 512, tx_desc = 512;
   rc = rte_eth_dev_adjust_nb_rx_tx_desc(fabric.port, &rx_desc, &tx_desc);
@@ -733,6 +750,26 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   if (rc) {
     StopPort();
     return DeviceError("ethdev start", rc);
+  }
+  // Validate every hardware queue before any worker or service starts. Some
+  // PMDs accept intr_conf.rxq but provide no usable notification descriptor.
+  if (fabric.adaptive) {
+    for (unsigned q = 0; q < fabric.queues; ++q) {
+      const int fd = rte_eth_dev_rx_intr_ctl_q_get_fd(fabric.port, q);
+      rc = fd < 0 ? -ENOTSUP : 0;
+      if (!rc && !fabric.tap) {
+        rc = rte_eth_dev_rx_intr_enable(fabric.port, q);
+        if (!rc) rc = DisableRxInterrupt(q);
+      }
+      if (rc) {
+        const std::string operation =
+            "RX queue " + std::to_string(q) + " interrupt validation";
+        const auto status = AdaptiveError(operation.c_str(), rc);
+        StopPort();
+        return status;
+      }
+      fabric.lanes[q].rx_notification_fd = fd;
+    }
   }
   std::memcpy(fabric.interface.mac, mac.addr_bytes, 6);
   fabric.interface.mtu = 1500;
@@ -816,18 +853,9 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
   }
   fabric.lanes[id].ring_fd = kernel_.WakeHandle();
   impl_->notification.owner = impl_.get();
-  impl_->rx_can_wait = id >= fabric.queues;
-  if (fabric.adaptive && id < fabric.queues) {
-    impl_->notification.fd = rte_eth_dev_rx_intr_ctl_q_get_fd(fabric.port, id);
-    if (impl_->notification.fd >= 0) {
-      impl_->rx_can_wait =
-          fabric.tap || rte_eth_dev_rx_intr_disable(fabric.port, id) == 0;
-    }
-    if (!impl_->rx_can_wait)
-      std::fprintf(stderr,
-                   "DPDK worker %u RX queue lacks interrupt support; polling\n",
-                   id);
-  }
+  impl_->rx_can_wait = true;
+  if (fabric.adaptive && id < fabric.queues)
+    impl_->notification.fd = fabric.lanes[id].rx_notification_fd;
   impl_->initialized = true;
   fabric.ready.fetch_add(1, std::memory_order_release);
   return absl::OkStatus();
@@ -870,20 +898,24 @@ absl::Status DpdkBackend::Submit() {
   return kernel_.Submit();
 }
 bool DpdkBackend::Wait(int timeout_ms) {
-  if (!fabric.adaptive || !impl_->rx_can_wait ||
+  if (!fabric.adaptive ||
       fabric.ready.load(std::memory_order_acquire) != fabric.workers)
     return true;
+  if (!impl_->rx_can_wait) return false;
   const unsigned id = impl_->id;
   Lane& lane = fabric.lanes[id];
   lane.parked.store(true, std::memory_order_release);
   bool enabled = false;
   if (id < fabric.queues) {
     if (!fabric.tap) {
-      enabled = rte_eth_dev_rx_intr_enable(fabric.port, id) == 0;
+      const int rc = rte_eth_dev_rx_intr_enable(fabric.port, id);
+      enabled = rc == 0;
       if (!enabled) {
         lane.parked.store(false);
-        impl_->rx_can_wait = false;
-        return true;
+        std::fprintf(
+            stderr, "DPDK worker %u: %s\n", id,
+            AdaptiveError("enable RX interrupt", rc).ToString().c_str());
+        return false;
       }
     }
     ++impl_->arms;
@@ -892,8 +924,12 @@ bool DpdkBackend::Wait(int timeout_ms) {
                                                 &impl_->notification);
       if (!submitted.ok()) {
         lane.parked.store(false);
-        if (enabled) rte_eth_dev_rx_intr_disable(fabric.port, id);
-        return true;
+        if (enabled) DisableRxInterrupt(id);
+        std::fprintf(stderr,
+                     "DPDK worker %u: RX notification registration: %s; "
+                     "set BYCORF_DPDK_MODE=poll explicitly to use polling\n",
+                     id, submitted.ToString().c_str());
+        return false;
       }
       impl_->notification.armed = true;
     }
@@ -926,8 +962,16 @@ bool DpdkBackend::Wait(int timeout_ms) {
     }
   }
   lane.parked.store(false, std::memory_order_release);
-  if (enabled) rte_eth_dev_rx_intr_disable(fabric.port, id);
-  return ok;
+  if (enabled) {
+    const int rc = DisableRxInterrupt(id);
+    if (rc) {
+      std::fprintf(
+          stderr, "DPDK worker %u: %s\n", id,
+          AdaptiveError("disable RX interrupt", rc).ToString().c_str());
+      return false;
+    }
+  }
+  return ok && impl_->rx_can_wait;
 }
 
 absl::Status DpdkBackend::SubmitSend(const RegisteredFile& file,

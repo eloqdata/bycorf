@@ -444,6 +444,19 @@ endif()
 
 if (BYCORF_BUILD_TESTS)
   if (BYCORF_KERNEL_BYPASS)
+    add_executable(bycorf_dpdk_adaptive_check tests/dpdk_adaptive_check.cpp)
+    target_link_libraries(bycorf_dpdk_adaptive_check PRIVATE bycorf::core)
+    target_include_directories(bycorf_dpdk_adaptive_check PRIVATE
+      "${BYCORF_DPDK_PREFIX}/include")
+    target_compile_options(bycorf_dpdk_adaptive_check PRIVATE
+      ${BYCORF_DPDK_COMPILE_FLAGS})
+    foreach(symbol IN ITEMS rte_eth_dev_configure rte_eth_dev_info_get
+        rte_eth_dev_rx_intr_ctl_q_get_fd rte_eth_dev_rx_intr_enable
+        rte_eth_dev_rx_intr_disable)
+      target_link_options(bycorf_dpdk_adaptive_check PRIVATE
+        "LINKER:--wrap=${symbol}")
+    endforeach()
+
     # Explicit hardware paths/allowlists are required; do not run in ctest.
     add_executable(bycorf_spdk_backpressure_check tests/spdk_backpressure_check.cpp)
     target_link_libraries(bycorf_spdk_backpressure_check PRIVATE bycorf::core)
@@ -472,6 +485,13 @@ if (BYCORF_BUILD_TESTS)
   set_tests_properties(bycorf_task_transfer_check PROPERTIES
     TIMEOUT 30 LABELS "runtime;task")
   if (BYCORF_KERNEL_BYPASS)
+    foreach(scenario IN ITEMS configure descriptor enable disable poll
+        runtime-enable runtime-disable mlx5-empty)
+      add_test(NAME bycorf_dpdk_adaptive_${scenario}
+        COMMAND bycorf_dpdk_adaptive_check ${scenario})
+      set_tests_properties(bycorf_dpdk_adaptive_${scenario} PROPERTIES
+        TIMEOUT 30 LABELS "runtime;net;dpdk;stub" RUN_SERIAL TRUE)
+    endforeach()
     add_test(NAME bycorf_spdk_backpressure_stub_check
       COMMAND bycorf_spdk_backpressure_stub_check)
     set_tests_properties(bycorf_spdk_backpressure_stub_check PROPERTIES

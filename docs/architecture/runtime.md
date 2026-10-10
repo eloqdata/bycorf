@@ -57,7 +57,9 @@ while Run and FinalizeWorker execute only on selected workers. During shutdown,
 workers first leave their loops, then quiesce I/O and reclaim coroutine frames
 on their owning native threads. Service finalizers run after all worker frames
 are reclaimed. A worker that fails initialization contributes to both teardown
-barriers so initialized peers can finish. Services outlive the server.
+barriers so initialized peers can finish. An unexpected backend wait failure
+stops peer workers before entering those barriers and yields a nonzero exit.
+Services outlive the server.
 
 With DPDK networking, runtime preparation configures the shared port before
 launch. Worker 0 initializes the native FreeBSD kernel services; remaining

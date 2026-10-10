@@ -183,7 +183,7 @@ owning process closes. No physical NIC needs rebinding for these tests.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `BYCORF_DPDK_MODE` | `poll` | `poll` keeps polling; `adaptive` can arm RX notification and sleep on io_uring |
+| `BYCORF_DPDK_MODE` | `poll` | `poll` keeps polling; `adaptive` requires RX notifications and sleeps on io_uring when idle; unsupported queues fail startup |
 | `BYCORF_DPDK_QUEUES` | worker count, capped by hardware | RX/TX pair count, between 1 and worker count |
 | `BYCORF_DPDK_RX_STEERING` | `hash` | `hash` redistributes TCP by software tuple hash; `rss` keeps it on the receiving queue's worker |
 | `BYCORF_DPDK_IP` | `198.18.0.2` | Stack's IPv4 address |
@@ -191,6 +191,12 @@ owning process closes. No physical NIC needs rebinding for these tests.
 | `BYCORF_DPDK_GATEWAY` | none | Optional default gateway |
 | `BYCORF_DPDK_MEMORY_MB` | 512 for no-huge tests | EAL memory size in MiB |
 | `BYCORF_EAL_ARGS` | virtual TAP configuration | Extra arguments passed through SPDK to EAL |
+
+Adaptive mode never falls back to polling. Startup verifies notification descriptors
+and interrupt enable/disable support for every RX queue. If the PMD cannot
+provide them, the error requests an explicit `BYCORF_DPDK_MODE=poll` setting.
+Notification failures while running also stop the server instead of silently
+changing modes.
 
 An unset/empty `BYCORF_EAL_ARGS` selects no hugepages, no PCI probing, and the
 TAP test device. Explicit arguments replace this virtual default; configure

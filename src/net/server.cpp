@@ -152,6 +152,10 @@ int Server::RunWorker(unsigned index, Worker& worker) {
   }
 
   worker.Run();
+  // A backend wait failure must stop peers before entering the all-worker
+  // barriers. Preserve the error before RequestStop marks this worker too.
+  const bool failed = !worker.stop_requested();
+  if (failed) runtime_.RequestStop();
 
   // Two-phase shutdown: wait until every worker has left its event loop, so
   // no cross-core reference into another worker's coroutine frames can still
@@ -183,10 +187,7 @@ int Server::RunWorker(unsigned index, Worker& worker) {
     if ((*service)->RunsOnWorker(index)) (*service)->FinalizeWorker(worker);
   }
 
-  if (!worker.stop_requested()) [[unlikely]] {
-    return 1;
-  }
-  return 0;
+  return failed ? 1 : 0;
 }
 
 }  // namespace bycorf
