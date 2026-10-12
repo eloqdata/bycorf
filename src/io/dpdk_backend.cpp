@@ -357,18 +357,9 @@ class DpdkBackend::Impl {
       rte_pktmbuf_free(packet);
     }
   }
-  static int Transmit(void* context, const void* data, std::size_t length) {
+  static int Transmit(void* context, const bycorf_bsd_packet* source) {
     auto& self = *static_cast<Impl*>(context);
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    // All VNETs learn broadcast control traffic, but only worker 0 responds to
-    // ARP requests or echo requests for the shared address. ARP requests made
-    // by any worker remain necessary to resolve its outgoing neighbour cache.
-    if (self.id && length >= 42 && Read16(bytes + 12) == 0x0806 &&
-        Read16(bytes + 20) == 2)
-      return 0;
-    if (self.id && length >= 35 && Read16(bytes + 12) == 0x0800 &&
-        bytes[23] == 1 && bytes[34] == 0)
-      return 0;
+    const std::size_t length = source->length;
     if (length > kMaxFrame) {
       ++self.drops;
       return 40;
@@ -384,7 +375,18 @@ class DpdkBackend::Impl {
       ++self.drops;
       return 55;
     }
-    std::memcpy(output, data, length);
+    source->copy(source->context, output);
+    const auto* bytes = static_cast<const unsigned char*>(output);
+    // All VNETs learn broadcast control traffic, but only worker 0 responds to
+    // ARP requests or echo requests for the shared address. ARP requests made
+    // by any worker remain necessary to resolve its outgoing neighbour cache.
+    if (self.id && ((length >= 42 && Read16(bytes + 12) == 0x0806 &&
+                     Read16(bytes + 20) == 2) ||
+                    (length >= 35 && Read16(bytes + 12) == 0x0800 &&
+                     bytes[23] == 1 && bytes[34] == 0))) {
+      rte_pktmbuf_free(packet);
+      return 0;
+    }
     if (length >= 34 && Read16(bytes + 12) == 0x0800 &&
         std::memcmp(bytes + 30, &fabric.interface.address, 4) == 0) {
       // Loopback is still native BSD TCP. Defer even same-worker delivery:

@@ -90,9 +90,13 @@ struct Peer {
   uint64_t received = 0;
   bool syn_received = false;
 
-  static int Transmit(void* context, const void* data, size_t size) {
+  static int Transmit(void* context, const bycorf_bsd_packet* packet) {
     auto& peer = *static_cast<Peer*>(context);
-    const auto* p = static_cast<const uint8_t*>(data);
+    std::array<uint8_t, 1518> frame;
+    const size_t size = packet->length;
+    Check(size <= frame.size(), "output frame fits");
+    packet->copy(packet->context, frame.data());
+    const auto* p = frame.data();
     if (size < 54 || Get16(p + 12) != 0x0800 || p[23] != 6) return 0;
     const size_t ip_header = (p[14] & 15) * 4;
     const uint8_t* tcp = p + 14 + ip_header;
