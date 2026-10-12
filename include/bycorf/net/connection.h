@@ -72,6 +72,7 @@ struct Connection {
   std::uint64_t id_ = 0;
   RegisteredFile file_;
   ConnectionState state_ = ConnectionState::kActive;
+  RecvMode recv_mode_ = RecvMode::kMultishot;
   std::uint64_t generation_ = 0;
   std::int64_t last_active_ms_ = 0;
 
@@ -106,7 +107,6 @@ struct Connection {
   bool peer_disconnect_poll_cancel_requested_ = false;
   PeerDisconnectCallback peer_disconnect_callback_ = nullptr;
   void* peer_disconnect_context_ = nullptr;
-  RecvMode recv_mode_ = RecvMode::kMultishot;
   std::shared_ptr<TlsState> tls_state_;
   void* protocol_context_ = nullptr;
 };
