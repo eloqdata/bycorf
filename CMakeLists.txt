@@ -444,6 +444,12 @@ endif()
 
 if (BYCORF_BUILD_TESTS)
   find_package(Threads REQUIRED)
+  add_executable(bycorf_tls_awaitable_check tests/tls_awaitable_check.cpp)
+  target_link_libraries(bycorf_tls_awaitable_check PRIVATE bycorf::core Threads::Threads)
+  add_test(NAME bycorf_tls_awaitable_check COMMAND bycorf_tls_awaitable_check)
+  set_tests_properties(bycorf_tls_awaitable_check PROPERTIES
+    LABELS "net;io_uring;runtime;tls" TIMEOUT 60)
+
   add_executable(bycorf_stream_awaitable_check tests/stream_awaitable_check.cpp)
   target_link_libraries(bycorf_stream_awaitable_check PRIVATE bycorf::core Threads::Threads)
 

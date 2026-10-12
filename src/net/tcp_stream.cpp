@@ -494,7 +494,7 @@ absl::Status TcpStream::SetReadAhead(bool enabled) noexcept {
 
 TcpStream::ReadAwaitable TcpStream::ReadSome(std::span<std::byte> buffer) {
   if (tls_ != nullptr) {
-    return ReadAwaitable(tls_->ReadSome(*this, buffer));
+    return ReadAwaitable(*tls_, *this, buffer);
   }
   return ReadAwaitable(connection_, buffer);
 }
@@ -506,7 +506,7 @@ ReadOperation TcpStream::ReadRawSome(std::span<std::byte> buffer) noexcept {
 TcpStream::WriteAwaitable TcpStream::WriteSome(
     std::span<const std::byte> buffer) {
   if (tls_ != nullptr) {
-    return WriteAwaitable(tls_->WriteSome(*this, buffer));
+    return WriteAwaitable(*tls_, *this, buffer);
   }
   return WriteAwaitable(connection_, buffer);
 }
@@ -521,10 +521,10 @@ TcpStream::WriteVAwaitable TcpStream::WriteSomeV(
   if (tls_ != nullptr) {
     for (const auto& buffer : buffers) {
       if (buffer.iov_len == 0) continue;
-      return WriteVAwaitable(tls_->WriteSome(
-          *this,
+      return WriteVAwaitable(
+          *tls_, *this,
           std::span<const std::byte>(
-              static_cast<const std::byte*>(buffer.iov_base), buffer.iov_len)));
+              static_cast<const std::byte*>(buffer.iov_base), buffer.iov_len));
     }
     return WriteVAwaitable(connection_, std::span<const iovec>{});
   }

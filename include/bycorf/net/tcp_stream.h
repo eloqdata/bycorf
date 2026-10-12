@@ -35,6 +35,7 @@
 #include "absl/status/statusor.h"
 #include "bycorf/io/completion.h"
 #include "bycorf/net/connection.h"
+#include "bycorf/net/tls.h"
 #include "bycorf/runtime/task.h"
 
 namespace bycorf {
@@ -58,14 +59,6 @@ class ReadOperation final : public IoCompletion {
   void Complete(Worker& worker, int result, unsigned flags) override;
 
  private:
-  template <typename>
-  friend class StreamOperation;
-
-  void BindAwaiting(std::coroutine_handle<> awaiting) noexcept {
-    awaiting_ = awaiting;
-    connection_->read_waiter_ = awaiting;
-  }
-
   Connection* connection_ = nullptr;
   std::span<std::byte> buffer_;
   std::optional<absl::Status> immediate_status_;
@@ -87,13 +80,6 @@ class WriteOperation final : public IoCompletion {
   void Complete(Worker& worker, int result, unsigned flags) override;
 
  private:
-  template <typename>
-  friend class StreamOperation;
-
-  void BindAwaiting(std::coroutine_handle<> awaiting) noexcept {
-    awaiting_ = awaiting;
-  }
-
   Connection* connection_ = nullptr;
   std::span<const std::byte> buffer_;
   int result_ = 0;
@@ -114,56 +100,56 @@ class WriteVOperation final : public IoCompletion {
   void Complete(Worker& worker, int result, unsigned flags) override;
 
  private:
-  template <typename>
-  friend class StreamOperation;
-
-  void BindAwaiting(std::coroutine_handle<> awaiting) noexcept {
-    awaiting_ = awaiting;
-  }
-
   Connection* connection_ = nullptr;
   std::span<const iovec> buffers_;
   msghdr message_{};
   int result_ = 0;
 };
 
-// Selects raw I/O without a child frame, or owns the TLS coroutine until its
-// result has been consumed. Operations borrow the stream and payload through
-// completion and must be awaited on the connection's worker. They are immovable
-// because the backend may retain the raw operation's address as its completion
-// tag. Raw I/O starts in await_ready so immediate results require no coroutine
-// transfer (returning the caller's own handle can grow the native stack under
-// sanitizers). The owner worker cannot dispatch the new operation between
-// await_ready and await_suspend, which binds its continuation before yielding.
-// TLS retains Task's symmetric transfer and child ownership.
+// Selects the transport while keeping the active awaitable directly in the
+// caller's frame. Neither branch allocates a wrapper coroutine. The operation
+// is immovable because a submitted raw I/O may retain its address as a tag.
 template <typename RawOperation>
 class StreamOperation {
  public:
   using Result = absl::StatusOr<std::size_t>;
   template <typename... Args>
   explicit StreamOperation(Connection* connection, Args&&... args)
-      : raw_(std::in_place, connection, std::forward<Args>(args)...) {}
-  explicit StreamOperation(Task<Result> tls) : tls_(std::move(tls)) {}
-
-  bool await_ready() {
-    if (!raw_) return tls_.done();
-    return raw_->await_ready() || !raw_->await_suspend({});
+      : is_tls_(false), raw_(connection, std::forward<Args>(args)...) {}
+  StreamOperation(TlsState& state, TcpStream& stream,
+                  std::span<std::byte> buffer)
+      : is_tls_(true), tls_(state.ReadSome(stream, buffer)) {}
+  StreamOperation(TlsState& state, TcpStream& stream,
+                  std::span<const std::byte> buffer)
+      : is_tls_(true), tls_(state.WriteSome(stream, buffer)) {}
+  StreamOperation(const StreamOperation&) = delete;
+  StreamOperation& operator=(const StreamOperation&) = delete;
+  StreamOperation(StreamOperation&&) = delete;
+  StreamOperation& operator=(StreamOperation&&) = delete;
+  ~StreamOperation() {
+    if (is_tls_)
+      std::destroy_at(&tls_);
+    else
+      std::destroy_at(&raw_);
   }
-  std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting) {
-    if (raw_) {
-      raw_->BindAwaiting(awaiting);
-      return std::noop_coroutine();
-    }
-    return std::move(tls_).operator co_await().await_suspend(awaiting);
+
+  bool await_ready() const noexcept {
+    return is_tls_ ? tls_.await_ready() : raw_.await_ready();
+  }
+  bool await_suspend(std::coroutine_handle<> awaiting) {
+    return is_tls_ ? tls_.await_suspend(awaiting)
+                   : raw_.await_suspend(awaiting);
   }
   Result await_resume() {
-    if (!raw_) return std::move(tls_).operator co_await().await_resume();
-    return raw_->await_resume();
+    return is_tls_ ? tls_.await_resume() : raw_.await_resume();
   }
 
  private:
-  std::optional<RawOperation> raw_;
-  Task<Result> tls_;
+  bool is_tls_;
+  union {
+    RawOperation raw_;
+    TlsState::IoAwaitable tls_;
+  };
 };
 
 // Outbound async connect (IORING_OP_CONNECT) on a not-yet-registered fd, raced
@@ -265,7 +251,8 @@ class TcpStream {
   using WriteVAwaitable = StreamOperation<WriteVOperation>;
 
   // Single-operation byte-stream I/O. Buffers and the stream must outlive
-  // completion. Plaintext awaits use the caller's frame; TLS owns a lazy Task.
+  // completion. Both transports keep their operation in the caller's frame;
+  // TLS retains child Tasks for ciphertext transport.
   ReadAwaitable ReadSome(std::span<std::byte> buffer);
   WriteAwaitable WriteSome(std::span<const std::byte> buffer);
   WriteVAwaitable WriteSomeV(std::span<const iovec> buffers);
