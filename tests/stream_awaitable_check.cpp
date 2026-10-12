@@ -12,6 +12,7 @@
  */
 
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -39,6 +40,48 @@ void Check(bool passed, const char* message) {
 
 std::span<const std::byte> Bytes(const std::string& value) {
   return std::as_bytes(std::span(value));
+}
+
+// Exercise TCP half-close semantics on the transport TcpStream serves. An
+// AF_UNIX socketpair takes a different kernel multishot-receive path.
+bool TcpPair(int (&sockets)[2]) {
+  const int listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (listener < 0) return false;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+          0 ||
+      listen(listener, 1) != 0) {
+    close(listener);
+    return false;
+  }
+  socklen_t size = sizeof(address);
+  if (getsockname(listener, reinterpret_cast<sockaddr*>(&address), &size) !=
+      0) {
+    close(listener);
+    return false;
+  }
+  const int peer = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (peer < 0) {
+    close(listener);
+    return false;
+  }
+  if (connect(peer, reinterpret_cast<sockaddr*>(&address), size) != 0) {
+    close(peer);
+    close(listener);
+    return false;
+  }
+  const int local =
+      accept4(listener, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+  close(listener);
+  if (local < 0) {
+    close(peer);
+    return false;
+  }
+  sockets[0] = local;
+  sockets[1] = peer;
+  return true;
 }
 
 // A tiny send buffer and a delayed reader force the full-write operations to
@@ -139,8 +182,7 @@ Task<absl::Status> CheckStream(bycorf::Worker& worker) {
         "repeated immediate completion keeps native stack bounded");
 
   int sockets[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
-                 sockets) == 0) {
+  if (TcpPair(sockets)) {
     bycorf::Connection initial;
     initial.worker_ = &worker;
     initial.closed_ = false;
@@ -149,7 +191,7 @@ Task<absl::Status> CheckStream(bycorf::Worker& worker) {
     TcpStream stream(connection);
     auto borrow = stream.BorrowStorage();
     Check(write(sockets[1], "abcdefgh", 8) == 8, "queue received bytes");
-    shutdown(sockets[1], SHUT_WR);
+    Check(shutdown(sockets[1], SHUT_WR) == 0, "half-close TCP peer");
     std::size_t read_bytes = 0;
     while (read_bytes < buffer.size()) {
       auto result =
@@ -182,7 +224,7 @@ Task<absl::Status> CheckStream(bycorf::Worker& worker) {
           "closed read fails immediately");
     close(sockets[1]);
   } else {
-    Check(false, "read socketpair");
+    Check(false, "create TCP pair");
   }
   for (bool vectored : {false, true}) {
     for (bool disconnect : {false, true}) {
