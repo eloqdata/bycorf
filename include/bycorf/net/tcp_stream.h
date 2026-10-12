@@ -29,6 +29,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -57,6 +59,14 @@ class ReadOperation final : public IoCompletion {
   void Complete(Worker& worker, int result, unsigned flags) override;
 
  private:
+  template <typename, typename>
+  friend class StreamOperation;
+
+  void BindAwaiting(std::coroutine_handle<> awaiting) noexcept {
+    awaiting_ = awaiting;
+    connection_->read_waiter_ = awaiting;
+  }
+
   Connection* connection_ = nullptr;
   std::span<std::byte> buffer_;
   std::optional<absl::Status> immediate_status_;
@@ -65,8 +75,8 @@ class ReadOperation final : public IoCompletion {
 
 class WriteOperation final : public IoCompletion {
  public:
-  WriteOperation(Connection* connection,
-                 std::span<const std::byte> buffer) noexcept;
+  WriteOperation(Connection* connection, std::span<const std::byte> buffer,
+                 bool write_all = false) noexcept;
   WriteOperation(const WriteOperation&) = delete;
   WriteOperation& operator=(const WriteOperation&) = delete;
   WriteOperation(WriteOperation&&) = delete;
@@ -78,15 +88,24 @@ class WriteOperation final : public IoCompletion {
   void Complete(Worker& worker, int result, unsigned flags) override;
 
  private:
+  template <typename, typename>
+  friend class StreamOperation;
+
+  void BindAwaiting(std::coroutine_handle<> awaiting) noexcept {
+    awaiting_ = awaiting;
+  }
+
   Connection* connection_ = nullptr;
   std::span<const std::byte> buffer_;
   int result_ = 0;
+  bool write_all_ = false;
+  std::size_t written_ = 0;
 };
 
 class WriteVOperation final : public IoCompletion {
  public:
-  WriteVOperation(Connection* connection,
-                  std::span<const iovec> buffers) noexcept;
+  WriteVOperation(Connection* connection, std::span<const iovec> buffers,
+                  bool write_all = false);
   WriteVOperation(const WriteVOperation&) = delete;
   WriteVOperation& operator=(const WriteVOperation&) = delete;
   WriteVOperation(WriteVOperation&&) = delete;
@@ -98,10 +117,63 @@ class WriteVOperation final : public IoCompletion {
   void Complete(Worker& worker, int result, unsigned flags) override;
 
  private:
+  template <typename, typename>
+  friend class StreamOperation;
+
+  void BindAwaiting(std::coroutine_handle<> awaiting) noexcept {
+    awaiting_ = awaiting;
+  }
+
   Connection* connection_ = nullptr;
   std::span<const iovec> buffers_;
   msghdr message_{};
   int result_ = 0;
+  bool write_all_ = false;
+  std::size_t written_ = 0;
+  // Full writes advance a private descriptor copy; payload storage is borrowed.
+  std::vector<iovec> remaining_;
+};
+
+// Selects raw I/O without a child frame, or owns the TLS coroutine until its
+// result has been consumed. Operations borrow the stream and payload through
+// completion and must be awaited on the connection's worker. They are immovable
+// because the backend may retain the raw operation's address as its completion
+// tag. Raw I/O starts in await_ready so immediate results require no coroutine
+// transfer (returning the caller's own handle can grow the native stack under
+// sanitizers). The owner worker cannot dispatch the new operation between
+// await_ready and await_suspend, which binds its continuation before yielding.
+// TLS retains Task's symmetric transfer and child ownership.
+template <typename RawOperation, typename Result>
+class StreamOperation {
+ public:
+  template <typename... Args>
+  explicit StreamOperation(Connection* connection, Args&&... args)
+      : raw_(std::in_place, connection, std::forward<Args>(args)...) {}
+  explicit StreamOperation(Task<Result> tls) : tls_(std::move(tls)) {}
+
+  bool await_ready() {
+    if (!raw_) return tls_.done();
+    return raw_->await_ready() || !raw_->await_suspend({});
+  }
+  std::coroutine_handle<> await_suspend(std::coroutine_handle<> awaiting) {
+    if (raw_) {
+      raw_->BindAwaiting(awaiting);
+      return std::noop_coroutine();
+    }
+    return std::move(tls_).operator co_await().await_suspend(awaiting);
+  }
+  Result await_resume() {
+    if (!raw_) return std::move(tls_).operator co_await().await_resume();
+    if constexpr (std::is_same_v<Result, absl::Status>) {
+      return raw_->await_resume().status();
+    } else {
+      return raw_->await_resume();
+    }
+  }
+
+ private:
+  std::optional<RawOperation> raw_;
+  Task<Result> tls_;
 };
 
 // Outbound async connect (IORING_OP_CONNECT) on a not-yet-registered fd, raced
@@ -198,12 +270,24 @@ class TcpStream {
   // with their own bounded ingress queues.
   absl::Status SetReadAhead(bool enabled) noexcept;
 
-  Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
-  Task<absl::StatusOr<std::size_t>> WriteSome(
-      std::span<const std::byte> buffer);
-  Task<absl::StatusOr<std::size_t>> WriteSomeV(std::span<const iovec> buffers);
-  Task<absl::Status> WriteAll(std::span<const std::byte> buffer);
-  Task<absl::Status> WriteAllV(std::span<const iovec> buffers);
+  using ReadAwaitable =
+      StreamOperation<ReadOperation, absl::StatusOr<std::size_t>>;
+  using WriteAwaitable =
+      StreamOperation<WriteOperation, absl::StatusOr<std::size_t>>;
+  using WriteVAwaitable =
+      StreamOperation<WriteVOperation, absl::StatusOr<std::size_t>>;
+  using WriteAllAwaitable = StreamOperation<WriteOperation, absl::Status>;
+  using WriteAllVAwaitable = StreamOperation<WriteVOperation, absl::Status>;
+
+  // Awaitable byte-stream I/O. Buffers and the stream must outlive completion.
+  // Plaintext operations live in the caller's frame; TLS uses lazy Tasks.
+  // Some operations return the transferred byte count. All operations retry
+  // short writes and report an error if a nonempty write makes no progress.
+  ReadAwaitable ReadSome(std::span<std::byte> buffer);
+  WriteAwaitable WriteSome(std::span<const std::byte> buffer);
+  WriteVAwaitable WriteSomeV(std::span<const iovec> buffers);
+  WriteAllAwaitable WriteAll(std::span<const std::byte> buffer);
+  WriteAllVAwaitable WriteAllV(std::span<const iovec> buffers);
 
   Task<absl::Status> StartTls(const std::shared_ptr<TlsContext>& context,
                               bool server, std::string_view peer_name = {});
@@ -232,7 +316,9 @@ class TcpStream {
   ReadOperation ReadRawSome(std::span<std::byte> buffer) noexcept;
   WriteOperation WriteRawSome(std::span<const std::byte> buffer) noexcept;
   WriteVOperation WriteRawSomeV(std::span<const iovec> buffers) noexcept;
-  Task<absl::Status> WriteRawAll(std::span<const std::byte> buffer);
+  WriteAllAwaitable WriteRawAll(std::span<const std::byte> buffer);
+  Task<absl::Status> WriteAllTls(std::span<const std::byte> buffer);
+  Task<absl::Status> WriteAllVTls(std::span<const iovec> buffers);
 
   Connection* connection_ = nullptr;
   std::shared_ptr<TlsState> tls_;

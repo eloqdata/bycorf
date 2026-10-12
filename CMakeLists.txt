@@ -443,6 +443,10 @@ if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
 endif()
 
 if (BYCORF_BUILD_TESTS)
+  find_package(Threads REQUIRED)
+  add_executable(bycorf_stream_awaitable_check tests/stream_awaitable_check.cpp)
+  target_link_libraries(bycorf_stream_awaitable_check PRIVATE bycorf::core Threads::Threads)
+
   if (BYCORF_KERNEL_BYPASS)
     add_executable(bycorf_dpdk_adaptive_check tests/dpdk_adaptive_check.cpp)
     target_link_libraries(bycorf_dpdk_adaptive_check PRIVATE bycorf::core)
@@ -481,6 +485,9 @@ if (BYCORF_BUILD_TESTS)
     endforeach()
   endif()
   enable_testing()
+  add_test(NAME bycorf_stream_awaitable_check COMMAND bycorf_stream_awaitable_check)
+  set_tests_properties(bycorf_stream_awaitable_check PROPERTIES
+    TIMEOUT 30 LABELS "runtime;net;io_uring")
   add_test(NAME bycorf_task_transfer_check COMMAND bycorf_task_transfer_check)
   set_tests_properties(bycorf_task_transfer_check PROPERTIES
     TIMEOUT 30 LABELS "runtime;task")

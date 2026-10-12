@@ -223,8 +223,9 @@ void ReadOperation::Complete(Worker& worker, int result, unsigned flags) {
 }
 
 WriteOperation::WriteOperation(Connection* connection,
-                               std::span<const std::byte> buffer) noexcept
-    : connection_(connection), buffer_(buffer) {}
+                               std::span<const std::byte> buffer,
+                               bool write_all) noexcept
+    : connection_(connection), buffer_(buffer), write_all_(write_all) {}
 
 bool WriteOperation::await_suspend(std::coroutine_handle<> awaiting) {
   awaiting_ = awaiting;
@@ -256,7 +257,11 @@ bool WriteOperation::await_suspend(std::coroutine_handle<> awaiting) {
 }
 
 absl::StatusOr<std::size_t> WriteOperation::await_resume() noexcept {
-  if (result_ >= 0) return static_cast<std::size_t>(result_);
+  if (write_all_ && result_ == 0 && !buffer_.empty()) {
+    return absl::InternalError("WriteSome returned 0");
+  }
+  if (result_ >= 0)
+    return write_all_ ? written_ : static_cast<std::size_t>(result_);
   return ErrnoToStatus(-result_, "send failed");
 }
 
@@ -267,12 +272,32 @@ void WriteOperation::Complete(Worker& worker, int result, unsigned flags) {
     connection_->write_inflight_ = false;
     connection_->inflight_ops_ -= 1;
   }
+  if (write_all_ && result > 0) {
+    const auto bytes = static_cast<std::size_t>(result);
+    if (bytes > buffer_.size()) {
+      result_ = -EIO;
+    } else {
+      written_ += bytes;
+      buffer_ = buffer_.subspan(bytes);
+      // Retire each send before submitting its successor, keeping the same
+      // completion tag alive. Only the final completion resumes the caller.
+      if (!buffer_.empty() && await_suspend(awaiting_)) return;
+    }
+  }
   worker.Enqueue(awaiting_);
 }
 
 WriteVOperation::WriteVOperation(Connection* connection,
-                                 std::span<const iovec> buffers) noexcept
-    : connection_(connection), buffers_(buffers) {}
+                                 std::span<const iovec> buffers, bool write_all)
+    : connection_(connection), buffers_(buffers), write_all_(write_all) {
+  if (write_all_) {
+    remaining_.reserve(buffers.size());
+    for (const auto& buffer : buffers) {
+      if (buffer.iov_len != 0) remaining_.push_back(buffer);
+    }
+    buffers_ = remaining_;
+  }
+}
 
 bool WriteVOperation::await_suspend(std::coroutine_handle<> awaiting) {
   awaiting_ = awaiting;
@@ -306,7 +331,11 @@ bool WriteVOperation::await_suspend(std::coroutine_handle<> awaiting) {
 }
 
 absl::StatusOr<std::size_t> WriteVOperation::await_resume() noexcept {
-  if (result_ >= 0) return static_cast<std::size_t>(result_);
+  if (write_all_ && result_ == 0 && !buffers_.empty()) {
+    return absl::InternalError("WriteSomeV returned 0");
+  }
+  if (result_ >= 0)
+    return write_all_ ? written_ : static_cast<std::size_t>(result_);
   return ErrnoToStatus(-result_, "sendmsg failed");
 }
 
@@ -316,6 +345,22 @@ void WriteVOperation::Complete(Worker& worker, int result, unsigned flags) {
   if (connection_ != nullptr) {
     connection_->write_inflight_ = false;
     connection_->inflight_ops_ -= 1;
+  }
+  if (write_all_ && result > 0) {
+    auto bytes = static_cast<std::size_t>(result);
+    written_ += bytes;
+    while (!buffers_.empty() && bytes >= buffers_.front().iov_len) {
+      bytes -= buffers_.front().iov_len;
+      buffers_ = buffers_.subspan(1);
+    }
+    if (!buffers_.empty()) {
+      auto& first = remaining_[remaining_.size() - buffers_.size()];
+      first.iov_base = static_cast<std::byte*>(first.iov_base) + bytes;
+      first.iov_len -= bytes;
+      if (await_suspend(awaiting_)) return;
+    } else if (bytes != 0) {
+      result_ = -EIO;
+    }
   }
   worker.Enqueue(awaiting_);
 }
@@ -492,24 +537,23 @@ absl::Status TcpStream::SetReadAhead(bool enabled) noexcept {
   return absl::OkStatus();
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(
-    std::span<std::byte> buffer) {
+TcpStream::ReadAwaitable TcpStream::ReadSome(std::span<std::byte> buffer) {
   if (tls_ != nullptr) {
-    co_return co_await tls_->ReadSome(*this, buffer);
+    return ReadAwaitable(tls_->ReadSome(*this, buffer));
   }
-  co_return co_await ReadRawSome(buffer);
+  return ReadAwaitable(connection_, buffer);
 }
 
 ReadOperation TcpStream::ReadRawSome(std::span<std::byte> buffer) noexcept {
   return ReadOperation(connection_, buffer);
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::WriteSome(
+TcpStream::WriteAwaitable TcpStream::WriteSome(
     std::span<const std::byte> buffer) {
   if (tls_ != nullptr) {
-    co_return co_await tls_->WriteSome(*this, buffer);
+    return WriteAwaitable(tls_->WriteSome(*this, buffer));
   }
-  co_return co_await WriteRawSome(buffer);
+  return WriteAwaitable(connection_, buffer);
 }
 
 WriteOperation TcpStream::WriteRawSome(
@@ -517,19 +561,19 @@ WriteOperation TcpStream::WriteRawSome(
   return WriteOperation(connection_, buffer);
 }
 
-Task<absl::StatusOr<std::size_t>> TcpStream::WriteSomeV(
+TcpStream::WriteVAwaitable TcpStream::WriteSomeV(
     std::span<const iovec> buffers) {
   if (tls_ != nullptr) {
-    for (const iovec& buffer : buffers) {
+    for (const auto& buffer : buffers) {
       if (buffer.iov_len == 0) continue;
-      co_return co_await tls_->WriteSome(
+      return WriteVAwaitable(tls_->WriteSome(
           *this,
           std::span<const std::byte>(
-              static_cast<const std::byte*>(buffer.iov_base), buffer.iov_len));
+              static_cast<const std::byte*>(buffer.iov_base), buffer.iov_len)));
     }
-    co_return std::size_t{0};
+    return WriteVAwaitable(connection_, std::span<const iovec>{});
   }
-  co_return co_await WriteRawSomeV(buffers);
+  return WriteVAwaitable(connection_, buffers);
 }
 
 WriteVOperation TcpStream::WriteRawSomeV(
@@ -537,20 +581,24 @@ WriteVOperation TcpStream::WriteRawSomeV(
   return WriteVOperation(connection_, buffers);
 }
 
-Task<absl::Status> TcpStream::WriteRawAll(std::span<const std::byte> buffer) {
-  std::size_t written = 0;
-  while (written < buffer.size()) {
-    auto result = co_await WriteRawSome(buffer.subspan(written));
-    if (!result.ok()) co_return result.status();
-    if (*result == 0) {
-      co_return absl::InternalError("raw WriteSome returned 0");
-    }
-    written += *result;
-  }
-  co_return absl::OkStatus();
+TcpStream::WriteAllAwaitable TcpStream::WriteRawAll(
+    std::span<const std::byte> buffer) {
+  return WriteAllAwaitable(connection_, buffer, true);
 }
 
-Task<absl::Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
+TcpStream::WriteAllAwaitable TcpStream::WriteAll(
+    std::span<const std::byte> buffer) {
+  if (tls_ != nullptr) return WriteAllAwaitable(WriteAllTls(buffer));
+  return WriteRawAll(buffer);
+}
+
+TcpStream::WriteAllVAwaitable TcpStream::WriteAllV(
+    std::span<const iovec> buffers) {
+  if (tls_ != nullptr) return WriteAllVAwaitable(WriteAllVTls(buffers));
+  return WriteAllVAwaitable(connection_, buffers, true);
+}
+
+Task<absl::Status> TcpStream::WriteAllTls(std::span<const std::byte> buffer) {
   std::size_t written = 0;
   while (written < buffer.size()) {
     auto result = co_await WriteSome(buffer.subspan(written));
@@ -566,7 +614,7 @@ Task<absl::Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
   co_return absl::OkStatus();
 }
 
-Task<absl::Status> TcpStream::WriteAllV(std::span<const iovec> buffers) {
+Task<absl::Status> TcpStream::WriteAllVTls(std::span<const iovec> buffers) {
   std::vector<iovec> remaining;
   remaining.reserve(buffers.size());
   for (const iovec& buffer : buffers) {
