@@ -60,15 +60,17 @@ using WorkerId = std::uint16_t;
 // pointer. run_fn is the one unavoidable indirect call: it invokes the
 // type-erased user closure, and only on the request leg.
 struct RemoteWork {
-  WorkerId origin_ = 0;
+  // Keep aligned fields first and small bookkeeping last. Derived awaiters
+  // can then reuse the base's tail padding for their target worker ID.
   std::coroutine_handle<> waiter_{};
-  TaskClass task_class_ = TaskClass::kForeground;
   void (*run_fn_)(RemoteWork*) = nullptr;  // runs the user fn, stores result
-  bool reply_deferred_ = false;
 #if BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
   std::uint64_t request_post_ns_ = 0;
   std::uint64_t reply_post_ns_ = 0;
 #endif
+  WorkerId origin_ = 0;
+  TaskClass task_class_ = TaskClass::kForeground;
+  bool reply_deferred_ = false;
 };
 
 // Small one-way control message. It is copied into the target mailbox, so the
