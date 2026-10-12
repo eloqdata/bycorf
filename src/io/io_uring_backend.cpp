@@ -800,21 +800,18 @@ void IoUringBackend::DispatchCqe(io_uring_cqe* cqe) {
 }
 
 bool IoUringBackend::ReapCompletions() {
-  bool processed = false;
-  unsigned budget = io_uring_cq_ready(&ring_);
-  while (budget-- != 0) {
-    io_uring_cqe* cqe = nullptr;
-    if (io_uring_peek_cqe(&ring_, &cqe) != 0) break;
-    // A short-write callback can submit again and AcquireSqe may reap
-    // recursively when the ring is full. Retire this CQE before dispatch, and
-    // copy it because the kernel can reuse the slot during that submission.
-    // Peek afresh after each callback: reentry may have consumed later CQEs.
-    io_uring_cqe completion = *cqe;
-    io_uring_cqe_seen(&ring_, cqe);
-    DispatchCqe(&completion);
-    processed = true;
+  unsigned head = 0;
+  io_uring_cqe* cqe = nullptr;
+  unsigned processed = 0;
+  io_uring_for_each_cqe(&ring_, head, cqe) {
+    DispatchCqe(cqe);
+    ++processed;
   }
-  return processed;
+  if (processed != 0) {
+    io_uring_cq_advance(&ring_, processed);
+    return true;
+  }
+  return false;
 }
 
 void IoUringBackend::DrainRecvRearm() {
@@ -880,8 +877,9 @@ bool IoUringBackend::Wait(int timeout_ms) {
     spdlog::error("backend wait_cqe failed rc={}", rc);
     return false;
   }
-  // Poll retires CQEs before callbacks, including the one that woke this wait.
-  Poll();
+  DispatchCqe(cqe);
+  io_uring_cqe_seen(&ring_, cqe);
+  Poll();  // drain any other ready completions + re-arm recvs
   return true;
 }
 

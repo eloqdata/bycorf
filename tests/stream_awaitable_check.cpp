@@ -23,7 +23,6 @@
 #include <string>
 #include <thread>
 
-#include "bycorf/io/io_uring_backend.h"
 #include "bycorf/net/tcp_stream.h"
 #include "bycorf/runtime/runtime.h"
 
@@ -40,42 +39,6 @@ void Check(bool passed, const char* message) {
 
 std::span<const std::byte> Bytes(const std::string& value) {
   return std::as_bytes(std::span(value));
-}
-
-// Model AcquireSqe's recursive reap directly, without depending on kernel
-// timing to fill both rings. The current CQE must already be retired when a
-// completion submits work and reenters polling.
-void CheckCompletionReentry(bool wait) {
-  bycorf::Worker worker;
-  bycorf::IoUringBackend backend;
-  bycorf::IoBackendOptions options;
-  options.ring_entries_ = 8;
-  options.recv_buffer_count_ = 0;
-  const auto initialized = backend.Init(options, &worker, -1);
-  Check(initialized.ok(), "initialize completion reentry test");
-  if (!initialized.ok()) return;
-  struct Completion final : bycorf::IoCompletion {
-    bycorf::IoUringBackend* backend = nullptr;
-    unsigned calls = 0;
-    void Complete(bycorf::Worker&, int, unsigned) override {
-      if (++calls == 1) backend->Poll();
-    }
-  } completion;
-  completion.backend = &backend;
-  __kernel_timespec timeout{0, 1};
-  Check(backend.SubmitTimeout(timeout, &completion).ok(),
-        "submit reentry timer");
-  Check(backend.Submit().ok(), "flush reentry timer");
-  if (wait) Check(backend.Wait(1000), "wait dispatches the reentry timer");
-  const auto deadline = std::chrono::steady_clock::now() + 1s;
-  while (completion.calls == 0 && std::chrono::steady_clock::now() < deadline) {
-    // DEFER_TASKRUN needs an enter to publish timer task-work into the CQ.
-    (void)backend.Submit();
-    backend.Poll();
-  }
-  Check(completion.calls == 1,
-        "recursive polling dispatches each CQE exactly once");
-  backend.Shutdown();
 }
 
 // A tiny send buffer and a delayed reader force the full-write operations to
@@ -233,8 +196,6 @@ Task<absl::Status> CheckStream(bycorf::Worker& worker) {
 
 int main() {
   std::signal(SIGPIPE, SIG_IGN);
-  CheckCompletionReentry(false);
-  CheckCompletionReentry(true);
   bycorf::Runtime runtime;
   runtime.Start(1, [](unsigned, bycorf::Worker& worker) {
     if (!worker.Init().ok()) return 1;
