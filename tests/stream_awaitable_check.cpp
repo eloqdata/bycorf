@@ -196,6 +196,8 @@ Task<absl::Status> CheckStream(bycorf::Worker& worker) {
 
 int main() {
   std::signal(SIGPIPE, SIG_IGN);
+  // Preserve the last completed check when CTest terminates a stalled run.
+  std::cout << std::unitbuf;
   bycorf::Runtime runtime;
   runtime.Start(1, [](unsigned, bycorf::Worker& worker) {
     if (!worker.Init().ok()) return 1;
