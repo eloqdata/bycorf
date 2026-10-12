@@ -367,105 +367,54 @@ Task<absl::Status> TlsState::Handshake(TcpStream& stream) {
   co_return absl::OkStatus();
 }
 
-TlsState::IoAwaitable TlsState::ReadSome(TcpStream& stream,
-                                         std::span<std::byte> buffer) {
-  return IoAwaitable(*this, stream, buffer);
-}
-
-TlsState::IoAwaitable TlsState::WriteSome(TcpStream& stream,
-                                          std::span<const std::byte> buffer) {
-  return IoAwaitable(*this, stream, buffer);
-}
-
-bool TlsState::IoAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
-  awaiting_ = awaiting;
-  return Advance(absl::OkStatus());
-}
-
-absl::StatusOr<std::size_t> TlsState::IoAwaitable::await_resume() {
-  if (buffer_.empty()) return std::size_t{0};
-  return std::move(*result_);
-}
-
-void TlsState::IoAwaitable::OnComplete() {
-  // Immediate child completions are consumed by the running loop after
-  // resume() returns. This prevents synchronous retries from growing the stack.
-  if (advancing_) return;
-  completing_ = std::move(pending_);
-  if (!Advance(std::move(completing_).TakeResult())) {
-    // Do not resume the parent inline: it destroys this awaitable and its
-    // completing_ Task, whose final_suspend callback is still on the stack.
-    stream_.connection_->worker_->Enqueue(awaiting_);
-  }
-}
-
-bool TlsState::IoAwaitable::Advance(absl::Status status) {
-  advancing_ = true;
+Task<absl::StatusOr<std::size_t>> TlsState::ReadSome(
+    TcpStream& stream, std::span<std::byte> buffer) {
+  if (buffer.empty()) co_return std::size_t{0};
   while (true) {
-    if (!status.ok()) {
-      result_.emplace(std::move(status));
-      break;
-    }
-    if (phase_ == Phase::kSsl) {
-      size_ = 0;
-      ERR_clear_error();
-      // Read constructors accept mutable buffers; write constructors never
-      // enter SSL_read_ex. The const span shares storage for both operations.
-      const int result =
-          read_ ? SSL_read_ex(state_.impl_->ssl_,
-                              const_cast<std::byte*>(buffer_.data()),
-                              buffer_.size(), &size_)
-                : SSL_write_ex(state_.impl_->ssl_, buffer_.data(),
-                               buffer_.size(), &size_);
-      error_ = result == 1 ? SSL_ERROR_NONE
-                           : SSL_get_error(state_.impl_->ssl_, result);
-      phase_ = Phase::kFlushing;
-      pending_ = state_.FlushOutput(stream_);
-    } else if (phase_ == Phase::kFlushing) {
-      if (error_ == SSL_ERROR_NONE) {
-        result_.emplace(size_);
-        break;
-      }
-      if (error_ == SSL_ERROR_ZERO_RETURN) {
-        if (read_)
-          result_.emplace(std::size_t{0});
-        else
-          result_.emplace(absl::UnavailableError("TLS peer closed connection"));
-        break;
-      }
-      if (error_ == SSL_ERROR_WANT_WRITE) {
-        phase_ = Phase::kSsl;
-        continue;
-      }
-      if (error_ != SSL_ERROR_WANT_READ) {
-        result_.emplace(
-            TlsError(read_ ? "TLS read failed" : "TLS write failed"));
-        break;
-      }
-      phase_ = Phase::kReading;
-      pending_ = state_.ReadCiphertext(stream_);
-    } else {
-      phase_ = Phase::kSsl;
+    std::size_t size = 0;
+    ERR_clear_error();
+    const int result =
+        SSL_read_ex(impl_->ssl_, buffer.data(), buffer.size(), &size);
+    const int error =
+        result == 1 ? SSL_ERROR_NONE : SSL_get_error(impl_->ssl_, result);
+    absl::Status flushed = co_await FlushOutput(stream);
+    if (!flushed.ok()) co_return flushed;
+    if (result == 1) co_return size;
+    if (error == SSL_ERROR_ZERO_RETURN) co_return std::size_t{0};
+    if (error == SSL_ERROR_WANT_WRITE) continue;
+    if (error == SSL_ERROR_WANT_READ) {
+      absl::Status read = co_await ReadCiphertext(stream);
+      if (!read.ok()) co_return read;
       continue;
     }
-
-    pending_.SetCompletionCallback(
-        this, [](void* context, std::coroutine_handle<>) noexcept {
-          static_cast<IoAwaitable*>(context)->OnComplete();
-        });
-    // Use Task's awaiter to retain background-class propagation. There is no
-    // coroutine continuation: the callback advances this operation instead.
-    auto child = std::move(pending_).operator co_await().await_suspend({});
-    child.resume();
-    if (!pending_.done()) {
-      advancing_ = false;
-      return true;
-    }
-    status = std::move(pending_).TakeResult();
-    pending_ = {};
+    co_return TlsError("TLS read failed");
   }
-  advancing_ = false;
-  return false;
+}
+
+Task<absl::StatusOr<std::size_t>> TlsState::WriteSome(
+    TcpStream& stream, std::span<const std::byte> buffer) {
+  if (buffer.empty()) co_return std::size_t{0};
+  while (true) {
+    std::size_t size = 0;
+    ERR_clear_error();
+    const int result =
+        SSL_write_ex(impl_->ssl_, buffer.data(), buffer.size(), &size);
+    const int error =
+        result == 1 ? SSL_ERROR_NONE : SSL_get_error(impl_->ssl_, result);
+    absl::Status flushed = co_await FlushOutput(stream);
+    if (!flushed.ok()) co_return flushed;
+    if (result == 1) co_return size;
+    if (error == SSL_ERROR_WANT_WRITE) continue;
+    if (error == SSL_ERROR_WANT_READ) {
+      absl::Status read = co_await ReadCiphertext(stream);
+      if (!read.ok()) co_return read;
+      continue;
+    }
+    if (error == SSL_ERROR_ZERO_RETURN) {
+      co_return absl::UnavailableError("TLS peer closed connection");
+    }
+    co_return TlsError("TLS write failed");
+  }
 }
 
 Task<absl::Status> TlsState::Shutdown(TcpStream& stream) {

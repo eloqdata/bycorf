@@ -19,7 +19,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -76,50 +75,6 @@ class TlsContext {
 // pair. This also makes the TLS state transferable with a handed-off fd.
 class TlsState {
  public:
-  // Stores the SSL read/write loop in its caller's frame. Ciphertext transport
-  // still uses the existing worker-local Tasks. The stream and payload must
-  // outlive completion; this operation may only be awaited on their worker.
-  class IoAwaitable {
-   public:
-    IoAwaitable(TlsState& state, TcpStream& stream, std::span<std::byte> buffer)
-        : IoAwaitable(state, stream, std::span<const std::byte>(buffer), true) {
-    }
-    IoAwaitable(TlsState& state, TcpStream& stream,
-                std::span<const std::byte> buffer)
-        : IoAwaitable(state, stream, buffer, false) {}
-    IoAwaitable(const IoAwaitable&) = delete;
-    IoAwaitable& operator=(const IoAwaitable&) = delete;
-    IoAwaitable(IoAwaitable&&) = delete;
-    IoAwaitable& operator=(IoAwaitable&&) = delete;
-
-    bool await_ready() const noexcept { return buffer_.empty(); }
-    bool await_suspend(std::coroutine_handle<> awaiting);
-    absl::StatusOr<std::size_t> await_resume();
-
-   private:
-    enum class Phase { kSsl, kFlushing, kReading };
-    IoAwaitable(TlsState& state, TcpStream& stream,
-                std::span<const std::byte> buffer, bool read)
-        : state_(state), stream_(stream), buffer_(buffer), read_(read) {}
-    bool Advance(absl::Status status);
-    void OnComplete();
-
-    TlsState& state_;
-    TcpStream& stream_;
-    std::span<const std::byte> buffer_;
-    std::coroutine_handle<> awaiting_{};
-    // A Task's callback runs inside final_suspend. Keep that frame alive until
-    // the callback returns, even when Advance starts another child immediately.
-    Task<absl::Status> completing_;
-    Task<absl::Status> pending_;
-    std::optional<absl::StatusOr<std::size_t>> result_;
-    std::size_t size_ = 0;
-    int error_ = 0;
-    Phase phase_ = Phase::kSsl;
-    bool read_;
-    bool advancing_ = false;
-  };
-
   ~TlsState();
 
   TlsState(const TlsState&) = delete;
@@ -134,8 +89,10 @@ class TlsState {
       std::string_view peer_name);
 
   Task<absl::Status> Handshake(TcpStream& stream);
-  IoAwaitable ReadSome(TcpStream& stream, std::span<std::byte> buffer);
-  IoAwaitable WriteSome(TcpStream& stream, std::span<const std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> ReadSome(TcpStream& stream,
+                                             std::span<std::byte> buffer);
+  Task<absl::StatusOr<std::size_t>> WriteSome(
+      TcpStream& stream, std::span<const std::byte> buffer);
   Task<absl::Status> Shutdown(TcpStream& stream);
   absl::StatusOr<std::vector<std::string>> PeerCertificateUriSans() const;
 
@@ -143,8 +100,6 @@ class TlsState {
   Task<absl::Status> ReadCiphertext(TcpStream& stream);
 
   friend class TcpStream;
-  template <typename>
-  friend class StreamOperation;
   std::unique_ptr<Impl> impl_;
 };
 

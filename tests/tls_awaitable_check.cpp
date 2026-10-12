@@ -138,6 +138,7 @@ Task<absl::Status> Exercise(bycorf::Worker& worker,
   for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = char(i % 251);
   bool peer_ok = true;
   std::atomic<bool> read_finished{false};
+  std::atomic<bool> allow_receive{!duplex};
   std::thread peer([&] {
     SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
     SSL* ssl = SSL_new(ctx);
@@ -156,7 +157,11 @@ Task<absl::Status> Exercise(bycorf::Worker& worker,
       }
     };
     auto receive = [&] {
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      // The duplex case must keep the writer suspended until the worker has
+      // observed its output lock. A fixed sleep is unreliable under sanitizers.
+      while (!allow_receive.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if (!duplex) std::this_thread::sleep_for(std::chrono::milliseconds(20));
       std::string received(payload.size(), '\0');
       std::size_t offset = 0;
       while (peer_ok && offset < received.size()) {
@@ -197,6 +202,7 @@ Task<absl::Status> Exercise(bycorf::Worker& worker,
       worker.Spawn(DuplexWriter(stream, payload, writer_done));
       co_await NextRound{worker};
       Check(connection->write_inflight_, "TLS writer holds the output lock");
+      allow_receive.store(true);
     }
     std::string received(payload.size(), '\0');
     auto start = std::chrono::steady_clock::now();
@@ -248,6 +254,7 @@ Task<absl::Status> Exercise(bycorf::Worker& worker,
     }
   }
   read_finished.store(true);
+  allow_receive.store(true);
   stream.Close().IgnoreError();
   if (handshake.ok()) {
     while (!writer_done) co_await NextRound{worker};
