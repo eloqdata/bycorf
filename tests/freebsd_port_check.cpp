@@ -91,15 +91,18 @@ struct Lane {
     interface.mac[5] = 2;
     interface.mtu = 1500;
     interface.context = this;
-    interface.transmit = [](void* context, const void* bytes, size_t length) {
+    interface.transmit = [](void* context, const bycorf_bsd_packet* packet) {
       auto* lane = static_cast<Lane*>(context);
+      std::array<unsigned char, 1518> frame;
+      Check(packet->length <= frame.size(), "output frame fits");
+      packet->copy(packet->context, frame.data());
       ssize_t n;
       do {
-        n = write(lane->fd, bytes, length);
+        n = write(lane->fd, frame.data(), packet->length);
       } while (n < 0 && errno == EINTR);
       // A full TAP queue may drop a frame, as a bounded NIC queue does. TCP
       // must recover; never retain an mbuf's borrowed bytes across callbacks.
-      return n == static_cast<ssize_t>(length) ? 0 : 55;  // BSD ENOBUFS
+      return n == static_cast<ssize_t>(packet->length) ? 0 : 55;  // BSD ENOBUFS
     };
     int error = bycorf_bsd_attach_interface(&interface);
     Check(error == 0, "attach interface", error);

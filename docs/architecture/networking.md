@@ -127,7 +127,10 @@ and outgoing IPv4 TCP use BSD; Unix sockets retain the kernel path. IPv6 DPDK
 listeners and clients are unsupported.
 
 The prototype copies MTU-sized frames between DPDK and BSD and copies received
-bytes into per-connection buffers. It uses software checksums. Software queues
+bytes into per-connection buffers. On output, the host synchronously copies a
+borrowed BSD packet into host-owned storage before the stack releases its mbuf;
+DPDK uses its final packet buffer as that destination. Only host-owned packets
+cross worker queues. It uses software checksums. Software queues
 are bounded: overflow and partial device TX free unaccepted packets, leaving
 native TCP responsible for retransmission. This is a functional integration
 boundary, not a zero-copy or tuned packet allocator.

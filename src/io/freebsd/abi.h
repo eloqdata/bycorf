@@ -29,9 +29,7 @@ extern "C" {
 #endif
 
 // The only boundary between the private FreeBSD namespace and the Linux host.
-// Callbacks stay alive until all worker stacks have stopped. Packet callbacks
-// must copy/retain bytes before returning: FreeBSD reclaims their mbuf
-// afterward.
+// Callbacks stay alive until all worker stacks have stopped.
 struct bycorf_bsd_host {
   void* (*allocate)(size_t size, size_t alignment);
   void (*release)(void* pointer);
@@ -42,13 +40,26 @@ struct bycorf_bsd_host {
   void (*abort_process)(void);
 };
 
+// Borrowed only until the transmit callback returns, on the owning worker.
+// copy writes exactly length bytes into a host-owned destination with at least
+// that capacity. Neither this descriptor nor context may be retained or queued;
+// FreeBSD reclaims the source mbuf after transmit, including on failure.
+struct bycorf_bsd_packet {
+  const void* context;
+  size_t length;
+  void (*copy)(const void* context, void* destination);
+};
+
 struct bycorf_bsd_interface {
   uint32_t address;
   uint32_t netmask;
   uint32_t gateway;
   unsigned char mac[6];
   uint16_t mtu;
-  int (*transmit)(void* context, const void* bytes, size_t length);
+  // Copy synchronously into host-owned storage before queueing a packet.
+  // Returns zero on success or a positive FreeBSD errno on failure. The host
+  // owns its destination storage and must release it on any rejected send.
+  int (*transmit)(void* context, const struct bycorf_bsd_packet* packet);
   void* context;
 };
 

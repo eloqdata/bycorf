@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <utility>
 #include <vector>
 
 #include "../src/io/freebsd/abi.h"
@@ -19,6 +20,8 @@
 namespace {
 std::deque<std::vector<unsigned char>> packets;
 unsigned wire_packets = 0;
+enum class Reject { kNone, kBeforeCopy, kAfterCopy };
+Reject reject_next = Reject::kNone;
 constexpr uint32_t kAddress = 0xc6130002;
 
 void Check(bool ok, const char* what, int error = 0) {
@@ -47,7 +50,7 @@ void Exchange(struct socket* source, struct socket* target) {
   std::array<unsigned char, 32769> expected{}, actual{};
   for (size_t i = 0; i < expected.size(); ++i) expected[i] = i * 37;
   size_t sent = 0, received = 0;
-  const auto deadline = Now(CLOCK_MONOTONIC) + 2000000000;
+  const auto deadline = Now(CLOCK_MONOTONIC) + 5000000000;
   while (received < actual.size() && Now(CLOCK_MONOTONIC) < deadline) {
     size_t n = 0;
     if (sent < expected.size()) {
@@ -98,12 +101,20 @@ int main() {
   interface.mac[0] = 2;
   interface.mac[5] = 2;
   interface.mtu = 1500;
-  interface.transmit = [](void*, const void* data, size_t n) {
-    auto* bytes = static_cast<const unsigned char*>(data);
+  interface.transmit = [](void*, const bycorf_bsd_packet* packet) {
+    const auto reject = std::exchange(reject_next, Reject::kNone);
+    // A host allocation failure may reject the borrow without copying it.
+    if (reject == Reject::kBeforeCopy) return 55;  // BSD ENOBUFS
+    std::vector<unsigned char> frame(packet->length);
+    packet->copy(packet->context, frame.data());
+    // A full output queue rejects an already copied packet. Neither failure
+    // may retain the BSD borrow; TCP must recover using its own send buffer.
+    if (reject == Reject::kAfterCopy) return 55;
+    const auto* bytes = frame.data();
     const uint32_t destination = htonl(kAddress);
-    if (n >= 34 && bytes[12] == 8 && bytes[13] == 0 &&
+    if (frame.size() >= 34 && bytes[12] == 8 && bytes[13] == 0 &&
         std::memcmp(bytes + 30, &destination, 4) == 0)
-      packets.emplace_back(bytes, bytes + n);
+      packets.emplace_back(std::move(frame));
     else
       ++wire_packets;
     return 0;
@@ -130,6 +141,12 @@ int main() {
   Check(bycorf_bsd_accept(listener, &accepted) == 0, "local accept");
   Exchange(client, accepted);
   Exchange(accepted, client);
+  reject_next = Reject::kBeforeCopy;
+  Exchange(client, accepted);
+  Check(reject_next == Reject::kNone, "allocation rejection exercised");
+  reject_next = Reject::kAfterCopy;
+  Exchange(accepted, client);
+  Check(reject_next == Reject::kNone, "queue rejection exercised");
   Check(bycorf_bsd_close(accepted) == 0, "close accepted");
   Pump();
   unsigned char byte;

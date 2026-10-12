@@ -32,17 +32,20 @@
 static _Thread_local if_t interface;
 static _Thread_local struct bycorf_bsd_interface config;
 
+static void copy_packet(const void* context, void* destination) {
+  const struct mbuf* m = context;
+  m_copydata(m, 0, m->m_pkthdr.len, destination);
+}
+
 static int transmit(if_t ifp, struct mbuf* m) {
   struct bycorf_bsd_interface* cfg = if_getsoftc(ifp);
-  // The first version deliberately uses copied, MTU-sized frames and software
-  // checksums. No BSD mbuf or stack-local pointer crosses to a queue owner.
-  unsigned char frame[ETHER_MAX_LEN];
-  size_t n = m->m_pkthdr.len;
+  // Let the host copy the chain directly into its final packet buffer. The
+  // borrow ends before m_freem; only host-owned bytes can cross a worker queue.
+  const struct bycorf_bsd_packet packet = {
+      .context = m, .length = m->m_pkthdr.len, .copy = copy_packet};
   int error = EMSGSIZE;
-  if (n <= sizeof(frame)) {
-    m_copydata(m, 0, n, frame);
-    error = cfg->transmit(cfg->context, frame, n);
-  }
+  if (packet.length <= ETHER_MAX_LEN)
+    error = cfg->transmit(cfg->context, &packet);
   if_inc_counter(ifp, error ? IFCOUNTER_OERRORS : IFCOUNTER_OPACKETS, 1);
   m_freem(m);
   return error;
