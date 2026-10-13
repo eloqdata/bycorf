@@ -261,8 +261,12 @@ class DpdkBackend::Impl {
       // records must be consumed by the PMD's interrupt-disable callback.
       // Only ordinary hardware eventfds accept a uint64_t acknowledgement.
       if (!fabric.tap && !fabric.mlx5) {
+        // Output-only counter: read writes it, and RX queues supply packet
+        // readiness independently of its value. No initialization is needed.
         std::uint64_t value;
-        (void)::read(fd, &value, sizeof(value));
+        // Best-effort drain; an unacknowledged counter causes another wake.
+        [[maybe_unused]] const auto acknowledged =
+            ::read(fd, &value, sizeof(value));
       }
     }
   } notification;
