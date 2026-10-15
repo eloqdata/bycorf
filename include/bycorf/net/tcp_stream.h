@@ -45,7 +45,8 @@ class TlsState;
 // so they live directly in the awaiting coroutine frame.
 class ReadOperation final : public IoCompletion {
  public:
-  ReadOperation(Connection* connection, std::span<std::byte> buffer) noexcept;
+  ReadOperation(Connection* connection, std::span<std::byte> buffer,
+                bool drain_buffered = false) noexcept;
   ReadOperation(const ReadOperation&) = delete;
   ReadOperation& operator=(const ReadOperation&) = delete;
   ReadOperation(ReadOperation&&) = delete;
@@ -61,6 +62,7 @@ class ReadOperation final : public IoCompletion {
   std::span<std::byte> buffer_;
   std::optional<absl::Status> immediate_status_;
   std::optional<std::size_t> immediate_result_;
+  bool drain_buffered_ = false;
 };
 
 class WriteOperation final : public IoCompletion {
@@ -199,6 +201,14 @@ class TcpStream {
   absl::Status SetReadAhead(bool enabled) noexcept;
 
   Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
+  // Wait for initial data, then copy currently queued receive buffers up to
+  // buffer.size(). Never wait to fill the destination; its size bounds work
+  // in this call, so callers should limit it for scheduling fairness. TLS
+  // retains ReadSome's decrypted-read behavior without draining raw buffers.
+  // EOF returns zero after queued bytes drain. An error after partial copying
+  // is reported on the next read, preserving the successful byte prefix.
+  Task<absl::StatusOr<std::size_t>> ReadSomeBuffered(
+      std::span<std::byte> buffer);
   Task<absl::StatusOr<std::size_t>> WriteSome(
       std::span<const std::byte> buffer);
   Task<absl::StatusOr<std::size_t>> WriteSomeV(std::span<const iovec> buffers);

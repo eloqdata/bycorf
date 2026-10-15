@@ -423,6 +423,9 @@ if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
   add_executable(bycorf_connection_storage_check example/connection_storage_check.cpp)
   target_link_libraries(bycorf_connection_storage_check PRIVATE bycorf::core)
 
+  add_executable(bycorf_tcp_buffered_read_check tests/tcp_buffered_read_check.cpp)
+  target_link_libraries(bycorf_tcp_buffered_read_check PRIVATE bycorf::core)
+
   add_executable(bycorf_backend_selection_check example/backend_selection_check.cpp)
   target_link_libraries(bycorf_backend_selection_check PRIVATE bycorf::core)
 
@@ -506,8 +509,10 @@ if (BYCORF_BUILD_TESTS)
   endif()
   add_test(NAME bycorf_connect_timer_check COMMAND bycorf_connect_timer_check)
   add_test(NAME bycorf_connection_storage_check COMMAND bycorf_connection_storage_check)
+  add_test(NAME bycorf_tcp_buffered_read_check COMMAND bycorf_tcp_buffered_read_check)
   add_test(NAME bycorf_backend_selection_check COMMAND bycorf_backend_selection_check)
   set_tests_properties(bycorf_connection_storage_check bycorf_backend_selection_check
+    bycorf_tcp_buffered_read_check
     PROPERTIES TIMEOUT 90 LABELS "runtime;net;io_uring")
   set_tests_properties(bycorf_connect_timer_check PROPERTIES
     TIMEOUT 90 LABELS "runtime;net;io_uring"

@@ -99,11 +99,13 @@ a 30-second timeout; the other checks below have 90-second timeouts:
 | `bycorf_task_transfer_check` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
 | `bycorf_connect_timer_check` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
 | `bycorf_connection_storage_check` | Connection storage lifetime while suspended coroutines still borrow it |
+| `bycorf_tcp_buffered_read_check` | Bounded reads across queued receive buffers, partial buffers, unchanged ordinary reads, waiting, errors, and EOF |
 | `bycorf_backend_selection_check` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |
 
-Network checks use one unpinned worker and ephemeral loopback ports. The
-connection-timeout probe warns if the host rejects its unreachable destination
-immediately, since that exercises connection failure instead of the deadline.
+Network checks use one unpinned worker and ephemeral loopback ports or Unix
+socket pairs. The connection-timeout probe warns if the host rejects its
+unreachable destination immediately, since that exercises connection failure
+instead of the deadline.
 These software tests also run in a bypass-capable build with the default
 kernel/io_uring selection, without activating EAL or accessing devices.
 
