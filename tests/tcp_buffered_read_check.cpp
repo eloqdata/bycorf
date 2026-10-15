@@ -36,7 +36,8 @@ namespace {
 using namespace std::chrono_literals;
 
 absl::Status Check(bool passed, std::string_view message) {
-  std::cout << (passed ? "PASS " : "FAIL ") << message << '\n';
+  // Keep the last completed assertion visible if CTest kills a stalled read.
+  std::cout << (passed ? "PASS " : "FAIL ") << message << std::endl;
   return passed ? absl::OkStatus() : absl::InternalError(message);
 }
 
@@ -64,7 +65,8 @@ bycorf::Task<absl::Status> SendLater(bycorf::Worker& worker, int fd) {
 
 bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
   int sockets[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) != 0)
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+                 sockets) != 0)
     co_return absl::InternalError("socketpair failed");
   absl::Cleanup close_peer = [&] { close(sockets[1]); };
   bycorf::Connection initial;
@@ -155,16 +157,24 @@ bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
                  "partial progress is returned before a later buffer error");
   if (!status.ok()) co_return status;
 
+  // Deterministically cover data and EOF already queued together without
+  // relying on the kernel to deliver both completions in a particular batch.
+  connection->recv_eof_ = true;
   read = co_await stream.ReadSomeBuffered(output);
   status = Check(read.ok() && *read == payload.size() - received.size() &&
                      connection->received_buffers_.empty(),
-                 "buffered read returns available data without filling output");
+                 "queued data precedes EOF without filling output");
   if (!status.ok()) co_return status;
   received.append(reinterpret_cast<const char*>(output.data()), *read);
   status =
       Check(received == payload, "all bytes retain order across read modes");
   if (!status.ok()) co_return status;
+  read = co_await stream.ReadSomeBuffered(output);
+  status = Check(read.ok() && *read == 0,
+                 "queued EOF returns zero after buffered data drains");
+  if (!status.ok()) co_return status;
 
+  connection->recv_eof_ = false;
   connection->recv_mode_ = bycorf::RecvMode::kMultishot;
   connection->read_buffer_.clear();
   // No bytes are queued now: the first read must suspend, but once the peer
@@ -180,18 +190,22 @@ bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
 
   status = Send(sockets[1], "before eof");
   if (!status.ok()) co_return status;
-  if (shutdown(sockets[1], SHUT_WR) != 0)
-    co_return absl::InternalError("peer shutdown failed");
   read = co_await stream.ReadSomeBuffered(output);
   status =
       Check(read.ok() && *read == 10 &&
                 std::string_view(reinterpret_cast<const char*>(output.data()),
                                  *read) == "before eof",
-            "buffered data precedes EOF");
+            "live receive returns the peer payload");
   if (!status.ok()) co_return status;
+  // Older kernels can lose the AF_UNIX multishot EOF wake when send and
+  // shutdown run back-to-back (Linux fix a68ed2df7213). Consume the payload
+  // first so this tests live EOF independently of that kernel race; queued
+  // data plus EOF ordering is covered explicitly above.
+  if (shutdown(sockets[1], SHUT_WR) != 0)
+    co_return absl::InternalError("peer shutdown failed");
   read = co_await stream.ReadSomeBuffered(output);
   co_return Check(read.ok() && *read == 0,
-                  "EOF returns zero after the queue drains");
+                  "live EOF returns zero after the queue drains");
 }
 
 bycorf::Task<absl::Status> RunChecks(bycorf::Worker& worker, bool& passed) {
