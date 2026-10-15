@@ -133,8 +133,11 @@ class CancelRecvOperation final : public IoCompletion {
 }  // namespace
 
 ReadOperation::ReadOperation(Connection* connection,
-                             std::span<std::byte> buffer) noexcept
-    : connection_(connection), buffer_(buffer) {}
+                             std::span<std::byte> buffer,
+                             bool drain_buffered) noexcept
+    : connection_(connection),
+      buffer_(buffer),
+      drain_buffered_(drain_buffered) {}
 
 bool ReadOperation::await_suspend(std::coroutine_handle<> awaiting) {
   awaiting_ = awaiting;
@@ -195,25 +198,36 @@ absl::StatusOr<std::size_t> ReadOperation::await_resume() noexcept {
                         "no received data available");
   }
 
-  auto& received = connection_->received_buffers_.front();
-  const std::size_t available =
-      static_cast<std::size_t>(received.size_ - received.offset_);
-  const std::size_t to_copy = std::min(buffer_.size(), available);
-  auto chunk = connection_->worker_->ViewMultishotBuffer(
-      connection_, received.buffer_id_, received.offset_, to_copy);
-  if (chunk.size() != to_copy) {
-    return absl::Status(absl::StatusCode::kInternal,
-                        "invalid multishot buffer view");
-  }
+  std::size_t copied = 0;
+  do {
+    auto& received = connection_->received_buffers_.front();
+    const std::size_t available =
+        static_cast<std::size_t>(received.size_ - received.offset_);
+    const std::size_t to_copy = std::min(buffer_.size() - copied, available);
+    auto chunk = connection_->worker_->ViewMultishotBuffer(
+        connection_, received.buffer_id_, received.offset_, to_copy);
+    if (chunk.size() != to_copy) {
+      auto status = absl::InternalError("invalid multishot buffer view");
+      if (copied == 0) return status;
+      // Earlier buffers have already been consumed. Return that valid prefix
+      // before reporting the error; otherwise the caller would lose bytes.
+      connection_->last_error_ = std::move(status);
+      return copied;
+    }
 
-  std::memcpy(buffer_.data(), chunk.data(), chunk.size());
-  received.offset_ += static_cast<std::uint32_t>(to_copy);
-  if (received.offset_ == received.size_) {
-    const auto buffer_id = received.buffer_id_;
-    connection_->received_buffers_.pop_front();
-    connection_->worker_->ReleaseReceivedBuffer(connection_, buffer_id);
-  }
-  return to_copy;
+    std::memcpy(buffer_.data() + copied, chunk.data(), chunk.size());
+    copied += to_copy;
+    received.offset_ += static_cast<std::uint32_t>(to_copy);
+    if (received.offset_ == received.size_) {
+      const auto buffer_id = received.buffer_id_;
+      connection_->received_buffers_.pop_front();
+      connection_->worker_->ReleaseReceivedBuffer(connection_, buffer_id);
+    }
+    // Do not poll or suspend between buffers. Only already queued data belongs
+    // to this read, and ordinary ReadSome retains its single-buffer behavior.
+  } while (drain_buffered_ && copied < buffer_.size() &&
+           !connection_->received_buffers_.empty());
+  return copied;
 }
 
 void ReadOperation::Complete(Worker& worker, int result, unsigned flags) {
@@ -498,6 +512,14 @@ Task<absl::StatusOr<std::size_t>> TcpStream::ReadSome(
     co_return co_await tls_->ReadSome(*this, buffer);
   }
   co_return co_await ReadRawSome(buffer);
+}
+
+Task<absl::StatusOr<std::size_t>> TcpStream::ReadSomeBuffered(
+    std::span<std::byte> buffer) {
+  if (tls_ != nullptr) {
+    co_return co_await tls_->ReadSome(*this, buffer);
+  }
+  co_return co_await ReadOperation(connection_, buffer, true);
 }
 
 ReadOperation TcpStream::ReadRawSome(std::span<std::byte> buffer) noexcept {
