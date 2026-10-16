@@ -20,8 +20,11 @@
 #include <liburing.h>
 #include <sys/uio.h>
 
+#include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -66,7 +69,11 @@ class IoUringBackend {
     return ring_.ring_fd;
   }  // peers' MSG_RING target
 
-  // Typed submissions. On completion the backend invokes tag->Complete(worker,
+  // Success accepts an operation, including time waiting for SQ space. Callers
+  // retain tags, buffers and indirect arguments until terminal completion.
+  // Submitting never invokes a completion inline. Ordinary allocation failure
+  // is fatal, as for the worker's other queues.
+  // On completion the backend invokes tag->Complete(worker,
   // result, flags) — send (one-shot) and accept (multishot) both go through
   // this path; the backend is agnostic to which. recv does NOT use Complete:
   // the backend updates the Connection directly and resumes its reader.
@@ -82,7 +89,8 @@ class IoUringBackend {
   // alive by embedding it in the awaitable.
   absl::Status SubmitConnect(int fd, const sockaddr* address,
                              socklen_t address_length, IoCompletion* tag);
-  // Best-effort cancel of the in-flight SQE whose user_data is `target`. The
+  // Cancel a queued operation locally or best-effort cancel its in-flight SQE.
+  // Both paths deliver the target's terminal completion asynchronously. The
   // cancel request's own CQE is dropped (kCancelRequestTag); the target's CQE
   // still arrives — normally or with -ECANCELED — so the owner MUST wait for
   // it before reclaiming state the SQE referenced. -ENOENT (already done) is
@@ -95,6 +103,12 @@ class IoUringBackend {
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag);
   absl::Status StartPeerDisconnectPoll(Connection* connection);
   absl::Status CancelPeerDisconnectPoll(Connection* connection);
+
+  // Retire unsubmitted kernel socket operations before closing/reusing a raw
+  // fd. Their cancellation completions are deferred to Poll; already consumed
+  // SQEs retain the kernel's file reference. Fixed-file operations are
+  // excluded.
+  void CancelUnsubmittedForFd(int fd) noexcept;
 
   std::span<const std::byte> ViewRecvBuffer(const Connection* connection,
                                             std::uint16_t buffer_id,
@@ -127,6 +141,8 @@ class IoUringBackend {
   absl::Status Submit();
   bool Poll();                // reap completions, dispatch, then re-arm recvs
   bool Wait(int timeout_ms);  // block for a completion, dispatch, drain
+  // Software work or SQEs still requiring an enter must prevent worker sleep.
+  bool HasPending() const noexcept;
 
   // Cross-core: wake a peer worker that is parked (caller checks wake_seq).
   void WakeRemote(int peer_ring_fd) noexcept;
@@ -134,6 +150,22 @@ class IoUringBackend {
   void WakeSelf() noexcept;
 
  private:
+  // Backend-owned submission state. Pointees remain caller-owned, just as for
+  // an SQE waiting in the real ring. Prepare the entire descriptor before
+  // publishing it so queue draining never observes a partially built request.
+  struct PendingIo {
+    explicit PendingIo(const io_uring_sqe& sqe) noexcept;
+    io_uring_sqe descriptor() const noexcept;
+
+    // Linux's SQE contains a zero-length extension array, so store its object
+    // representation rather than embedding that non-standard member in C++.
+    std::array<std::byte, sizeof(io_uring_sqe)> descriptor_;
+  };
+  struct PendingCompletion {
+    std::uint64_t user_data_;
+    int result_;
+  };
+
   struct MultishotBufferRing {
     static constexpr std::uint16_t kGroupId = 1;
     io_uring_buf_ring* ring_ = nullptr;
@@ -144,6 +176,16 @@ class IoUringBackend {
   };
 
   io_uring_sqe* AcquireSqe();
+  absl::Status SubmitOrQueue(const io_uring_sqe& prepared);
+  absl::Status QueuePrepared(const io_uring_sqe& prepared);
+  absl::Status SubmitSlow();
+  bool PollDeferred();
+  bool DrainPending();
+  bool DrainPendingCompletions();
+  template <typename Predicate>
+  bool CancelUnsubmittedMatching(Predicate matches, int result = -ECANCELED);
+  void RetireUnsubmittedCancels(std::uint64_t target);
+  absl::Status CancelByData(void* target, void* completion);
   bool InitMultishotRecv();
   bool ArmWakePoll();
   void HandleWakePoll();
@@ -151,22 +193,30 @@ class IoUringBackend {
   void HandlePeerDisconnect(Connection* connection, io_uring_cqe* cqe);
   void RecycleMultishotBuffer(std::uint16_t buffer_id);
   void DispatchCqe(io_uring_cqe* cqe);
-  bool
-  ReapCompletions();  // reap + dispatch only (no re-arm; used by AcquireSqe)
+  bool ReapCompletions();
   void DrainRecvRearm();
 
   io_uring ring_{};
+  // Pack flags into the alignment gap before pointer-sized state. The rarely
+  // used ownership/registration flags then add no gaps between hot fields.
   bool initialized_ = false;
-  Worker* worker_ = nullptr;
-  IoBackendOptions options_{};
-  MultishotBufferRing multishot_ring_{};
+  bool may_have_unsubmitted_cancels_ = false;
   bool recv_multishot_enabled_ = false;
-  int wake_event_fd_ = -1;
   bool wake_poll_armed_ = false;
   bool owns_wake_fd_ = true;
-  std::vector<Connection*> recv_rearm_queue_;
   bool fixed_files_registered_ = false;
   bool buffers_registered_ = false;
+  Worker* worker_ = nullptr;
+
+  // All three queues are checked by the event loop even when empty. Keep their
+  // metadata together ahead of receive-buffer storage and setup options.
+  std::deque<PendingIo> pending_io_;
+  std::vector<PendingCompletion> pending_completions_;
+  std::vector<Connection*> recv_rearm_queue_;
+
+  MultishotBufferRing multishot_ring_{};
+  int wake_event_fd_ = -1;
+  IoBackendOptions options_{};
 };
 
 }  // namespace bycorf

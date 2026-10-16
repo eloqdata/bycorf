@@ -246,6 +246,11 @@ class Worker {
   absl::Status SubmitCancel(IoCompletion* target) {
     return backend_.SubmitCancel(target);
   }
+  // Before closing a kernel socket, retire accepted operations whose fd has
+  // not yet been consumed by the kernel. Completions remain deferred.
+  void CancelUnsubmittedForFd(int fd) noexcept {
+    backend_.CancelUnsubmittedForFd(fd);
+  }
   absl::Status EnsureRecvArmed(Connection* connection) {
     return backend_.StartRecvMultishot(connection);
   }
@@ -432,6 +437,9 @@ class Worker {
   SpdkStorageBackend storage_backend_{};
 #endif
   bool initialized_ = false;
+  // A fatal enter failure must leave RunOnce through the existing backend
+  // failure path, rather than spinning forever on accepted pending work.
+  bool submit_failed_ = false;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> stopping_{false};
   WorkerOptions options_{};

@@ -100,6 +100,7 @@ a 30-second timeout; the other checks below have 90-second timeouts:
 | `bycorf_connect_timer_check` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
 | `bycorf_connection_storage_check` | Connection storage lifetime while suspended coroutines still borrow it |
 | `bycorf_tcp_buffered_read_check` | Bounded reads across queued receive buffers, partial buffers, unchanged ordinary reads, waiting, errors, and EOF |
+| `bycorf_io_uring_backpressure_check` | Full submission queues, deferred sends and storage reads, queued cancellation, descriptor reuse, peer wakes, and shutdown |
 | `bycorf_backend_selection_check` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |
 
 Network checks use one unpinned worker and ephemeral loopback ports or Unix

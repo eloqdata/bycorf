@@ -541,6 +541,10 @@ absl::Status TcpListener::Close() noexcept {
   fd_ = -1;
   accept_state_.CloseAllAcceptedFds();
   absl::Status result = absl::OkStatus();
+  if (fd >= 0 && worker_ != nullptr && !detail::IsDpdkSocket(fd)) {
+    // A queued accept must never bind to a later reuse of this descriptor.
+    worker_->CancelUnsubmittedForFd(fd);
+  }
   if (fd >= 0 && detail::CloseSocket(fd) != 0) {
     result = ErrnoToStatus(errno, "close listener failed");
   }

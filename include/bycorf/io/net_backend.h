@@ -84,6 +84,11 @@ class NetBackend {
 #endif
     return kernel_.SubmitCancel(target);
   }
+  // Cancel kernel socket operations that have not acquired their fd reference
+  // yet. Native DPDK handles must be excluded by the caller.
+  void CancelUnsubmittedForFd(int fd) noexcept {
+    kernel_.CancelUnsubmittedForFd(fd);
+  }
   absl::Status StartRecvMultishot(Connection* connection) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->StartRecvMultishot(connection);
@@ -179,6 +184,8 @@ class NetBackend {
 #endif
     return kernel_.Poll();
   }
+  // The shared kernel ring can retain work even when DPDK serves networking.
+  bool HasPending() const noexcept { return kernel_.HasPending(); }
   bool Wait(int timeout_ms) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->Wait(timeout_ms);

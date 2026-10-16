@@ -221,6 +221,7 @@ absl::Status Worker::Init(const WorkerOptions& options) {
 
   // Advertise our ring so other workers can wake us via MSG_RING.
   cross_core_->mailbox(id_).ring_fd_ = backend_.WakeHandle();
+  submit_failed_ = false;
   initialized_ = true;
   return absl::OkStatus();
 }
@@ -373,6 +374,11 @@ void Worker::BeginClose(Connection* connection, absl::Status reason,
 
   if (connection->file_.fd_ >= 0) {
     const int fd = connection->file_.fd_;
+    if (!detail::IsDpdkSocket(fd)) {
+      // An accepted operation may still live in the software queue or SQ.
+      // Retire it before close lets another socket reuse this descriptor.
+      backend_.CancelUnsubmittedForFd(fd);
+    }
     connection->file_.fd_ = -1;
     connection->closed_ = true;
     detail::CloseSocket(fd);
@@ -1059,12 +1065,16 @@ void Worker::Flush() {
   FlushWakes();
   const auto status = backend_.Submit();
   if (!status.ok()) [[unlikely]] {
+    // CQ backpressure and interrupted enters are retried by the next round.
+    // A permanent error cannot make progress by waiting for queue capacity.
+    if (absl::IsUnavailable(status)) return;
     spdlog::error("worker submit failed: {}", status.message());
+    submit_failed_ = true;
   }
 }
 
 bool Worker::RunOnce(bool wait_for_completion) {
-  if (!initialized_) [[unlikely]] {
+  if (!initialized_ || submit_failed_) [[unlikely]] {
     return false;
   }
 
@@ -1133,6 +1143,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
     // maintenance slice. Peers can then make progress while this worker runs
     // background CPU work, instead of waiting an extra slice for every reply.
     Flush();
+    if (submit_failed_) return false;
     const std::int64_t background_start = CycleNow();
     const std::size_t background_resumes =
         DrainBackgroundUntil(background_start + static_cast<std::int64_t>(
@@ -1156,6 +1167,10 @@ bool Worker::RunOnce(bool wait_for_completion) {
   //    parked are resumed by the next iteration, which always reaches here
   //    before it can block.
   Flush();
+  if (submit_failed_) return false;
+  // Submission can free SQ slots without producing a completion. Keep both
+  // normal rounds and shutdown drains running until deferred work advances.
+  did_work |= backend_.HasPending();
   ReclaimConnections();
   MaybeResetRuntimeWindow();
   RecordRound(round_start);
@@ -1168,7 +1183,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
   }
 
   if (BusyPoll()) {
-    return true;
+    return !submit_failed_;
   }
 
 #if BYCORF_KERNEL_BYPASS

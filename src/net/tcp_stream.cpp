@@ -433,18 +433,17 @@ void ConnectOperation::CancelLoser(Worker& worker, IoCompletion* loser) {
     return;
   }
   loser_cancel_submitted_ = true;
-  // Best effort: if the cancel cannot be submitted (ring tearing down), the
-  // loser's own CQE still arrives — a timeout always fires — so awaiting both
-  // completions never deadlocks; the resume is merely late.
+  // Queued and issued targets both retire through a deferred completion. If
+  // teardown rejects cancellation, the worker quiesces I/O before abandoning
+  // this frame and its completion tags.
   (void)worker.SubmitCancel(loser);
 }
 
 void ConnectOperation::MaybeResume(Worker& worker) {
-  // Resuming requires both CQEs: the loser is cancelled asynchronously, and an
-  // early resume would let this frame be destroyed while the kernel still
-  // holds an SQE referencing it. AcquireSqe dispatches nested completions on
-  // its SQ-full retry, so a nested loser CQE can beat the outer winner handler
-  // here — resumed_ guards against the resulting double-enqueue.
+  // Both accepted operations must retire before this frame can be reclaimed,
+  // including a loser cancelled while still in the backend queue. Their
+  // completion paths converge here; resumed_ keeps parent notification
+  // one-shot.
   if (connect_done_ && timeout_done_ && !resumed_) {
     resumed_ = true;
     worker.Enqueue(awaiting_);
@@ -718,10 +717,9 @@ void TcpConnectCancellation::Cancel() noexcept {
   if (operation_ != nullptr) (void)worker_->SubmitCancel(operation_);
 }
 
-// Register cancellation only after the existing awaitable has submitted its
-// connect and timer. Submission may dispatch nested completions while making
-// SQ space: an earlier Cancel records intent and is replayed after binding.
-// The existing awaitable still owns retirement of both completion tags.
+// Bind cancellation only after the awaitable accepts its connect and optional
+// timer. Cancellation recorded before binding is replayed against the accepted
+// connect; the awaitable retains both completion tags until they retire.
 class CancellableConnectAwaitable {
  public:
   CancellableConnectAwaitable(Worker& worker, int fd, const sockaddr* address,

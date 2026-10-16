@@ -18,10 +18,12 @@
 //   - bycorf::ConnectTcp        (IORING_OP_CONNECT + deadline + loser cancel)
 //   - bycorf::CancellableSleepFor (one-shot timer with a thread-safe cancel)
 //   - bycorf::Runtime           (stop requests racing worker startup)
+//   - bycorf::TcpService        (foreign stop before/after listener startup)
 // Runs every check on one bycorf worker and exits non-zero on any failure.
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <array>
 #include <atomic>
@@ -37,6 +39,7 @@
 #include "bycorf/io/storage.h"
 #include "bycorf/net/tcp_connect.h"
 #include "bycorf/net/tcp_listener.h"
+#include "bycorf/net/tcp_service.h"
 #include "bycorf/net/tcp_stream.h"
 #include "bycorf/runtime/runtime.h"
 #include "bycorf/runtime/worker.h"
@@ -93,6 +96,109 @@ void CheckStopDuringStartup(bool before_init) {
   Check(initialized.ok() && runtime.exit_code() == 0,
         before_init ? "startup stop: before Worker::Init"
                     : "startup stop: after Init, before Run");
+}
+
+class StopCheckService final : public bycorf::TcpService {
+ public:
+  explicit StopCheckService(std::uint16_t port) : TcpService(port) {}
+
+ private:
+  bycorf::Task<absl::Status> Serve(bycorf::TcpStream) override {
+    co_return absl::OkStatus();
+  }
+};
+
+bycorf::Task<absl::Status> RunServiceAndNotify(
+    StopCheckService& service, bycorf::Worker& worker,
+    bycorf::ServiceContext ctx, std::promise<absl::Status>& finished) {
+  auto status = co_await service.Run(worker, ctx);
+  finished.set_value(status);
+  co_return status;
+}
+
+bycorf::Task<absl::Status> NotifyServiceStarted(
+    std::promise<absl::Status>& started) {
+  started.set_value(absl::OkStatus());
+  co_return absl::OkStatus();
+}
+
+void CheckTcpServiceStop(bool before_run) {
+  const int reservation = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  socklen_t length = sizeof(address);
+  const bool reserved =
+      reservation >= 0 &&
+      bind(reservation, reinterpret_cast<sockaddr*>(&address), length) == 0 &&
+      getsockname(reservation, reinterpret_cast<sockaddr*>(&address),
+                  &length) == 0;
+  if (reservation >= 0) close(reservation);
+  Check(reserved, "TCP service stop: reserve loopback port");
+  if (!reserved) return;
+
+  StopCheckService service(ntohs(address.sin_port));
+  service.Prepare(1);
+  bycorf::Runtime runtime;
+  std::promise<absl::Status> started, finished;
+  auto ready = started.get_future();
+  auto stopped = finished.get_future();
+  std::promise<void> release;
+  auto resume = release.get_future();
+  runtime.Start(
+      1,
+      [&](unsigned id, bycorf::Worker& worker) {
+        const auto status =
+            worker.Init({.ring_entries_ = 2, .recv_buffer_count_ = 0});
+        if (!status.ok()) {
+          started.set_value(status);
+          return 1;
+        }
+        if (before_run) {
+          started.set_value(absl::OkStatus());
+          resume.wait();
+        }
+        const std::array<std::string, 1> hosts{"127.0.0.1"};
+        bycorf::ServiceContext ctx{
+            .bind_addresses_ = hosts,
+            .control_executor_ = runtime.GetForeignExecutor(id),
+        };
+        worker.SpawnRoot(RunServiceAndNotify(service, worker, ctx, finished));
+        // Ready-queue ordering announces startup only after Run has entered
+        // its accept wait. Stop then races an actual listener/SQ operation.
+        if (!before_run) worker.Spawn(NotifyServiceStarted(started));
+        worker.Run();
+        worker.Shutdown();
+        worker.DestroyDetachedTasks();
+        return 0;
+      },
+      /*pin_workers=*/false);
+  const bool initialized =
+      ready.wait_for(5s) == std::future_status::ready && ready.get().ok();
+  Check(initialized, "TCP service stop: startup reached gate");
+  service.Stop();
+  service.Stop();
+  if (before_run) release.set_value();
+  std::promise<void> owner_marker;
+  auto owner_reached = owner_marker.get_future();
+  if (before_run) {
+    // Keep the runtime alive until Run observes the earlier Stop. Forced
+    // runtime teardown must not hide a lost stop-before-publication race.
+    const bool completed =
+        stopped.wait_for(5s) == std::future_status::ready && stopped.get().ok();
+    Check(completed, "TCP service stop: before Run publishes owner");
+  } else {
+    // Stop posts listener closure before this marker on the same ingress.
+    // A consumed accept may still retain the socket until ring teardown, so
+    // require owner-side dispatch here rather than completion of that accept.
+    const bool posted = runtime.GetForeignExecutor(0).Notify(
+        [&owner_marker]() noexcept { owner_marker.set_value(); });
+    Check(posted && owner_reached.wait_for(5s) == std::future_status::ready,
+          "TCP service stop: foreign close reaches owning worker");
+  }
+  runtime.RequestStop();
+  runtime.WaitUntilStopped();
+  Check(runtime.exit_code() == 0, "TCP service stop: clean worker teardown");
 }
 
 std::int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
@@ -473,6 +579,8 @@ bycorf::Task<absl::Status> RunAllChecks(bycorf::Worker& worker) {
 int main() {
   CheckStopDuringStartup(/*before_init=*/true);
   CheckStopDuringStartup(/*before_init=*/false);
+  CheckTcpServiceStop(/*before_run=*/true);
+  CheckTcpServiceStop(/*before_run=*/false);
   bycorf::Runtime runtime;
   runtime.Start(
       1,
