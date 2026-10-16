@@ -83,11 +83,22 @@ void CheckSendsAndWake() {
   constexpr std::size_t kCount = 64;
   std::array<Completion, kCount> tags;
   std::array<std::byte, kCount> payload;
+  std::array<iovec, kCount> vectors;
+  std::array<msghdr, kCount> messages{};
+  // Submit the initial wake poll so both SQ slots are available to the burst.
+  CHECK(source.backend.Submit().ok());
   for (std::size_t i = 0; i < kCount; ++i) {
     payload[i] = std::byte(i);
-    CHECK(source.backend
-              .SubmitSend({.fd_ = sockets[0]}, std::span(payload).subspan(i, 1),
-                          &tags[i])
+    vectors[i] = {.iov_base = &payload[i], .iov_len = 1};
+    messages[i].msg_iov = &vectors[i];
+    messages[i].msg_iovlen = 1;
+    // Exercise both preparation callbacks in the real SQ and the pending FIFO.
+    // Indirect sendmsg arguments remain caller-owned through completion.
+    CHECK((i % 2 == 0 ? source.backend.SubmitSend(
+                            {.fd_ = sockets[0]},
+                            std::span(payload).subspan(i, 1), &tags[i])
+                      : source.backend.SubmitSendMsg({.fd_ = sockets[0]},
+                                                     &messages[i], &tags[i]))
               .ok());
   }
   source.backend.WakeRemote(peer.backend.WakeHandle());

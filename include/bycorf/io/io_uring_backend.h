@@ -176,8 +176,10 @@ class IoUringBackend {
   };
 
   io_uring_sqe* AcquireSqe();
-  absl::Status SubmitOrQueue(const io_uring_sqe& prepared);
-  absl::Status QueuePrepared(const io_uring_sqe& prepared);
+  template <typename Prepare>
+  absl::Status SubmitOrQueue(Prepare prepare);
+  template <typename Prepare>
+  void QueuePrepared(Prepare prepare, absl::Status* status);
   absl::Status SubmitSlow();
   bool PollDeferred();
   bool DrainPending();

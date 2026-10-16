@@ -245,6 +245,40 @@ void IoUringBackend::UnregisterStorageResources() {
   }
 }
 
+template <typename Prepare>
+absl::Status IoUringBackend::SubmitOrQueue(Prepare prepare) {
+  // Share one return object with the slow path. Returning its Status by value
+  // would otherwise introduce a protected stack temporary in the common path
+  // with GCC, even though the SQE itself is no longer stack-allocated here.
+  absl::Status status;
+  // Older accepted work retains priority. Preparation runs synchronously and
+  // is never retained; only the prepared descriptor can enter the queue.
+  // Never submit/reap here: callers install their continuation afterwards.
+  if (initialized_ && pending_io_.empty()) [[likely]] {
+    if (auto* sqe = AcquireSqe()) [[likely]] {
+      prepare(sqe);
+      return status;
+    }
+  }
+  QueuePrepared(prepare, &status);
+  return status;
+}
+
+// Keep the temporary SQE and queue allocation in a separate frame, so ordinary
+// submissions do not construct or copy a temporary SQE. Backlogs can be
+// sustained, so this helper is not cold.
+template <typename Prepare>
+ABSL_ATTRIBUTE_NOINLINE void IoUringBackend::QueuePrepared(
+    Prepare prepare, absl::Status* status) {
+  if (!initialized_) {
+    *status = absl::FailedPreconditionError("backend is not initialized");
+    return;
+  }
+  io_uring_sqe prepared{};
+  prepare(&prepared);
+  pending_io_.push_back(PendingIo{prepared});
+}
+
 absl::Status IoUringBackend::SubmitOpenDirect(std::string_view path, int flags,
                                               mode_t mode, FixedFile file,
                                               IoCompletion* tag) {
@@ -252,94 +286,89 @@ absl::Status IoUringBackend::SubmitOpenDirect(std::string_view path, int flags,
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "fixed-file table is not registered");
   }
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_openat_direct(sqe, AT_FDCWD, path.data(), flags, mode,
-                              file.index_);
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_openat_direct(sqe, AT_FDCWD, path.data(), flags, mode,
+                                file.index_);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitCloseDirect(FixedFile file,
                                                IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_close_direct(sqe, file.index_);
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_close_direct(sqe, file.index_);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                                              std::uint64_t offset,
                                              IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_read_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
-                           static_cast<unsigned>(buffer.size_), offset,
-                           buffer.index_);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_read_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
+                             static_cast<unsigned>(buffer.size_), offset,
+                             buffer.index_);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitRead(FixedFile file,
                                         std::span<std::byte> buffer,
                                         std::uint64_t offset,
                                         IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_read(sqe, static_cast<int>(file.index_), buffer.data(),
-                     static_cast<unsigned>(buffer.size()), offset);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_read(sqe, static_cast<int>(file.index_), buffer.data(),
+                       static_cast<unsigned>(buffer.size()), offset);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitWrite(FixedFile file,
                                          std::span<const std::byte> buffer,
                                          std::uint64_t offset,
                                          IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_write(sqe, static_cast<int>(file.index_), buffer.data(),
-                      static_cast<unsigned>(buffer.size()), offset);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_write(sqe, static_cast<int>(file.index_), buffer.data(),
+                        static_cast<unsigned>(buffer.size()), offset);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitWriteFixed(FixedFile file,
                                               FixedBuffer buffer,
                                               std::uint64_t offset,
                                               IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_write_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
-                            static_cast<unsigned>(buffer.size_), offset,
-                            buffer.index_);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_write_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
+                              static_cast<unsigned>(buffer.size_), offset,
+                              buffer.index_);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitFdatasync(FixedFile file,
                                              IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_fsync(sqe, static_cast<int>(file.index_),
-                      IORING_FSYNC_DATASYNC);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_fsync(sqe, static_cast<int>(file.index_),
+                        IORING_FSYNC_DATASYNC);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitTimeout(const __kernel_timespec& timeout,
                                            IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_timeout(sqe, const_cast<__kernel_timespec*>(&timeout), 0, 0);
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  // The SQE retains the caller's timespec, never a copy in the short-lived
+  // preparation callback.
+  auto* timeout_ptr = const_cast<__kernel_timespec*>(&timeout);
+  return SubmitOrQueue([timeout_ptr, tag](io_uring_sqe* sqe) {
+    io_uring_prep_timeout(sqe, timeout_ptr, 0, 0);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 io_uring_sqe* IoUringBackend::AcquireSqe() {
@@ -354,35 +383,6 @@ IoUringBackend::PendingIo::PendingIo(const io_uring_sqe& sqe) noexcept
 
 io_uring_sqe IoUringBackend::PendingIo::descriptor() const noexcept {
   return std::bit_cast<io_uring_sqe>(descriptor_);
-}
-
-absl::Status IoUringBackend::SubmitOrQueue(const io_uring_sqe& prepared) {
-  // Older accepted work retains priority. Never submit/reap here: callers
-  // install their continuation and connection accounting after we return.
-  if (initialized_ && pending_io_.empty()) [[likely]] {
-    if (auto* sqe = AcquireSqe()) [[likely]] {
-      *sqe = prepared;
-      if (prepared.opcode == IORING_OP_ASYNC_CANCEL) [[unlikely]] {
-        may_have_unsubmitted_cancels_ = true;
-      }
-      return absl::OkStatus();
-    }
-  }
-  return QueuePrepared(prepared);
-}
-
-// Deque growth and rejection diagnostics must not expand the ordinary SQE
-// preparation path. Backlogs can be sustained, so this helper is not cold.
-ABSL_ATTRIBUTE_NOINLINE absl::Status IoUringBackend::QueuePrepared(
-    const io_uring_sqe& prepared) {
-  if (!initialized_) {
-    return absl::FailedPreconditionError("backend is not initialized");
-  }
-  if (prepared.opcode == IORING_OP_ASYNC_CANCEL) {
-    may_have_unsubmitted_cancels_ = true;
-  }
-  pending_io_.push_back(PendingIo{prepared});
-  return absl::OkStatus();
 }
 
 bool IoUringBackend::DrainPending() {
@@ -471,10 +471,14 @@ absl::Status IoUringBackend::CancelByData(void* target, void* completion) {
         {reinterpret_cast<std::uintptr_t>(completion), 0});
     return absl::OkStatus();
   }
-  io_uring_sqe prepared{};
-  io_uring_prep_cancel(&prepared, target, 0);
-  io_uring_sqe_set_data(&prepared, completion);
-  return SubmitOrQueue(prepared);
+  auto status = SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_cancel(sqe, target, 0);
+    io_uring_sqe_set_data(sqe, completion);
+  });
+  // Submission cannot dispatch completions inline. Mark the accepted cancel
+  // here so ordinary operations never need to inspect their opcode.
+  if (status.ok()) may_have_unsubmitted_cancels_ = true;
+  return status;
 }
 
 void IoUringBackend::CancelUnsubmittedForFd(int fd) noexcept {
@@ -569,10 +573,11 @@ bool IoUringBackend::ArmWakePoll() {
   if (wake_event_fd_ < 0 || wake_poll_armed_) {
     return wake_event_fd_ >= 0;
   }
-  io_uring_sqe prepared{};
-  io_uring_prep_poll_add(&prepared, wake_event_fd_, POLLIN);
-  io_uring_sqe_set_data(&prepared, &kWakePollTag);
-  if (!SubmitOrQueue(prepared).ok()) return false;
+  auto status = SubmitOrQueue([this](io_uring_sqe* sqe) {
+    io_uring_prep_poll_add(sqe, wake_event_fd_, POLLIN);
+    io_uring_sqe_set_data(sqe, &kWakePollTag);
+  });
+  if (!status.ok()) return false;
   wake_poll_armed_ = true;
   return true;
 }
@@ -596,41 +601,38 @@ void IoUringBackend::HandleWakePoll() {
 absl::Status IoUringBackend::SubmitSend(const RegisteredFile& file,
                                         std::span<const std::byte> buffer,
                                         IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_send(
-      sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
-      buffer.data(), static_cast<unsigned>(buffer.size()), 0);
-  if (file.is_fixed_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_send(
+        sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
+        buffer.data(), static_cast<unsigned>(buffer.size()), 0);
+    if (file.is_fixed_) {
+      sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitSendMsg(const RegisteredFile& file,
                                            const msghdr* message,
                                            IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_sendmsg(
-      sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
-      message, 0);
-  if (file.is_fixed_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_sendmsg(
+        sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
+        message, 0);
+    if (file.is_fixed_) {
+      sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitAcceptMultishot(int listen_fd,
                                                    IoCompletion* tag) {
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_multishot_accept(sqe, listen_fd, nullptr, nullptr,
-                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
-  io_uring_sqe_set_data(sqe, tag);  // plain IoCompletion* — same path as send
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_multishot_accept(sqe, listen_fd, nullptr, nullptr,
+                                   SOCK_NONBLOCK | SOCK_CLOEXEC);
+    io_uring_sqe_set_data(sqe, tag);  // plain IoCompletion* — same path as send
+  });
 }
 
 absl::Status IoUringBackend::SubmitConnect(int fd, const sockaddr* address,
@@ -640,11 +642,10 @@ absl::Status IoUringBackend::SubmitConnect(int fd, const sockaddr* address,
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid connect request");
   }
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_connect(sqe, fd, address, address_length);
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_connect(sqe, fd, address, address_length);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitCancel(IoCompletion* target) {
@@ -669,30 +670,30 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
   if (!use_multishot && !connection->received_buffers_.empty()) {
     return absl::OkStatus();
   }
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  const int fd = connection->file_.is_fixed_
-                     ? static_cast<int>(connection->file_.fixed_index_)
-                     : connection->file_.fd_;
-  if (use_multishot) {
-    io_uring_prep_recv_multishot(sqe, fd, nullptr, 0, 0);
-    sqe->flags |= IOSQE_BUFFER_SELECT;
-    sqe->buf_group = MultishotBufferRing::kGroupId;
-  } else {
-    if (connection->read_buffer_.empty()) {
-      connection->read_buffer_.resize(options_.recv_buffer_size_);
+  // Allocate before acquiring an SQE: preparation must not throw after the
+  // ring's local tail advances and expose a partially prepared operation.
+  if (!use_multishot && connection->read_buffer_.empty()) {
+    connection->read_buffer_.resize(options_.recv_buffer_size_);
+  }
+  auto status = SubmitOrQueue([connection, use_multishot](io_uring_sqe* sqe) {
+    const int fd = connection->file_.is_fixed_
+                       ? static_cast<int>(connection->file_.fixed_index_)
+                       : connection->file_.fd_;
+    if (use_multishot) {
+      io_uring_prep_recv_multishot(sqe, fd, nullptr, 0, 0);
+      sqe->flags |= IOSQE_BUFFER_SELECT;
+      sqe->buf_group = MultishotBufferRing::kGroupId;
+    } else {
+      io_uring_prep_recv(sqe, fd, connection->read_buffer_.data(),
+                         static_cast<unsigned>(connection->read_buffer_.size()),
+                         0);
     }
-    io_uring_prep_recv(sqe, fd, connection->read_buffer_.data(),
-                       static_cast<unsigned>(connection->read_buffer_.size()),
-                       0);
-  }
-  sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
-  if (connection->file_.is_fixed_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  io_uring_sqe_set_data(sqe, EncodeMultishotData(connection));
-
-  auto status = SubmitOrQueue(prepared);
+    sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
+    if (connection->file_.is_fixed_) {
+      sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_sqe_set_data(sqe, EncodeMultishotData(connection));
+  });
   if (!status.ok()) return status;
   connection->recv_armed_ = true;
   connection->inflight_ops_ += 1;
@@ -720,16 +721,15 @@ absl::Status IoUringBackend::StartPeerDisconnectPoll(Connection* connection) {
       connection->closing_) {
     return absl::OkStatus();
   }
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  const int fd = connection->file_.is_fixed_
-                     ? static_cast<int>(connection->file_.fixed_index_)
-                     : connection->file_.fd_;
-  io_uring_prep_poll_add(sqe, fd,
-                         static_cast<unsigned>(POLLERR | POLLHUP | POLLRDHUP));
-  if (connection->file_.is_fixed_) sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, EncodePeerDisconnectData(connection));
-  auto status = SubmitOrQueue(prepared);
+  auto status = SubmitOrQueue([connection](io_uring_sqe* sqe) {
+    const int fd = connection->file_.is_fixed_
+                       ? static_cast<int>(connection->file_.fixed_index_)
+                       : connection->file_.fd_;
+    io_uring_prep_poll_add(
+        sqe, fd, static_cast<unsigned>(POLLERR | POLLHUP | POLLRDHUP));
+    if (connection->file_.is_fixed_) sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, EncodePeerDisconnectData(connection));
+  });
   if (!status.ok()) return status;
   connection->peer_disconnect_poll_armed_ = true;
   connection->peer_disconnect_poll_cancel_requested_ = false;
@@ -982,11 +982,10 @@ absl::Status IoUringBackend::SubmitPoll(int fd, unsigned events,
                                         IoCompletion* tag) {
   if (fd < 0 || tag == nullptr)
     return absl::InvalidArgumentError("invalid poll request");
-  io_uring_sqe prepared{};
-  auto* sqe = &prepared;
-  io_uring_prep_poll_add(sqe, fd, events);
-  io_uring_sqe_set_data(sqe, tag);
-  return SubmitOrQueue(prepared);
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_poll_add(sqe, fd, events);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 bool IoUringBackend::Wait(int timeout_ms) {
@@ -1025,12 +1024,12 @@ bool IoUringBackend::Wait(int timeout_ms) {
 }
 
 void IoUringBackend::WakeRemote(int peer_ring_fd) noexcept {
-  io_uring_sqe prepared{};
-  io_uring_prep_msg_ring(&prepared, peer_ring_fd, 0,
-                         reinterpret_cast<std::uintptr_t>(&kCrossCoreWakeTag),
-                         0);
-  io_uring_sqe_set_data(&prepared, &kCrossCoreWakeTag);
-  (void)SubmitOrQueue(prepared);
+  (void)SubmitOrQueue([peer_ring_fd](io_uring_sqe* sqe) {
+    io_uring_prep_msg_ring(sqe, peer_ring_fd, 0,
+                           reinterpret_cast<std::uintptr_t>(&kCrossCoreWakeTag),
+                           0);
+    io_uring_sqe_set_data(sqe, &kCrossCoreWakeTag);
+  });
 }
 
 void IoUringBackend::WakeSelf() noexcept {
