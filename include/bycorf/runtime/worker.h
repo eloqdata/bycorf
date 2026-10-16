@@ -296,6 +296,9 @@ class Worker {
 #endif
     return backend_.RegisterBuffers(buffers);
   }
+  // Storage submissions retain the tag and referenced caller-owned buffers
+  // until completion, including while queued. Each tag may have only one
+  // unfinished storage operation; its completion may submit the next one.
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                                 FixedFile file, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS

@@ -58,13 +58,17 @@ quiesces kernel access before the worker destroys suspended coroutine frames.
 
 SPDK storage uses DMA buffers, NVMe namespaces and worker-owned queue pairs.
 Accepted commands that encounter temporary SPDK request-descriptor exhaustion
-remain in a bounded worker-local pool and wait on their queue pair's FIFO.
-Completion polling retries them; their buffers remain owned by the awaiting
-caller until completion. Polling and shutdown drains retain the owning
-worker's thread-local context for completion dispatch. Deferred commands
-participate in outstanding-I/O accounting, preventing premature sleep, close
-or shutdown. Submission errors that cannot make progress through a completion
-are reported to the caller.
+wait on their queue pair's FIFO, whose storage grows independently of other
+queue pairs' capacity. Completion polling retries them; the backend releases
+its saved submission parameters once SPDK accepts the command. SPDK returns
+the caller's completion tag directly through its callback context. Each
+unfinished storage operation has a distinct tag, which retains its expected
+successful result; the caller keeps the tag and buffers alive until completion.
+The completion callback may reuse or destroy the tag. Polling and shutdown
+drains retain the owning worker's thread-local context for completion dispatch.
+Deferred commands participate in outstanding-I/O accounting, preventing
+premature sleep, close or shutdown. Submission errors that cannot make progress
+through a completion are reported to the caller.
 The io_uring selection uses ordinary aligned buffers and kernel file/block I/O.
 SPDK completion polling is inactive when storage uses io_uring; in-flight SPDK
 storage prevents sleeping before its completions can be polled. As with the

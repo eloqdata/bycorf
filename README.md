@@ -114,9 +114,9 @@ With `BYCORF_KERNEL_BYPASS=ON`, CTest also runs the FreeBSD local-connect
 regression and `bycorf_spdk_backpressure_stub_check`. The SPDK check uses the
 real backend and Worker with link-time stubs for EAL initialization and NVMe
 device calls. It covers queue exhaustion, FIFO retries, independent qpairs,
-submission/completion errors, request-pool reuse, and shutdown draining without
-NVMe hardware, hugepages, or device binding. It still requires working io_uring
-and the normal runtime memlock allowance. Run it alone with:
+large backlogs, submission/completion errors, completion-tag reuse, and shutdown
+draining without NVMe hardware, hugepages, or device binding. It still requires
+working io_uring and the normal runtime memlock allowance. Run it alone with:
 
 ```bash
 ctest --test-dir build -R '^bycorf_spdk_backpressure_stub_check$' --output-on-failure
