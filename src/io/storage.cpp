@@ -127,9 +127,9 @@ SizeIoAwaitable::SizeIoAwaitable(Worker& worker, FixedFile file,
                                  Operation operation) noexcept
     : worker_(&worker),
       file_(file),
+      operation_(operation),
       buffer_(buffer),
-      offset_(offset),
-      operation_(operation) {}
+      offset_(offset) {}
 
 bool SizeIoAwaitable::await_suspend(std::coroutine_handle<> awaiting) {
   absl::Status status;
@@ -191,9 +191,9 @@ absl::StatusOr<std::size_t> SizeIoAwaitable::await_resume() {
 OpenFixedFileAwaitable::OpenFixedFileAwaitable(Worker& worker, std::string path,
                                                int flags, mode_t mode,
                                                FixedFile file)
-    : worker_(&worker),
+    : flags_(flags),
+      worker_(&worker),
       path_(std::move(path)),
-      flags_(flags),
       mode_(mode),
       file_(file) {}
 
