@@ -55,10 +55,8 @@ void TcpService::Prepare(unsigned thread_count) {
   next_connection_worker_.store(0, std::memory_order_relaxed);
   listeners_.clear();
   listeners_.resize(thread_count);
-#if BYCORF_KERNEL_BYPASS
-  stopping_ = false;
-  control_executors_.resize(thread_count);
-#endif
+  stopping_.store(false, std::memory_order_relaxed);
+  controls_ = std::make_unique<WorkerControl[]>(thread_count);
 }
 
 absl::Status TcpService::StartSession(Worker& worker, Connection connection,
@@ -86,43 +84,42 @@ absl::Status TcpService::StartSession(Worker& worker, Connection connection,
   return absl::OkStatus();
 }
 
-void TcpService::Stop() noexcept {
-#if BYCORF_KERNEL_BYPASS
-  if (DpdkNetworkEnabled()) {
-    std::lock_guard lock(stop_mutex_);
-    stopping_ = true;
-    // Native BSD socket operations must execute in their owner's VNET. The
-    // existing foreign ingress handles both idle-ring wakeup and publication.
-    for (unsigned i = 0; i < control_executors_.size(); ++i) {
-      if (control_executors_[i].valid()) {
-        (void)control_executors_[i].Notify([this, i]() noexcept {
-          for (auto& bound : listeners_[i].values_)
-            if (bound.listener_) bound.listener_->Close().IgnoreError();
-        });
-      }
-    }
-    return;
+void TcpService::CloseListeners(unsigned worker_id) noexcept {
+  for (auto& bound : listeners_[worker_id].values_) {
+    if (bound.listener_) bound.listener_->Close().IgnoreError();
   }
-#endif
-  // Called from the Server's thread at shutdown; closing the listeners unblocks
-  // the accept loops (their multishot accept completes with -ECANCELED).
-  for (auto& worker : listeners_) {
-    for (auto& bound : worker.values_) {
-      if (bound.listener_) {
-        bound.listener_->Close().IgnoreError();
+}
+
+void TcpService::Stop() noexcept {
+  if (stopping_.exchange(true, std::memory_order_seq_cst)) return;
+  // Closing a kernel listener can cancel unsubmitted SQEs; BSD listeners need
+  // their owner's VNET. Both therefore use the owning worker's control ingress.
+  // Sequential consistency pairs with Run's publication/check: either Run sees
+  // stopping before binding, or this pass sees its published executor.
+  for (unsigned i = 0; i < thread_count_; ++i) {
+    if (controls_[i].ready_.load(std::memory_order_seq_cst)) {
+      if (!controls_[i].executor_.Notify(
+              [this, i]() noexcept { CloseListeners(i); })) {
+        // A live runtime can also reject the allocating notification on OOM.
+        // The allocation-free stop wake ensures this worker cannot continue
+        // serving indefinitely; Run's owner-side cleanup releases listeners.
+        controls_[i].worker_->RequestStop();
       }
     }
   }
 }
 
 Task<absl::Status> TcpService::Run(Worker& worker, ServiceContext ctx) {
-#if BYCORF_KERNEL_BYPASS
-  {
-    std::lock_guard lock(stop_mutex_);
-    if (stopping_) co_return absl::OkStatus();
-    control_executors_[worker.id()] = ctx.control_executor_;
-  }
-#endif
+  WorkerControl& control = controls_[worker.id()];
+  control.executor_ = ctx.control_executor_;
+  control.worker_ = &worker;
+  control.ready_.store(true, std::memory_order_seq_cst);
+  if (stopping_.load(std::memory_order_seq_cst)) co_return absl::OkStatus();
+  // A stopping runtime can reject the close notification or leave its worker
+  // loop before delivering it. The frame is destroyed on its owning thread
+  // after I/O quiesces, so listener cleanup still has the required affinity.
+  auto close_listeners = absl::MakeCleanup(
+      [this, id = worker.id()]() noexcept { CloseListeners(id); });
   WorkerListeners& owned = listeners_[worker.id()];
   std::unordered_set<std::string> seen;
   for (const Endpoint& endpoint : endpoints_) {

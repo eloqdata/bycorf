@@ -20,7 +20,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -80,7 +79,15 @@ class TcpService : public Service {
   struct WorkerListeners {
     std::vector<BoundListener> values_;
   };
+  struct WorkerControl {
+    ForeignExecutor executor_;
+    Worker* worker_ = nullptr;
+    // Both handles are written once before publication and stay immutable
+    // for the runtime lifetime. Stop never reads worker-owned listeners.
+    std::atomic<bool> ready_{false};
+  };
 
+  void CloseListeners(unsigned worker_id) noexcept;
   absl::Status StartSession(Worker& worker, Connection connection,
                             std::shared_ptr<TlsContext> tls);
   Task<absl::Status> RunSession(Worker& worker, Connection* connection,
@@ -95,11 +102,8 @@ class TcpService : public Service {
   unsigned thread_count_ = 0;
   std::vector<unsigned> session_workers_;
   std::atomic<std::uint64_t> next_connection_worker_{0};
-#if BYCORF_KERNEL_BYPASS
-  std::mutex stop_mutex_;
-  bool stopping_ = false;
-  std::vector<ForeignExecutor> control_executors_;
-#endif
+  std::atomic<bool> stopping_{false};
+  std::unique_ptr<WorkerControl[]> controls_;
 
   // TODO: If long-lived connections develop uneven workloads after this
   // accept-time placement, add request-boundary live migration. It must first

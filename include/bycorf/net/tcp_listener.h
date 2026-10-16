@@ -116,6 +116,7 @@ class TcpListener {
   // recv operation is armed.
   AcceptUnregisteredAwaitable AcceptUnregistered() noexcept;
   Task<absl::StatusOr<Connection*>> Accept();
+  // Runs on the owning worker: closing also retires its unsubmitted accepts.
   absl::Status Close() noexcept;
 
  private:

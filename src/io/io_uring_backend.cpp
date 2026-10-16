@@ -22,11 +22,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 
+#include "absl/base/attributes.h"
 #include "bycorf/runtime/worker.h"
 #include "spdlog/spdlog.h"
 
@@ -79,6 +81,16 @@ bool IsPeerDisconnectData(void* data) {
 Connection* DecodePeerDisconnectConnection(void* data) {
   return reinterpret_cast<Connection*>(reinterpret_cast<std::uintptr_t>(data) &
                                        ~kConnectionTagMask);
+}
+
+// Keep error classification and message allocation out of Submit's common
+// success path, including when link-time optimization is enabled.
+ABSL_ATTRIBUTE_COLD ABSL_ATTRIBUTE_NOINLINE absl::Status SubmitError(int rc) {
+  if (rc == -EBUSY || rc == -EINTR || rc == -EAGAIN) {
+    return absl::UnavailableError("io_uring submission temporarily blocked");
+  }
+  return absl::InternalError("io_uring_submit_and_get_events failed: " +
+                             std::string(std::strerror(-rc)));
 }
 
 }  // namespace
@@ -166,6 +178,14 @@ void IoUringBackend::Shutdown() {
   if (!initialized_) {
     return;
   }
+  // Teardown abandons suspended callers only after the ring is quiesced. Stop
+  // accepting work and drop software references before their frames can die;
+  // do not issue queued socket operations during shutdown.
+  initialized_ = false;
+  pending_io_.clear();
+  pending_completions_.clear();
+  may_have_unsubmitted_cancels_ = false;
+  recv_rearm_queue_.clear();
   if (multishot_ring_.ring_ != nullptr) {
     io_uring_free_buf_ring(&ring_, multishot_ring_.ring_,
                            multishot_ring_.entries_,
@@ -225,6 +245,40 @@ void IoUringBackend::UnregisterStorageResources() {
   }
 }
 
+template <typename Prepare>
+absl::Status IoUringBackend::SubmitOrQueue(Prepare prepare) {
+  // Share one return object with the slow path. Returning its Status by value
+  // would otherwise introduce a protected stack temporary in the common path
+  // with GCC, even though the SQE itself is no longer stack-allocated here.
+  absl::Status status;
+  // Older accepted work retains priority. Preparation runs synchronously and
+  // is never retained; only the prepared descriptor can enter the queue.
+  // Never submit/reap here: callers install their continuation afterwards.
+  if (initialized_ && pending_io_.empty()) [[likely]] {
+    if (auto* sqe = AcquireSqe()) [[likely]] {
+      prepare(sqe);
+      return status;
+    }
+  }
+  QueuePrepared(prepare, &status);
+  return status;
+}
+
+// Keep the temporary SQE and queue allocation in a separate frame, so ordinary
+// submissions do not construct or copy a temporary SQE. Backlogs can be
+// sustained, so this helper is not cold.
+template <typename Prepare>
+ABSL_ATTRIBUTE_NOINLINE void IoUringBackend::QueuePrepared(
+    Prepare prepare, absl::Status* status) {
+  if (!initialized_) {
+    *status = absl::FailedPreconditionError("backend is not initialized");
+    return;
+  }
+  io_uring_sqe prepared{};
+  prepare(&prepared);
+  pending_io_.push_back(PendingIo{prepared});
+}
+
 absl::Status IoUringBackend::SubmitOpenDirect(std::string_view path, int flags,
                                               mode_t mode, FixedFile file,
                                               IoCompletion* tag) {
@@ -232,157 +286,244 @@ absl::Status IoUringBackend::SubmitOpenDirect(std::string_view path, int flags,
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "fixed-file table is not registered");
   }
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire open sqe");
-  }
-  io_uring_prep_openat_direct(sqe, AT_FDCWD, path.data(), flags, mode,
-                              file.index_);
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_openat_direct(sqe, AT_FDCWD, path.data(), flags, mode,
+                                file.index_);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitCloseDirect(FixedFile file,
                                                IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire close sqe");
-  }
-  io_uring_prep_close_direct(sqe, file.index_);
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_close_direct(sqe, file.index_);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                                              std::uint64_t offset,
                                              IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire read sqe");
-  }
-  io_uring_prep_read_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
-                           static_cast<unsigned>(buffer.size_), offset,
-                           buffer.index_);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_read_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
+                             static_cast<unsigned>(buffer.size_), offset,
+                             buffer.index_);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitRead(FixedFile file,
                                         std::span<std::byte> buffer,
                                         std::uint64_t offset,
                                         IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire read sqe");
-  }
-  io_uring_prep_read(sqe, static_cast<int>(file.index_), buffer.data(),
-                     static_cast<unsigned>(buffer.size()), offset);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_read(sqe, static_cast<int>(file.index_), buffer.data(),
+                       static_cast<unsigned>(buffer.size()), offset);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitWrite(FixedFile file,
                                          std::span<const std::byte> buffer,
                                          std::uint64_t offset,
                                          IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire write sqe");
-  }
-  io_uring_prep_write(sqe, static_cast<int>(file.index_), buffer.data(),
-                      static_cast<unsigned>(buffer.size()), offset);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_write(sqe, static_cast<int>(file.index_), buffer.data(),
+                        static_cast<unsigned>(buffer.size()), offset);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitWriteFixed(FixedFile file,
                                               FixedBuffer buffer,
                                               std::uint64_t offset,
                                               IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire write sqe");
-  }
-  io_uring_prep_write_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
-                            static_cast<unsigned>(buffer.size_), offset,
-                            buffer.index_);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_write_fixed(sqe, static_cast<int>(file.index_), buffer.data_,
+                              static_cast<unsigned>(buffer.size_), offset,
+                              buffer.index_);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitFdatasync(FixedFile file,
                                              IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire fsync sqe");
-  }
-  io_uring_prep_fsync(sqe, static_cast<int>(file.index_),
-                      IORING_FSYNC_DATASYNC);
-  sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_fsync(sqe, static_cast<int>(file.index_),
+                        IORING_FSYNC_DATASYNC);
+    sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitTimeout(const __kernel_timespec& timeout,
                                            IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire timeout sqe");
-  }
-  io_uring_prep_timeout(sqe, const_cast<__kernel_timespec*>(&timeout), 0, 0);
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  // The SQE retains the caller's timespec, never a copy in the short-lived
+  // preparation callback.
+  auto* timeout_ptr = const_cast<__kernel_timespec*>(&timeout);
+  return SubmitOrQueue([timeout_ptr, tag](io_uring_sqe* sqe) {
+    io_uring_prep_timeout(sqe, timeout_ptr, 0, 0);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 io_uring_sqe* IoUringBackend::AcquireSqe() {
   if (!initialized_) {
     return nullptr;
   }
-  io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-  if (sqe != nullptr) [[likely]] {
-    return sqe;
+  return io_uring_get_sqe(&ring_);
+}
+
+IoUringBackend::PendingIo::PendingIo(const io_uring_sqe& sqe) noexcept
+    : descriptor_(std::bit_cast<decltype(descriptor_)>(sqe)) {}
+
+io_uring_sqe IoUringBackend::PendingIo::descriptor() const noexcept {
+  return std::bit_cast<io_uring_sqe>(descriptor_);
+}
+
+bool IoUringBackend::DrainPending() {
+  if (pending_io_.empty()) [[likely]]
+    return false;
+  bool prepared = false;
+  // At most one SQ's capacity is prepared per pass. Submissions and completion
+  // polling, rather than a producer-side busy loop, provide the next pass.
+  while (!pending_io_.empty()) {
+    auto* sqe = AcquireSqe();
+    if (sqe == nullptr) break;
+    *sqe = pending_io_.front().descriptor();
+    pending_io_.pop_front();
+    prepared = true;
   }
-  // SQ ring full (rare). Loop submit (frees SQ slots) + reap (frees CQ space)
-  // until an SQE is available — never returns null. We reap with
-  // ReapCompletions (NOT Poll): Poll would run DrainRecvRearm, whose
-  // StartRecvMultishot calls back into AcquireSqe and could recurse. Re-arm is
-  // deferred to Poll proper.
-  for (;;) {
-    io_uring_submit_and_get_events(&ring_);
-    sqe = io_uring_get_sqe(&ring_);
-    if (sqe != nullptr) {
-      return sqe;
+  return prepared;
+}
+
+bool IoUringBackend::HasPending() const noexcept {
+  return initialized_ &&
+         (!pending_io_.empty() || !pending_completions_.empty() ||
+          io_uring_sq_ready(&ring_) != 0);
+}
+
+bool IoUringBackend::DrainPendingCompletions() {
+  if (pending_completions_.empty()) return false;
+  // A completion can submit/cancel other operations. Detach this round before
+  // dispatch, so new completions wait for the next event-loop pass.
+  std::vector<PendingCompletion> completions;
+  completions.swap(pending_completions_);
+  for (const auto& completion : completions) {
+    io_uring_cqe cqe{};
+    cqe.user_data = completion.user_data_;
+    cqe.res = completion.result_;
+    DispatchCqe(&cqe);
+  }
+  return true;
+}
+
+template <typename Predicate>
+bool IoUringBackend::CancelUnsubmittedMatching(Predicate matches, int result) {
+  if (!initialized_) return false;
+  bool cancelled = false;
+  auto retire = [&](const io_uring_sqe& sqe) {
+    pending_completions_.push_back({sqe.user_data, result});
+    cancelled = true;
+  };
+  // This ring is SINGLE_ISSUER without SQPOLL: the kernel only consumes SQEs
+  // during this worker's enter calls. Between calls, even a flushed but not
+  // consumed SQE is safe to neutralize. Include real SQEs, otherwise draining
+  // a pending socket request just before close would reintroduce fd reuse.
+  // We use neither SQE128 nor SQ_REWIND; liburing's SQ array is
+  // identity-mapped.
+  auto& sq = ring_.sq;
+  for (unsigned head = io_uring_load_sq_head(&ring_); head != sq.sqe_tail;
+       ++head) {
+    auto& sqe = sq.sqes[head & sq.ring_mask];
+    if (!matches(sqe)) continue;
+    retire(sqe);
+    sqe = {};
+    io_uring_prep_nop(&sqe);
+    io_uring_sqe_set_data(&sqe, &kCancelRequestTag);
+  }
+  for (auto it = pending_io_.begin(); it != pending_io_.end();) {
+    const auto sqe = it->descriptor();
+    if (!matches(sqe)) {
+      ++it;
+      continue;
     }
-    ReapCompletions();
+    retire(sqe);
+    it = pending_io_.erase(it);
   }
+  return cancelled;
+}
+
+absl::Status IoUringBackend::CancelByData(void* target, void* completion) {
+  if (!initialized_) {
+    return absl::FailedPreconditionError("backend is not initialized");
+  }
+  const auto data = reinterpret_cast<std::uintptr_t>(target);
+  if (CancelUnsubmittedMatching(
+          [data](const io_uring_sqe& sqe) { return sqe.user_data == data; })) {
+    // No kernel cancel may outlive the synthetic target completion: its tag
+    // address could be reused by a new operation before that cancel is issued.
+    pending_completions_.push_back(
+        {reinterpret_cast<std::uintptr_t>(completion), 0});
+    return absl::OkStatus();
+  }
+  auto status = SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_cancel(sqe, target, 0);
+    io_uring_sqe_set_data(sqe, completion);
+  });
+  // Submission cannot dispatch completions inline. Mark the accepted cancel
+  // here so ordinary operations never need to inspect their opcode.
+  if (status.ok()) may_have_unsubmitted_cancels_ = true;
+  return status;
+}
+
+void IoUringBackend::CancelUnsubmittedForFd(int fd) noexcept {
+  if (fd < 0) return;
+  CancelUnsubmittedMatching([fd](const io_uring_sqe& sqe) {
+    if ((sqe.flags & IOSQE_FIXED_FILE) != 0 || sqe.fd != fd) return false;
+    switch (sqe.opcode) {
+      case IORING_OP_SEND:
+      case IORING_OP_SENDMSG:
+      case IORING_OP_RECV:
+      case IORING_OP_ACCEPT:
+      case IORING_OP_CONNECT:
+      case IORING_OP_POLL_ADD:
+        return true;
+      default:
+        return false;
+    }
+  });
 }
 
 absl::Status IoUringBackend::Submit() {
+  // Enter does not dispatch application callbacks, so an empty software queue
+  // stays empty through this call and needs no before/after drain checks.
+  if (initialized_ && pending_io_.empty()) [[likely]] {
+    const int rc = io_uring_submit_and_get_events(&ring_);
+    if (rc >= 0) [[likely]]
+      return absl::OkStatus();
+    return SubmitError(rc);
+  }
+  return SubmitSlow();
+}
+
+// Keep deque draining out of the common Submit instruction footprint even
+// under LTO. Do not mark this cold: draining can be frequent under pressure.
+ABSL_ATTRIBUTE_NOINLINE absl::Status IoUringBackend::SubmitSlow() {
   if (!initialized_) {
-    return absl::Status(absl::StatusCode::kFailedPrecondition,
-                        "backend is not initialized");
+    return absl::FailedPreconditionError("backend is not initialized");
   }
+  DrainPending();
   const int rc = io_uring_submit_and_get_events(&ring_);
-  if (rc == -EBUSY) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "io_uring completion ring busy");
-  }
-  if (rc < 0) {
-    return absl::Status(absl::StatusCode::kInternal,
-                        "io_uring_submit_and_get_events failed");
-  }
+  // Consuming SQ entries releases space before any operation completes. Prepare
+  // another bounded wave now; HasPending keeps the worker running to submit it.
+  DrainPending();
+  if (rc < 0) [[unlikely]]
+    return SubmitError(rc);
   return absl::OkStatus();
 }
 
@@ -432,12 +573,11 @@ bool IoUringBackend::ArmWakePoll() {
   if (wake_event_fd_ < 0 || wake_poll_armed_) {
     return wake_event_fd_ >= 0;
   }
-  auto* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return false;
-  }
-  io_uring_prep_poll_add(sqe, wake_event_fd_, POLLIN);
-  io_uring_sqe_set_data(sqe, &kWakePollTag);
+  auto status = SubmitOrQueue([this](io_uring_sqe* sqe) {
+    io_uring_prep_poll_add(sqe, wake_event_fd_, POLLIN);
+    io_uring_sqe_set_data(sqe, &kWakePollTag);
+  });
+  if (!status.ok()) return false;
   wake_poll_armed_ = true;
   return true;
 }
@@ -461,50 +601,38 @@ void IoUringBackend::HandleWakePoll() {
 absl::Status IoUringBackend::SubmitSend(const RegisteredFile& file,
                                         std::span<const std::byte> buffer,
                                         IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire send sqe");
-  }
-  io_uring_prep_send(
-      sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
-      buffer.data(), static_cast<unsigned>(buffer.size()), 0);
-  if (file.is_fixed_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_send(
+        sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
+        buffer.data(), static_cast<unsigned>(buffer.size()), 0);
+    if (file.is_fixed_) {
+      sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitSendMsg(const RegisteredFile& file,
                                            const msghdr* message,
                                            IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire sendmsg sqe");
-  }
-  io_uring_prep_sendmsg(
-      sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
-      message, 0);
-  if (file.is_fixed_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_sendmsg(
+        sqe, file.is_fixed_ ? static_cast<int>(file.fixed_index_) : file.fd_,
+        message, 0);
+    if (file.is_fixed_) {
+      sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitAcceptMultishot(int listen_fd,
                                                    IoCompletion* tag) {
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire accept sqe");
-  }
-  io_uring_prep_multishot_accept(sqe, listen_fd, nullptr, nullptr,
-                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
-  io_uring_sqe_set_data(sqe, tag);  // plain IoCompletion* — same path as send
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_multishot_accept(sqe, listen_fd, nullptr, nullptr,
+                                   SOCK_NONBLOCK | SOCK_CLOEXEC);
+    io_uring_sqe_set_data(sqe, tag);  // plain IoCompletion* — same path as send
+  });
 }
 
 absl::Status IoUringBackend::SubmitConnect(int fd, const sockaddr* address,
@@ -514,14 +642,10 @@ absl::Status IoUringBackend::SubmitConnect(int fd, const sockaddr* address,
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid connect request");
   }
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire connect sqe");
-  }
-  io_uring_prep_connect(sqe, fd, address, address_length);
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_connect(sqe, fd, address, address_length);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 absl::Status IoUringBackend::SubmitCancel(IoCompletion* target) {
@@ -529,14 +653,7 @@ absl::Status IoUringBackend::SubmitCancel(IoCompletion* target) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "cancel target must not be null");
   }
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire cancel sqe");
-  }
-  io_uring_prep_cancel(sqe, target, 0);
-  io_uring_sqe_set_data(sqe, &kCancelRequestTag);
-  return absl::OkStatus();
+  return CancelByData(target, &kCancelRequestTag);
 }
 
 absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
@@ -553,32 +670,31 @@ absl::Status IoUringBackend::StartRecvMultishot(Connection* connection) {
   if (!use_multishot && !connection->received_buffers_.empty()) {
     return absl::OkStatus();
   }
-  auto* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire recv multishot sqe");
+  // Allocate before acquiring an SQE: preparation must not throw after the
+  // ring's local tail advances and expose a partially prepared operation.
+  if (!use_multishot && connection->read_buffer_.empty()) {
+    connection->read_buffer_.resize(options_.recv_buffer_size_);
   }
-  const int fd = connection->file_.is_fixed_
-                     ? static_cast<int>(connection->file_.fixed_index_)
-                     : connection->file_.fd_;
-  if (use_multishot) {
-    io_uring_prep_recv_multishot(sqe, fd, nullptr, 0, 0);
-    sqe->flags |= IOSQE_BUFFER_SELECT;
-    sqe->buf_group = MultishotBufferRing::kGroupId;
-  } else {
-    if (connection->read_buffer_.empty()) {
-      connection->read_buffer_.resize(options_.recv_buffer_size_);
+  auto status = SubmitOrQueue([connection, use_multishot](io_uring_sqe* sqe) {
+    const int fd = connection->file_.is_fixed_
+                       ? static_cast<int>(connection->file_.fixed_index_)
+                       : connection->file_.fd_;
+    if (use_multishot) {
+      io_uring_prep_recv_multishot(sqe, fd, nullptr, 0, 0);
+      sqe->flags |= IOSQE_BUFFER_SELECT;
+      sqe->buf_group = MultishotBufferRing::kGroupId;
+    } else {
+      io_uring_prep_recv(sqe, fd, connection->read_buffer_.data(),
+                         static_cast<unsigned>(connection->read_buffer_.size()),
+                         0);
     }
-    io_uring_prep_recv(sqe, fd, connection->read_buffer_.data(),
-                       static_cast<unsigned>(connection->read_buffer_.size()),
-                       0);
-  }
-  sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
-  if (connection->file_.is_fixed_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  io_uring_sqe_set_data(sqe, EncodeMultishotData(connection));
-
+    sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
+    if (connection->file_.is_fixed_) {
+      sqe->flags |= IOSQE_FIXED_FILE;
+    }
+    io_uring_sqe_set_data(sqe, EncodeMultishotData(connection));
+  });
+  if (!status.ok()) return status;
   connection->recv_armed_ = true;
   connection->inflight_ops_ += 1;
   return absl::OkStatus();
@@ -590,17 +706,11 @@ absl::Status IoUringBackend::SubmitCancelRecv(Connection* connection,
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid recv cancel request");
   }
-  auto* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "failed to acquire recv cancel sqe");
-  }
-  io_uring_prep_cancel(sqe, EncodeMultishotData(connection), 0);
   // Close needs only the receive's terminal CQE; a paused handoff also awaits
   // the cancellation request through its explicit completion tag.
-  io_uring_sqe_set_data(
-      sqe, tag != nullptr ? static_cast<void*>(tag) : &kCancelRequestTag);
-  return absl::OkStatus();
+  return CancelByData(
+      EncodeMultishotData(connection),
+      tag != nullptr ? static_cast<void*>(tag) : &kCancelRequestTag);
 }
 
 absl::Status IoUringBackend::StartPeerDisconnectPoll(Connection* connection) {
@@ -611,17 +721,16 @@ absl::Status IoUringBackend::StartPeerDisconnectPoll(Connection* connection) {
       connection->closing_) {
     return absl::OkStatus();
   }
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::UnavailableError("failed to acquire peer disconnect poll sqe");
-  }
-  const int fd = connection->file_.is_fixed_
-                     ? static_cast<int>(connection->file_.fixed_index_)
-                     : connection->file_.fd_;
-  io_uring_prep_poll_add(sqe, fd,
-                         static_cast<unsigned>(POLLERR | POLLHUP | POLLRDHUP));
-  if (connection->file_.is_fixed_) sqe->flags |= IOSQE_FIXED_FILE;
-  io_uring_sqe_set_data(sqe, EncodePeerDisconnectData(connection));
+  auto status = SubmitOrQueue([connection](io_uring_sqe* sqe) {
+    const int fd = connection->file_.is_fixed_
+                       ? static_cast<int>(connection->file_.fixed_index_)
+                       : connection->file_.fd_;
+    io_uring_prep_poll_add(
+        sqe, fd, static_cast<unsigned>(POLLERR | POLLHUP | POLLRDHUP));
+    if (connection->file_.is_fixed_) sqe->flags |= IOSQE_FIXED_FILE;
+    io_uring_sqe_set_data(sqe, EncodePeerDisconnectData(connection));
+  });
+  if (!status.ok()) return status;
   connection->peer_disconnect_poll_armed_ = true;
   connection->peer_disconnect_poll_cancel_requested_ = false;
   ++connection->inflight_ops_;
@@ -633,13 +742,9 @@ absl::Status IoUringBackend::CancelPeerDisconnectPoll(Connection* connection) {
       connection->peer_disconnect_poll_cancel_requested_) {
     return absl::OkStatus();
   }
-  io_uring_sqe* sqe = AcquireSqe();
-  if (sqe == nullptr) {
-    return absl::UnavailableError(
-        "failed to acquire peer disconnect cancel sqe");
-  }
-  io_uring_prep_cancel(sqe, EncodePeerDisconnectData(connection), 0);
-  io_uring_sqe_set_data(sqe, &kPeerDisconnectCancelTag);
+  auto status = CancelByData(EncodePeerDisconnectData(connection),
+                             &kPeerDisconnectCancelTag);
+  if (!status.ok()) return status;
   connection->peer_disconnect_poll_cancel_requested_ = true;
   return absl::OkStatus();
 }
@@ -737,8 +842,8 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
         connection->state_ == ConnectionState::kActive &&
         !connection->closed_ && !connection->closing_ &&
         !connection->recv_eof_) {
-      // Defer re-arm out of completion dispatch (DrainRecvRearm runs after the
-      // reap loop) so AcquireSqe is never reached from inside it.
+      // Re-arm after the completion batch so terminal receive accounting is
+      // settled before another receive is accepted into the submission queue.
       if (!connection->needs_recv_rearm_) {
         connection->needs_recv_rearm_ = true;
         recv_rearm_queue_.push_back(connection);
@@ -771,7 +876,28 @@ void IoUringBackend::HandlePeerDisconnect(Connection* connection,
   }
 }
 
+// A target may finish while its cancel still waits for SQ space. Retire that
+// cancel before the callback can free/reuse its tag. Keep the scan and deque
+// mutation outside the ordinary CQE dispatch instruction footprint.
+ABSL_ATTRIBUTE_NOINLINE void IoUringBackend::RetireUnsubmittedCancels(
+    std::uint64_t target) {
+  bool other_cancels = false;
+  CancelUnsubmittedMatching(
+      [&](const io_uring_sqe& sqe) {
+        if (sqe.opcode != IORING_OP_ASYNC_CANCEL) return false;
+        if (sqe.addr == target) return true;
+        other_cancels = true;
+        return false;
+      },
+      -ENOENT);
+  may_have_unsubmitted_cancels_ = other_cancels;
+}
+
 void IoUringBackend::DispatchCqe(io_uring_cqe* cqe) {
+  if (may_have_unsubmitted_cancels_ && (cqe->flags & IORING_CQE_F_MORE) == 0)
+      [[unlikely]] {
+    RetireUnsubmittedCancels(cqe->user_data);
+  }
   void* data = io_uring_cqe_get_data(cqe);
   if (data == &kWakePollTag) {
     HandleWakePoll();
@@ -834,10 +960,21 @@ void IoUringBackend::DrainRecvRearm() {
 }
 
 bool IoUringBackend::Poll() {
-  const bool processed = ReapCompletions();
-  if (processed) {
-    DrainRecvRearm();
+  if (!initialized_) return false;
+  bool processed = ReapCompletions();
+  if (!pending_completions_.empty() || !recv_rearm_queue_.empty() ||
+      !pending_io_.empty()) [[unlikely]] {
+    processed |= PollDeferred();
   }
+  return processed;
+}
+
+// Poll's common path only checks queue metadata. Keep all deferred-work loops
+// together without inlining them back into that path, including under LTO.
+ABSL_ATTRIBUTE_NOINLINE bool IoUringBackend::PollDeferred() {
+  bool processed = DrainPendingCompletions();
+  DrainRecvRearm();
+  processed |= DrainPending();
   return processed;
 }
 
@@ -845,14 +982,17 @@ absl::Status IoUringBackend::SubmitPoll(int fd, unsigned events,
                                         IoCompletion* tag) {
   if (fd < 0 || tag == nullptr)
     return absl::InvalidArgumentError("invalid poll request");
-  auto* sqe = AcquireSqe();
-  if (!sqe) return absl::UnavailableError("failed to acquire poll sqe");
-  io_uring_prep_poll_add(sqe, fd, events);
-  io_uring_sqe_set_data(sqe, tag);
-  return absl::OkStatus();
+  return SubmitOrQueue([=](io_uring_sqe* sqe) {
+    io_uring_prep_poll_add(sqe, fd, events);
+    io_uring_sqe_set_data(sqe, tag);
+  });
 }
 
 bool IoUringBackend::Wait(int timeout_ms) {
+  // A queued operation may be the very operation whose CQE would wake us.
+  // Return to the owner loop to enter/submit it before blocking for
+  // completions.
+  if (HasPending()) return true;
   io_uring_cqe* cqe = nullptr;
   int rc = 0;
   if (timeout_ms >= 0) {
@@ -884,11 +1024,12 @@ bool IoUringBackend::Wait(int timeout_ms) {
 }
 
 void IoUringBackend::WakeRemote(int peer_ring_fd) noexcept {
-  io_uring_sqe* sqe = AcquireSqe();  // never null while initialized
-  io_uring_prep_msg_ring(sqe, peer_ring_fd, 0,
-                         reinterpret_cast<std::uintptr_t>(&kCrossCoreWakeTag),
-                         0);
-  io_uring_sqe_set_data(sqe, &kCrossCoreWakeTag);
+  (void)SubmitOrQueue([peer_ring_fd](io_uring_sqe* sqe) {
+    io_uring_prep_msg_ring(sqe, peer_ring_fd, 0,
+                           reinterpret_cast<std::uintptr_t>(&kCrossCoreWakeTag),
+                           0);
+    io_uring_sqe_set_data(sqe, &kCrossCoreWakeTag);
+  });
 }
 
 void IoUringBackend::WakeSelf() noexcept {

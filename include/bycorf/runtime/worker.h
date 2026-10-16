@@ -246,6 +246,11 @@ class Worker {
   absl::Status SubmitCancel(IoCompletion* target) {
     return backend_.SubmitCancel(target);
   }
+  // Before closing a kernel socket, retire accepted operations whose fd has
+  // not yet been consumed by the kernel. Completions remain deferred.
+  void CancelUnsubmittedForFd(int fd) noexcept {
+    backend_.CancelUnsubmittedForFd(fd);
+  }
   absl::Status EnsureRecvArmed(Connection* connection) {
     return backend_.StartRecvMultishot(connection);
   }
@@ -291,6 +296,9 @@ class Worker {
 #endif
     return backend_.RegisterBuffers(buffers);
   }
+  // Storage submissions retain the tag and referenced caller-owned buffers
+  // until completion, including while queued. Each tag may have only one
+  // unfinished storage operation; its completion may submit the next one.
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                                 FixedFile file, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
@@ -432,6 +440,9 @@ class Worker {
   SpdkStorageBackend storage_backend_{};
 #endif
   bool initialized_ = false;
+  // A fatal enter failure must leave RunOnce through the existing backend
+  // failure path, rather than spinning forever on accepted pending work.
+  bool submit_failed_ = false;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> stopping_{false};
   WorkerOptions options_{};

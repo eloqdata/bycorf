@@ -946,9 +946,11 @@ bool DpdkBackend::Wait(int timeout_ms) {
   if (!Poll() && rte_ring_empty(lane.rx) && rte_ring_empty(lane.tx) &&
       impl_->completions.empty()) {
     const auto submitted = kernel_.Submit();
-    if (!submitted.ok())
-      ok = false;
-    else {
+    if (!submitted.ok()) {
+      // Temporary enter backpressure needs another owner-worker round. Leave
+      // the interrupt cleanup below intact and avoid parking on deferred work.
+      ok = absl::IsUnavailable(submitted);
+    } else {
       const auto now = NowNs(), deadline = bycorf_bsd_deadline_ns();
       if (deadline != UINT64_MAX) {
         const auto delay = deadline <= now

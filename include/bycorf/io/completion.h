@@ -34,7 +34,10 @@ enum CompletionFlags : unsigned {
 // Backend-neutral completion callback. The io backend invokes Complete() when
 // an operation submitted with this object as its tag finishes. `result` is the
 // op result (>=0 byte count / fd, <0 -errno); `flags` is a CompletionFlags
-// bitset.
+// bitset. Each storage operation needs its own tag until completion, including
+// time spent queued for backend capacity. Complete() may reuse the tag for the
+// next operation or destroy it; backends must read all per-operation state
+// before dispatching and must not access the tag afterwards.
 class IoCompletion {
  public:
   virtual ~IoCompletion() = default;
@@ -43,6 +46,14 @@ class IoCompletion {
 
  protected:
   std::coroutine_handle<> awaiting_{};
+
+ private:
+  friend class SpdkStorageBackend;
+
+  // Status-only storage completions need the expected successful byte count
+  // (zero for flush). Keep it with the caller-owned tag so submitted commands
+  // need no separately allocated backend callback context.
+  int success_result_ = 0;
 };
 
 }  // namespace bycorf

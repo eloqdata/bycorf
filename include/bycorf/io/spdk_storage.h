@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <span>
 #include <string>
 #include <string_view>
@@ -75,7 +76,9 @@ void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept;
 
 // Worker-owned asynchronous storage. Successful submissions retain access to
 // the caller's buffer/tag until completion, including while waiting for qpair
-// capacity. Poll drives both device completions and deferred submissions.
+// capacity. The backend owns waiting request metadata; each tag represents one
+// unfinished request. Submit methods never dispatch completions inline. Poll
+// drives both device completions and deferred submissions.
 class SpdkStorageBackend {
  public:
   SpdkStorageBackend() = default;
@@ -111,12 +114,10 @@ class SpdkStorageBackend {
   void CompleteRequest(IoCompletion* tag, int result);
 
  private:
-  struct AsyncRequest {
+  struct PendingIo {
     IoCompletion* tag_ = nullptr;
-    AsyncRequest* next_ = nullptr;
     void* buffer_ = nullptr;
     std::uint64_t lba_ = 0;
-    int success_result_ = 0;
     std::uint32_t count_ = 0;
     // Only retries resolve this index. The fixed-file table cannot be resized
     // or an open entry closed while accepted I/O (including deferred I/O)
@@ -132,38 +133,36 @@ class SpdkStorageBackend {
   struct OpenFile {
     void* device_ = nullptr;
     spdk_nvme_qpair* qpair_ = nullptr;
+    std::size_t channel_index_ = 0;
   };
 
   struct ControllerChannel {
     void* controller_ = nullptr;
     spdk_nvme_qpair* qpair_ = nullptr;
     unsigned open_files_ = 0;
-    AsyncRequest* pending_head_ = nullptr;
-    AsyncRequest* pending_tail_ = nullptr;
+    std::deque<PendingIo> pending_{};
   };
 
   absl::Status SubmitIo(FixedFile file, void* buffer, std::size_t bytes,
                         std::uint64_t offset, bool write, IoCompletion* tag);
-  // Accepted requests retain their caller-owned buffers until completion,
-  // including time spent waiting for an SPDK request descriptor.
-  int TrySubmit(AsyncRequest* request, spdk_nvme_ns* ns,
+  int TrySubmit(const PendingIo& request, spdk_nvme_ns* ns,
                 spdk_nvme_qpair* qpair);
-  absl::Status SubmitOrDefer(AsyncRequest* request, spdk_nvme_ns* ns,
-                             spdk_nvme_qpair* qpair);
-  void RetryDeferred(ControllerChannel& channel, unsigned limit,
+  absl::Status SubmitOrDefer(const PendingIo& request, spdk_nvme_ns* ns,
+                             std::size_t channel_index);
+  absl::Status QueuePending(const PendingIo& request,
+                            std::size_t channel_index);
+  void RetryDeferred(std::size_t channel_index, unsigned limit,
                      SpdkPollResult& result);
   OpenFile* Lookup(FixedFile file);
-  AsyncRequest* AcquireRequest() noexcept;
-  void ReleaseRequest(AsyncRequest* request) noexcept;
   static void CompleteAsync(void* context, const spdk_nvme_cpl* completion);
 
   Worker* worker_ = nullptr;
   std::vector<OpenFile> files_;
   std::vector<ControllerChannel> channels_;
   std::vector<std::pair<IoCompletion*, int>> pending_completions_;
-  std::vector<AsyncRequest> request_pool_;
-  AsyncRequest* free_requests_ = nullptr;
   std::size_t next_poll_channel_ = 0;
+  // Completion callbacks may open/close files and invalidate channel indices.
+  std::size_t channel_generation_ = 0;
   std::size_t outstanding_ = 0;
   bool initialized_ = false;
 };

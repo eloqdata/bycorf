@@ -16,7 +16,7 @@
 
 // Exercise the production backend and Worker with link-time SPDK stubs. Only
 // device discovery, environment initialization and NVMe commands are replaced;
-// the request pool, pending FIFO, polling and callback ownership stay real.
+// the pending FIFO, polling and callback ownership stay real.
 #include <fcntl.h>
 #include <spdk/env.h>
 #include <spdk/nvme.h>
@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -85,6 +86,7 @@ struct Qpair {
 };
 std::vector<Qpair*> qpairs;
 unsigned environment_calls = 0;
+bool volatile_write_cache = true;
 
 Qpair& Queue(spdk_nvme_qpair* qpair) {
   auto* queue = reinterpret_cast<Qpair*>(qpair);
@@ -135,14 +137,15 @@ spdk_nvme_ns* __wrap_spdk_nvme_ctrlr_get_ns(spdk_nvme_ctrlr* ctrlr,
 }
 bool __wrap_spdk_nvme_ns_is_active(spdk_nvme_ns*) { return true; }
 uint32_t __wrap_spdk_nvme_ns_get_sector_size(spdk_nvme_ns*) { return 512; }
-uint64_t __wrap_spdk_nvme_ns_get_size(spdk_nvme_ns*) { return 1ULL << 30; }
+uint64_t __wrap_spdk_nvme_ns_get_size(spdk_nvme_ns*) { return 1ULL << 34; }
 const spdk_nvme_ctrlr_data* __wrap_spdk_nvme_ctrlr_get_data(spdk_nvme_ctrlr*) {
   static const auto data = [] {
     spdk_nvme_ctrlr_data value{};
     value.vwc.present = 1;
     return value;
   }();
-  return &data;
+  static const spdk_nvme_ctrlr_data no_cache{};
+  return volatile_write_cache ? &data : &no_cache;
 }
 spdk_nvme_qpair* __wrap_spdk_nvme_ctrlr_alloc_io_qpair(
     spdk_nvme_ctrlr* ctrlr, const spdk_nvme_io_qpair_opts*, size_t) {
@@ -251,6 +254,8 @@ void CheckQueues(bycorf::Worker& worker, std::span<std::byte> buffer) {
             other_deferred.calls ==
         0);
   CHECK(first.accepted.size() == 1 && second.accepted.size() == 1);
+  CHECK(first.accepted[0].context == &read);
+  CHECK(second.accepted[0].context == &other);
   unsigned attempts = first.attempts;
   for (unsigned i = 0; i < 3; ++i) worker.RunOnce(false);
   CHECK(first.attempts > attempts);
@@ -267,6 +272,7 @@ void CheckQueues(bycorf::Worker& worker, std::span<std::byte> buffer) {
   CHECK(read.calls + write.calls + flush.calls == 0);
   CHECK(first.accepted.size() == 1 && second.accepted.size() == 2);
   CHECK(second.accepted[1].operation == Operation::kRead);
+  CHECK(second.accepted[1].context == &other_deferred);
   CHECK(second.accepted[1].ns ==
         reinterpret_cast<spdk_nvme_ns*>(&controllers[1].namespaces[0]));
   CHECK(second.accepted[1].buffer == buffer.data() &&
@@ -278,6 +284,7 @@ void CheckQueues(bycorf::Worker& worker, std::span<std::byte> buffer) {
   CHECK(write.calls == 0 && flush.calls == 0);
   const auto& retried = first.accepted[1];
   CHECK(retried.operation == Operation::kWrite);
+  CHECK(retried.context == &write);
   CHECK(retried.ns ==
         reinterpret_cast<spdk_nvme_ns*>(&controllers[0].namespaces[1]));
   CHECK(retried.buffer == buffer.data() && retried.lba == 2 &&
@@ -287,6 +294,7 @@ void CheckQueues(bycorf::Worker& worker, std::span<std::byte> buffer) {
   CHECK(write.calls == 1 && write.result == static_cast<int>(buffer.size()));
   CHECK(flush.calls == 0);
   CHECK(first.accepted[2].operation == Operation::kFlush);
+  CHECK(first.accepted[2].context == &flush);
   CHECK(first.accepted[2].ns ==
         reinterpret_cast<spdk_nvme_ns*>(&controllers[0].namespaces[0]));
   first.completion_tokens = 1;
@@ -298,12 +306,26 @@ void CheckQueues(bycorf::Worker& worker, std::span<std::byte> buffer) {
 
 void CheckErrors(bycorf::Worker& worker, std::span<std::byte> buffer) {
   auto& queue = *qpairs[0];
+  Completion oversized;
+  const auto attempts = queue.attempts;
+  // The stub namespace is larger than this sector-aligned request, but its
+  // successful byte count cannot fit in IoCompletion's int result. Stub I/O
+  // never touches the buffer; validation must reject it before SPDK is called.
+  CHECK(worker
+            .SubmitReadFixed({0},
+                             {.data_ = buffer.data(),
+                              .size_ = static_cast<std::size_t>(
+                                           std::numeric_limits<int>::max()) +
+                                       1},
+                             0, &oversized)
+            .code() == absl::StatusCode::kInvalidArgument);
+  CHECK(oversized.calls == 0 && queue.attempts == attempts);
   for (int error : {-EINVAL, -ENOMEM}) {
     queue.submit_error = error;
     Completion rejected;
-    // More than the pool capacity catches a request leaked on synchronous
-    // rejection. An empty qpair must not defer even an ENOMEM failure.
-    for (unsigned i = 0; i < 4097; ++i) {
+    // An empty qpair cannot make progress through a completion, even for
+    // ENOMEM. Rejection must not retain the tag or poison later submissions.
+    for (unsigned i = 0; i < 3; ++i) {
       CHECK(worker.SubmitRead({0}, buffer, 0, &rejected).code() ==
             absl::StatusCode::kUnavailable);
     }
@@ -338,24 +360,252 @@ void CheckErrors(bycorf::Worker& worker, std::span<std::byte> buffer) {
                "completion errors\n";
 }
 
-void CheckPool(bycorf::Worker& worker, std::span<std::byte> buffer) {
-  for (unsigned round = 0; round < 2; ++round) {
-    std::vector<Completion> tags(4096);
-    for (auto& tag : tags) CHECK(worker.SubmitRead({0}, buffer, 0, &tag).ok());
-    for (auto& tag : tags) CHECK(tag.calls == 0);
-    Completion rejected, closed;
-    CHECK(worker.SubmitRead({0}, buffer, 0, &rejected).code() ==
-          absl::StatusCode::kResourceExhausted);
+void CheckLargeBursts(bycorf::Worker& worker, std::span<std::byte> buffer) {
+  auto& first = *qpairs[0];
+  auto& second = *qpairs[1];
+  constexpr unsigned kCount = 8193;
+  // Exercise both a large software backlog and many hardware-accepted I/Os.
+  // Neither may impose the former worker-wide 4096-request limit on a peer.
+  for (unsigned capacity : {1U, kCount}) {
+    first.capacity = capacity;
+    const auto first_begin = first.accepted.size();
+    const auto second_begin = second.accepted.size();
+    std::vector<Completion> tags(kCount);
+    for (std::size_t i = 0; i < tags.size(); ++i) {
+      const auto bytes = (i % 8 + 1) * 512;
+      CHECK(
+          worker.SubmitRead({0}, buffer.first(bytes), i * 512, &tags[i]).ok());
+    }
+    for (const auto& tag : tags) CHECK(tag.calls == 0);
+    CHECK(first.accepted.size() == first_begin + capacity);
+    Completion other, closed;
+    CHECK(worker.SubmitRead({2}, buffer.first(512), 0, &other).ok());
+    CHECK(other.calls == 0);
+    CHECK(second.accepted.size() == second_begin + 1);
+    CHECK(second.accepted.back().context == &other);
     CHECK(!worker.SubmitCloseDirect({0}, &closed).ok());
     CHECK(!worker.RegisterFixedFiles(4).ok());
-    qpairs[0]->completion_tokens = tags.size();
+
+    second.completion_tokens = 1;
+    Drain(worker, [&] { return other.calls == 1; });
+    CHECK(other.result == 512);
+    for (const auto& tag : tags) CHECK(tag.calls == 0);
+    first.completion_tokens = tags.size();
     Drain(worker, [&] { return tags.back().calls == 1; });
-    for (auto& tag : tags)
-      CHECK(tag.calls == 1 && tag.result == static_cast<int>(buffer.size()));
-    CHECK(rejected.calls == 0 && closed.calls == 0);
-    CHECK(qpairs[0]->inflight.empty());
+    CHECK(first.accepted.size() == first_begin + tags.size());
+    for (std::size_t i = 0; i < tags.size(); ++i) {
+      CHECK(tags[i].calls == 1 &&
+            tags[i].result == static_cast<int>((i % 8 + 1) * 512));
+      const auto& command = first.accepted[first_begin + i];
+      CHECK(command.context == &tags[i]);
+      CHECK(command.lba == i && command.count == i % 8 + 1);
+    }
+    CHECK(closed.calls == 0);
+    CHECK(first.inflight.empty() && second.inflight.empty());
+    CHECK(first.completion_tokens == 0 && second.completion_tokens == 0);
   }
-  std::cout << "PASS bounded pool, close protection and complete pool reuse\n";
+  first.capacity = 1;
+  std::cout
+      << "PASS large queued/issued bursts and independent qpair progress\n";
+}
+
+void CheckLateSubmissionFifo(bycorf::Worker& worker,
+                             std::span<std::byte> buffer) {
+  auto& queue = *qpairs[0];
+  const auto begin = queue.accepted.size();
+  std::array<Completion, 4> tags;
+  for (unsigned i = 0; i < 3; ++i)
+    CHECK(worker.SubmitRead({0}, buffer, i * 512, &tags[i]).ok());
+  CHECK(queue.accepted.size() == begin + 1);
+  queue.capacity = 4;
+  const auto attempts = queue.attempts;
+  CHECK(worker.SubmitRead({0}, buffer, 1536, &tags.back()).ok());
+  CHECK(queue.attempts == attempts);
+  for (const auto& tag : tags) CHECK(tag.calls == 0);
+  // Capacity is available again, but the late producer cannot skip the two
+  // older requests already accepted into this qpair's software FIFO.
+  queue.completion_tokens = 1;
+  Drain(worker, [&] { return queue.accepted.size() == begin + tags.size(); });
+  CHECK(tags.front().calls == 1);
+  for (std::size_t i = 0; i < tags.size(); ++i) {
+    CHECK(queue.accepted[begin + i].lba == i);
+    CHECK(queue.accepted[begin + i].context == &tags[i]);
+    if (i != 0) CHECK(tags[i].calls == 0);
+  }
+  queue.completion_tokens = tags.size() - 1;
+  Drain(worker, [&] { return tags.back().calls == 1; });
+  queue.capacity = 1;
+  std::cout << "PASS late submissions preserve FIFO when capacity returns\n";
+}
+
+void CheckCompletionOwnership(bycorf::Worker& worker,
+                              std::span<std::byte> buffer) {
+  struct ReusedCompletion final : bycorf::IoCompletion {
+    explicit ReusedCompletion(std::span<std::byte> bytes) : buffer(bytes) {}
+    void Complete(bycorf::Worker& owner, int value, unsigned flags) override {
+      CHECK(&owner == bycorf::ThisWorker().self_ && flags == 0);
+      CHECK(calls < results.size());
+      results[calls++] = value;
+      if (calls == 1)
+        CHECK(owner.SubmitWrite({1}, buffer.first(1024), 512, this).ok());
+      else if (calls == 2)
+        CHECK(owner.SubmitFdatasync({0}, this).ok());
+    }
+    std::span<std::byte> buffer;
+    std::array<int, 3> results{};
+    unsigned calls = 0;
+  } reused(buffer);
+  auto& queue = *qpairs[0];
+  CHECK(worker.SubmitRead({0}, buffer.first(512), 0, &reused).ok());
+  CHECK(reused.calls == 0 && queue.accepted.back().context == &reused);
+  for (unsigned expected_calls = 1; expected_calls <= 3; ++expected_calls) {
+    queue.completion_tokens = 1;
+    Drain(worker, [&] { return reused.calls == expected_calls; });
+    CHECK(queue.accepted.back().context == &reused);
+  }
+  CHECK((reused.results == std::array<int, 3>{512, 1024, 0}));
+
+  struct SelfDeletingCompletion final : bycorf::IoCompletion {
+    explicit SelfDeletingCompletion(bool& done) : destroyed(done) {}
+    ~SelfDeletingCompletion() override { destroyed = true; }
+    void Complete(bycorf::Worker& owner, int result, unsigned flags) override {
+      CHECK(&owner == bycorf::ThisWorker().self_);
+      CHECK(result == 512 && flags == 0);
+      delete this;
+    }
+    bool& destroyed;
+  };
+  bool destroyed = false;
+  auto* self_deleting = new SelfDeletingCompletion(destroyed);
+  CHECK(worker.SubmitRead({0}, buffer.first(512), 0, self_deleting).ok());
+  CHECK(!destroyed && queue.accepted.back().context == self_deleting);
+  queue.completion_tokens = 1;
+  Drain(worker, [&] { return destroyed; });
+  std::cout
+      << "PASS callback tag reuse, byte/flush results and self-destruction\n";
+}
+
+void CheckRetryErrorReentry(bycorf::Worker& worker,
+                            std::span<std::byte> buffer) {
+  struct ReusedCompletion final : bycorf::IoCompletion {
+    explicit ReusedCompletion(std::span<std::byte> bytes) : buffer(bytes) {}
+    void Complete(bycorf::Worker& owner, int result, unsigned flags) override {
+      CHECK(&owner == bycorf::ThisWorker().self_ && flags == 0);
+      CHECK(++calls <= 2);
+      if (calls == 1) {
+        CHECK(result == -EINVAL);
+        qpairs[0]->submit_error = 0;
+        CHECK(owner.SubmitRead({0}, buffer.first(1024), 1024, this).ok());
+      } else {
+        CHECK(result == 1024);
+      }
+    }
+    std::span<std::byte> buffer;
+    unsigned calls = 0;
+  } reused(buffer);
+  auto& queue = *qpairs[0];
+  const auto begin = queue.accepted.size();
+  Completion active, older;
+  CHECK(worker.SubmitRead({0}, buffer, 0, &active).ok());
+  CHECK(worker.SubmitRead({0}, buffer.first(2048), 512, &reused).ok());
+  CHECK(worker.SubmitRead({0}, buffer, 1536, &older).ok());
+  CHECK(active.calls + reused.calls + older.calls == 0);
+  queue.submit_error = -EINVAL;
+  Drain(worker, [&] { return reused.calls == 1; });
+  CHECK(active.calls == 0 && older.calls == 0);
+  CHECK(queue.accepted.size() == begin + 1);
+  queue.completion_tokens = 1;
+  Drain(worker, [&] { return queue.accepted.size() == begin + 2; });
+  CHECK(active.calls == 1 && older.calls == 0 && reused.calls == 1);
+  CHECK(queue.accepted.back().context == &older);
+  queue.completion_tokens = 1;
+  Drain(worker, [&] { return queue.accepted.size() == begin + 3; });
+  CHECK(older.calls == 1 && reused.calls == 1);
+  CHECK(queue.accepted.back().context == &reused);
+  CHECK(queue.accepted.back().count == 2 && queue.accepted.back().lba == 2);
+  queue.completion_tokens = 1;
+  Drain(worker, [&] { return reused.calls == 2; });
+  std::cout << "PASS retry-error callback reentry preserves older queued I/O\n";
+}
+
+void CheckChannelReopen(bycorf::Worker& worker, std::span<std::byte> buffer) {
+  std::array<Completion, 2> closed;
+  CHECK(worker.SubmitCloseDirect({0}, &closed[0]).ok());
+  CHECK(worker.SubmitCloseDirect({1}, &closed[1]).ok());
+  CHECK(closed[0].calls + closed[1].calls == 0);
+  CHECK(qpairs.size() == 1);
+  Drain(worker, [&] { return closed[1].calls == 1; });
+  CHECK(closed[0].calls == 1);
+
+  struct OpeningCompletion final : Completion {
+    void Complete(bycorf::Worker& owner, int result, unsigned flags) override {
+      Completion::Complete(owner, result, flags);
+      for (unsigned i = 0; i < opened.size(); ++i)
+        CHECK(
+            owner.SubmitOpenDirect(paths[i], O_RDWR, 0, {i}, &opened[i]).ok());
+    }
+    std::array<Completion, 2> opened;
+  } opening;
+  // Closing the first controller shifts the remaining file's channel index.
+  // Opening a controller from its completion then changes the channel table
+  // during polling, while the qpair being polled remains valid.
+  CHECK(worker.SubmitRead({2}, buffer.first(512), 0, &opening).ok());
+  CHECK(qpairs[0]->accepted.back().context == &opening);
+  qpairs[0]->completion_tokens = 1;
+  Drain(worker, [&] { return opening.opened.back().calls == 1; });
+  CHECK(opening.calls == 1 && opening.result == 512);
+  CHECK(opening.opened[0].calls == 1 && qpairs.size() == 2);
+
+  Completion remaining, reopened;
+  CHECK(worker.SubmitRead({2}, buffer.first(512), 0, &remaining).ok());
+  CHECK(worker.SubmitRead({0}, buffer.first(1024), 0, &reopened).ok());
+  CHECK(qpairs[0]->accepted.back().context == &remaining);
+  CHECK(qpairs[1]->accepted.back().context == &reopened);
+  qpairs[0]->completion_tokens = 1;
+  qpairs[1]->completion_tokens = 1;
+  Drain(worker, [&] { return remaining.calls + reopened.calls == 2; });
+  CHECK(remaining.result == 512 && reopened.result == 1024);
+
+  Completion closed_other, shifted, opened_other;
+  CHECK(worker.SubmitCloseDirect({2}, &closed_other).ok());
+  CHECK(worker.SubmitRead({1}, buffer.first(2048), 0, &shifted).ok());
+  CHECK(qpairs.size() == 1 && qpairs[0]->accepted.back().context == &shifted);
+  qpairs[0]->completion_tokens = 1;
+  Drain(worker, [&] { return shifted.calls == 1; });
+  CHECK(closed_other.calls == 1 && shifted.result == 2048);
+  CHECK(worker.SubmitOpenDirect(paths[2], O_RDWR, 0, {2}, &opened_other).ok());
+  Drain(worker, [&] { return opened_other.calls == 1; });
+  CHECK(qpairs.size() == 2);
+  std::cout << "PASS channel removal, callback open and shifted file indices\n";
+}
+
+void CheckSyntheticShutdown(bycorf::Worker& worker) {
+  for (unsigned operation = 0; operation < 3; ++operation) {
+    CHECK(worker.Init({.recv_buffer_count_ = 0}).ok());
+    CHECK(worker.RegisterFixedFiles(1).ok());
+    Completion opened, completed;
+    CHECK(worker.SubmitOpenDirect(paths[0], O_RDWR, 0, {0}, &opened).ok());
+    CHECK(opened.calls == 0);
+    if (operation != 0) {
+      Drain(worker, [&] { return opened.calls == 1; });
+      if (operation == 1) {
+        CHECK(worker.SubmitCloseDirect({0}, &completed).ok());
+      } else {
+        volatile_write_cache = false;
+        CHECK(worker.SubmitFdatasync({0}, &completed).ok());
+      }
+      CHECK(completed.calls == 0);
+    }
+    // No NVMe command is in flight. Shutdown still owes the accepted open,
+    // close or no-VWC flush its deferred completion on the owning worker.
+    for (const auto* queue : qpairs) CHECK(queue->inflight.empty());
+    worker.Shutdown();
+    CHECK(opened.calls == 1 && opened.result == 0);
+    if (operation != 0) CHECK(completed.calls == 1 && completed.result == 0);
+    CHECK(qpairs.empty());
+    volatile_write_cache = true;
+  }
+  std::cout << "PASS shutdown delivers synthetic open/close/no-VWC flush\n";
 }
 }  // namespace
 
@@ -387,18 +637,30 @@ int main() {
   std::array<std::byte, 4096> buffer{};
   CheckQueues(worker, buffer);
   CheckErrors(worker, buffer);
-  CheckPool(worker, buffer);
+  CheckLargeBursts(worker, buffer);
+  CheckLateSubmissionFifo(worker, buffer);
+  CheckCompletionOwnership(worker, buffer);
+  CheckRetryErrorReentry(worker, buffer);
+  CheckChannelReopen(worker, buffer);
 
-  Completion read, deferred;
-  CHECK(worker.SubmitRead({0}, buffer, 0, &read).ok());
-  CHECK(worker.SubmitWrite({0}, buffer, 0, &deferred).ok());
-  CHECK(read.calls + deferred.calls == 0);
-  qpairs[0]->completion_tokens = 2;
+  std::vector<Completion> shutdown(5000);
+  for (std::size_t i = 0; i < shutdown.size(); ++i) {
+    CHECK((i % 2 == 0 ? worker.SubmitRead({0}, buffer, 0, &shutdown[i])
+                      : worker.SubmitWrite({0}, buffer, 0, &shutdown[i]))
+              .ok());
+    CHECK(shutdown[i].calls == 0);
+  }
+  Completion other;
+  CHECK(worker.SubmitRead({2}, std::span(buffer).first(512), 0, &other).ok());
+  CHECK(other.calls == 0);
+  qpairs[0]->completion_tokens = shutdown.size();
+  qpairs[1]->completion_tokens = 1;
   worker.Shutdown();
-  CHECK(read.calls == 1 && read.result == 4096);
-  CHECK(deferred.calls == 1 && deferred.result == 4096);
+  for (const auto& tag : shutdown) CHECK(tag.calls == 1 && tag.result == 4096);
+  CHECK(other.calls == 1 && other.result == 512);
   CHECK(qpairs.empty());
-  close(wake_fd);
   std::cout << "PASS shutdown drains in-flight and deferred I/O on the owning "
                "worker\n";
+  CheckSyntheticShutdown(worker);
+  close(wake_fd);
 }

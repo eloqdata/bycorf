@@ -100,6 +100,7 @@ a 30-second timeout; the other checks below have 90-second timeouts:
 | `bycorf_connect_timer_check` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
 | `bycorf_connection_storage_check` | Connection storage lifetime while suspended coroutines still borrow it |
 | `bycorf_tcp_buffered_read_check` | Bounded reads across queued receive buffers, partial buffers, unchanged ordinary reads, waiting, errors, and EOF |
+| `bycorf_io_uring_backpressure_check` | Full submission queues, deferred sends and storage reads, queued cancellation, descriptor reuse, peer wakes, and shutdown |
 | `bycorf_backend_selection_check` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |
 
 Network checks use one unpinned worker and ephemeral loopback ports or Unix
@@ -113,9 +114,9 @@ With `BYCORF_KERNEL_BYPASS=ON`, CTest also runs the FreeBSD local-connect
 regression and `bycorf_spdk_backpressure_stub_check`. The SPDK check uses the
 real backend and Worker with link-time stubs for EAL initialization and NVMe
 device calls. It covers queue exhaustion, FIFO retries, independent qpairs,
-submission/completion errors, request-pool reuse, and shutdown draining without
-NVMe hardware, hugepages, or device binding. It still requires working io_uring
-and the normal runtime memlock allowance. Run it alone with:
+large backlogs, submission/completion errors, completion-tag reuse, and shutdown
+draining without NVMe hardware, hugepages, or device binding. It still requires
+working io_uring and the normal runtime memlock allowance. Run it alone with:
 
 ```bash
 ctest --test-dir build -R '^bycorf_spdk_backpressure_stub_check$' --output-on-failure

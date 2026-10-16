@@ -29,8 +29,9 @@ worker. Sessions that can suspend on non-socket work explicitly borrow
 connection storage before spawning and release it after their final users
 unwind. These holds delay storage reclamation, not transport closure, and must
 drain before the owning worker is destroyed. TCP service shutdown posts
-listener-close work through each worker's foreign executor when the DPDK
-backend is selected.
+listener-close work through each worker's foreign executor for both backends.
+The owner cancels unsubmitted kernel operations or enters its native TCP state
+before releasing the listener; foreign threads never modify submission queues.
 
 Outbound numeric connects own their socket until connect and deadline completions
 have both retired. `ConnectTcpCancellable` additionally accepts a caller-owned,
