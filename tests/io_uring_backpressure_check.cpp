@@ -104,6 +104,11 @@ void CheckSendsAndWake() {
 
   bool peer_woken = false;
   Drain(source.backend, [&] {
+    // DEFER_TASKRUN can defer MSG_RING delivery until the target ring enters
+    // the kernel, even when both rings share a thread. Drive the peer as its
+    // worker would: Submit runs deferred task work; Poll consumes ready CQEs.
+    const auto status = peer.backend.Submit();
+    CHECK(status.ok() || absl::IsUnavailable(status));
     peer_woken |= peer.backend.Poll();
     for (const auto& tag : tags)
       if (tag.calls == 0) return false;
