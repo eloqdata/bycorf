@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 
-#include <cstdlib>
+#include <gtest/gtest.h>
+
 #include <deque>
-#include <iostream>
 #include <random>
-#include <source_location>
 #include <utility>
 
 #include "bycorf/net/connection.h"
@@ -26,25 +25,17 @@
 namespace {
 using ReceiveQueue = decltype(bycorf::Connection::received_buffers_);
 
-void Check(bool ok,
-           std::source_location location = std::source_location::current()) {
-  if (!ok) {
-    std::cerr << "received buffer queue check failed at line "
-              << location.line() << "\n";
-    std::abort();
-  }
-}
 bool Equal(const bycorf::ReceivedBuffer& a, const bycorf::ReceivedBuffer& b) {
   return a.buffer_id_ == b.buffer_id_ && a.size_ == b.size_ &&
          a.offset_ == b.offset_;
 }
 void Compare(const ReceiveQueue& queue,
              const std::deque<bycorf::ReceivedBuffer>& reference) {
-  Check(queue.size() == reference.size());
+  ASSERT_TRUE(queue.size() == reference.size());
   for (std::uint32_t i = 0; i < queue.size(); ++i)
-    Check(Equal(queue[i], reference[i]));
+    ASSERT_TRUE(Equal(queue[i], reference[i]));
 }
-void CheckInlineAndHeapMoves() {
+TEST(ReceivedBufferQueue, InlineAndHeapMoves) {
   for (bool source_heap : {false, true}) {
     for (bool destination_heap : {false, true}) {
       ReceiveQueue destination;
@@ -62,14 +53,14 @@ void CheckInlineAndHeapMoves() {
           expected.push_back(value);
         }
         destination = std::move(source);
-        Check(source.empty() && source.capacity() == 1);
+        ASSERT_TRUE(source.empty() && source.capacity() == 1);
         // Reusing and destroying the source must not alias an inline element.
         source.push_back({.buffer_id_ = 77, .size_ = 7});
         Compare(destination, expected);
       }
       Compare(destination, expected);
       ReceiveQueue constructed(std::move(destination));
-      Check(destination.empty() && destination.capacity() == 1);
+      ASSERT_TRUE(destination.empty() && destination.capacity() == 1);
       destination.push_back({.buffer_id_ = 88});
       Compare(constructed, expected);
       auto& same = constructed;
@@ -80,18 +71,18 @@ void CheckInlineAndHeapMoves() {
   ReceiveQueue small;
   for (unsigned cycle = 0; cycle < 100; ++cycle) {
     small.push_back({.buffer_id_ = 1});
-    Check(small.capacity() == 1);
+    ASSERT_TRUE(small.capacity() == 1);
     small.push_back({.buffer_id_ = 2});
-    Check(small.capacity() == 8);
+    ASSERT_TRUE(small.capacity() == 8);
     small.pop_front();
-    Check(small.front().buffer_id_ == 2 && small.capacity() == 8);
+    ASSERT_TRUE(small.front().buffer_id_ == 2 && small.capacity() == 8);
     small.pop_front();
-    Check(small.empty() && small.capacity() == 8);
+    ASSERT_TRUE(small.empty() && small.capacity() == 8);
     for (unsigned i = 0; i < 6; ++i) {
       small.push_back({.buffer_id_ = 3});
       small.pop_front();
     }
-    Check(small.empty() && small.capacity() == 1);
+    ASSERT_TRUE(small.empty() && small.capacity() == 1);
   }
 }
 // No default construction is needed, even for over-aligned values. Its copy
@@ -107,10 +98,11 @@ template <typename T, std::uint32_t N>
 void CheckGenericQueue() {
   using Queue = bycorf::InlineRingQueue<T, N>;
   auto compare = [](const Queue& q, const std::deque<T>& expected) {
-    Check(q.size() == expected.size());
-    Check(q.capacity() >= q.size());
-    if (!q.empty()) Check(q.front() == expected.front());
-    for (std::uint32_t i = 0; i < q.size(); ++i) Check(q[i] == expected[i]);
+    ASSERT_TRUE(q.size() == expected.size());
+    ASSERT_TRUE(q.capacity() >= q.size());
+    if (!q.empty()) ASSERT_TRUE(q.front() == expected.front());
+    for (std::uint32_t i = 0; i < q.size(); ++i)
+      ASSERT_TRUE(q[i] == expected[i]);
   };
   // Exercise wrapped inline and heap sources against both destination modes.
   for (bool source_heap : {false, true}) {
@@ -133,13 +125,13 @@ void CheckGenericQueue() {
           expected.push_back(T(100 + i));
         }
         destination = std::move(source);
-        Check(source.empty() && source.capacity() == N);
+        ASSERT_TRUE(source.empty() && source.capacity() == N);
         source.push_back(T(777));
         compare(destination, expected);
       }
       compare(destination, expected);
       Queue constructed(std::move(destination));
-      Check(destination.empty() && destination.capacity() == N);
+      ASSERT_TRUE(destination.empty() && destination.capacity() == N);
       destination.push_back(T(888));
       compare(constructed, expected);
       auto& same = constructed;
@@ -167,11 +159,11 @@ void CheckGenericQueue() {
       const auto capacity = source.capacity();
       source.clear();
       destination = std::move(source);
-      Check(destination.empty() && destination.capacity() == capacity);
-      Check(source.empty() && source.capacity() == N);
+      ASSERT_TRUE(destination.empty() && destination.capacity() == capacity);
+      ASSERT_TRUE(source.empty() && source.capacity() == N);
       source.push_back(T(7));
       destination.push_back(T(8));
-      Check(source.front() == T(7) && destination.front() == T(8));
+      ASSERT_TRUE(source.front() == T(7) && destination.front() == T(8));
     }
   }
   Queue queue;
@@ -209,37 +201,42 @@ void CheckGenericQueue() {
     expected.push_back(T(i));
     compare(queue, expected);
   }
-  Check(queue.capacity() == N);
+  ASSERT_TRUE(queue.capacity() == N);
   queue.push_back(T(123));
-  Check(queue.capacity() > N);
+  ASSERT_TRUE(queue.capacity() > N);
   const auto capacity = queue.capacity();
   queue.clear();
-  Check(queue.empty() && queue.capacity() == capacity);
+  ASSERT_TRUE(queue.empty() && queue.capacity() == capacity);
   for (unsigned i = 0; i < capacity * 2; ++i) {
     queue.push_back(T(i));
-    Check(queue.front() == T(i));
+    ASSERT_TRUE(queue.front() == T(i));
     queue.pop_front();
   }
-  Check(queue.capacity() == N);
+  ASSERT_TRUE(queue.capacity() == N);
 }
 
-template <std::uint32_t N>
-void CheckGenericTypes() {
-  CheckGenericQueue<std::uint64_t, N>();
-  CheckGenericQueue<Value, N>();
-}
-}  // namespace
+template <typename T, std::uint32_t N>
+struct QueueConfig {
+  using ValueType = T;
+  static constexpr std::uint32_t kCapacity = N;
+};
+template <typename Config>
+class InlineRingQueue : public testing::Test {};
+using QueueConfigs = testing::Types<
+    QueueConfig<std::uint64_t, 1>, QueueConfig<std::uint64_t, 2>,
+    QueueConfig<std::uint64_t, 4>, QueueConfig<std::uint64_t, 8>,
+    QueueConfig<std::uint64_t, 16>, QueueConfig<std::uint64_t, 32>,
+    QueueConfig<Value, 1>, QueueConfig<Value, 2>, QueueConfig<Value, 4>,
+    QueueConfig<Value, 8>, QueueConfig<Value, 16>, QueueConfig<Value, 32>>;
+TYPED_TEST_SUITE(InlineRingQueue, QueueConfigs);
 
-int main() {
-  CheckGenericTypes<1>();
-  CheckGenericTypes<2>();
-  CheckGenericTypes<4>();
-  CheckGenericTypes<8>();
-  CheckGenericTypes<16>();
-  CheckGenericTypes<32>();
-  CheckInlineAndHeapMoves();
+TYPED_TEST(InlineRingQueue, MovesGrowthAndShrink) {
+  CheckGenericQueue<typename TypeParam::ValueType, TypeParam::kCapacity>();
+}
+
+TEST(ReceivedBufferQueue, FifoWrapGrowthAndShrink) {
   ReceiveQueue queue;
-  Check(queue.empty() && queue.capacity() == 1);
+  ASSERT_TRUE(queue.empty() && queue.capacity() == 1);
   std::deque<bycorf::ReceivedBuffer> reference;
   std::mt19937 random(20261019);
   // Alternate sustained growth and draining, with partial front consumption.
@@ -255,7 +252,7 @@ int main() {
         queue.push_back(buffer);
         reference.push_back(buffer);
       } else {
-        Check(Equal(queue.front(), reference.front()));
+        ASSERT_TRUE(Equal(queue.front(), reference.front()));
         queue.pop_front();
         reference.pop_front();
       }
@@ -283,23 +280,22 @@ int main() {
     reference.pop_front();
     Compare(queue, reference);
   }
-  Check(queue.capacity() < peak && queue.capacity() >= queue.size());
+  ASSERT_TRUE(queue.capacity() < peak && queue.capacity() >= queue.size());
   auto moved = std::move(queue);
-  Check(queue.empty() && queue.capacity() == 1);
+  ASSERT_TRUE(queue.empty() && queue.capacity() == 1);
   Compare(moved, reference);
   queue.push_back({.buffer_id_ = 99});
   queue = std::move(moved);
-  Check(moved.empty() && moved.capacity() == 1);
+  ASSERT_TRUE(moved.empty() && moved.capacity() == 1);
   Compare(queue, reference);
   queue.clear();
-  Check(queue.empty());
+  ASSERT_TRUE(queue.empty());
   for (unsigned i = 0; i < 10000; ++i) {
     queue.push_back({.buffer_id_ = 1, .size_ = 32});
-    Check(queue.front().size_ == 32);
+    ASSERT_TRUE(queue.front().size_ == 32);
     queue.pop_front();
   }
-  Check(queue.capacity() == 1);
-  std::cout
-      << "PASS FIFO, wrap, growth, delayed shrink, partial offsets, "
-         "move, clear, generic types and inline capacities 1/2/4/8/16/32\n";
+  ASSERT_TRUE(queue.capacity() == 1);
 }
+
+}  // namespace
