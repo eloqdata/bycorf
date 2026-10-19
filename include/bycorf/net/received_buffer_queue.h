@@ -66,8 +66,14 @@ class ReceivedBufferQueue {
     assert(index < size_);
     return data_[(head_ + index) & (capacity_ - 1)];
   }
-  ReceivedBuffer& front() noexcept { return (*this)[0]; }
-  const ReceivedBuffer& front() const noexcept { return (*this)[0]; }
+  ReceivedBuffer& front() noexcept {
+    assert(!empty());
+    return data_[head_];
+  }
+  const ReceivedBuffer& front() const noexcept {
+    assert(!empty());
+    return data_[head_];
+  }
 
   void push_back(ReceivedBuffer value) {
     if (size_ == capacity_) {
