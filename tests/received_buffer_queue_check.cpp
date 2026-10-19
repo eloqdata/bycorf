@@ -50,7 +50,7 @@ int main() {
   // This exercises wrapped growth and contraction, not just an empty queue.
   for (unsigned phase = 0; phase < 12; ++phase) {
     for (unsigned step = 0; step < 10000; ++step) {
-      const auto value = random();
+      const auto value = static_cast<std::uint32_t>(random());
       if (queue.empty() || value % 100 < (phase % 2 == 0 ? 60 : 40)) {
         bycorf::ReceivedBuffer buffer{
             .buffer_id_ = static_cast<std::uint16_t>(value),
