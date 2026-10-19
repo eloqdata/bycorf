@@ -91,17 +91,36 @@ container policy, and enough locked-memory allowance for registered buffers.
 If startup fails, check the host's `kernel.io_uring_disabled` setting and the
 shell's `ulimit -l`; compilation alone does not verify these runtime conditions.
 
-CTest always registers the following software regressions. The Task check has
-a 30-second timeout; the other checks below have 90-second timeouts:
+Software regressions use GoogleTest and are built only with
+`BYCORF_BUILD_TESTS=ON`. Test builds fetch the pinned GoogleTest v1.17.0
+sources unless an embedding project already supplies its targets; library and
+example-only builds do not need GoogleTest. CTest discovers each case separately
+with a `bycorf_` prefix, preserving per-case failures, timeouts, labels, and JUnit
+results.
 
-| Test | Coverage |
+| Test suite | Coverage |
 |---|---|
-| `bycorf_task_transfer_check` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
-| `bycorf_connect_timer_check` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
-| `bycorf_connection_storage_check` | Connection storage lifetime while suspended coroutines still borrow it |
-| `bycorf_tcp_buffered_read_check` | Bounded reads across queued receive buffers, partial buffers, unchanged ordinary reads, waiting, errors, and EOF |
-| `bycorf_io_uring_backpressure_check` | Full submission queues, deferred sends and storage reads, queued cancellation, descriptor reuse, peer wakes, and shutdown |
-| `bycorf_backend_selection_check` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |
+| `InlineRingQueue`, `ReceivedBufferQueue` | Queue types and inline capacities, moves, FIFO order, wrapping, growth, and shrinking |
+| `TaskTransfer` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
+| `RuntimeStartup`, `TcpServiceStop`, `Timer`, `Connect` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
+| `ConnectionStorage` | Connection storage lifetime while suspended coroutines still borrow it |
+| `TcpBufferedRead` | Bounded reads across queued receive buffers, partial buffers, unchanged ordinary reads, waiting, errors, EOF, and close without shrinking |
+| `IoUringBackpressure` | Full submission queues, deferred sends and storage reads, queued cancellation, descriptor reuse, peer wakes, and shutdown |
+| `BackendSelectionDeathTest` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |
+
+Queue, backend-selection, and Task cases have 30-second timeouts; worker/I/O
+cases have 90-second timeouts. Task cases run after re-exec with a 512 KiB native
+stack. Backend-selection cases use subprocesses because allocator/backend
+selection has process lifetime. Other cases own fresh worker/backend fixtures.
+Listing tests does not initialize I/O or access devices.
+
+List all cases, run one case through CTest, or filter the runtime binary directly:
+
+```bash
+ctest --test-dir build -N
+ctest --test-dir build -R '^bycorf_Timer.CancelOnWorker$' --output-on-failure
+./build/bycorf_runtime_tests --gtest_filter='Timer.*'
+```
 
 Network checks use one unpinned worker and ephemeral loopback ports or Unix
 socket pairs. The connection-timeout probe warns if the host rejects its
@@ -110,16 +129,22 @@ instead of the deadline.
 These software tests also run in a bypass-capable build with the default
 kernel/io_uring selection, without activating EAL or accessing devices.
 
-With `BYCORF_KERNEL_BYPASS=ON`, CTest also runs the FreeBSD local-connect
-regression and `bycorf_spdk_backpressure_stub_check`. The SPDK check uses the
-real backend and Worker with link-time stubs for EAL initialization and NVMe
-device calls. It covers queue exhaustion, FIFO retries, independent qpairs,
-large backlogs, submission/completion errors, completion-tag reuse, and shutdown
-draining without NVMe hardware, hugepages, or device binding. It still requires
-working io_uring and the normal runtime memlock allowance. Run it alone with:
+With `BYCORF_KERNEL_BYPASS=ON`, CTest also discovers the FreeBSD local-connect,
+DPDK adaptive-mode, and SPDK backpressure suites. The DPDK and SPDK suites use
+link-time device stubs; DPDK additionally uses an in-memory ring PMD. Their
+cases run in subprocesses to isolate process-global backend initialization.
+DPDK cases remain serial under CTest. The FreeBSD timeout is 15 seconds and
+the DPDK/SPDK timeouts are 30 seconds.
+
+The SPDK suite uses the real backend and Worker with stubs for EAL
+initialization and NVMe device calls. It covers queue exhaustion, FIFO retries,
+independent qpairs, large backlogs, submission/completion errors, completion-tag
+reuse, and shutdown draining without NVMe hardware, hugepages, or device
+binding. It still requires working io_uring and the normal runtime memlock
+allowance. Run it alone with:
 
 ```bash
-ctest --test-dir build -R '^bycorf_spdk_backpressure_stub_check$' --output-on-failure
+ctest --test-dir build -R '^bycorf_SpdkBackpressureDeathTest\.' --output-on-failure
 ```
 
 `bycorf_spdk_backpressure_check` is a separate read-only hardware check. It is

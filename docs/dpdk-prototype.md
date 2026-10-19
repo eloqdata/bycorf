@@ -285,8 +285,9 @@ The complete device allowlist must be set before that first initialization.
 
 `bycorf_echo` accepts a final positional network selector after the idle timeout:
 `bycorf_echo ADDRESS PORT WORKERS IDLE_TIMEOUT_MS kernel|dpdk`.
-`dpdk_smoke.py` selects DPDK explicitly. `bycorf_backend_selection_check` checks
-ordinary allocation and immutable selection without touching physical devices.
+`dpdk_smoke.py` selects DPDK explicitly. The `BackendSelectionDeathTest`
+GoogleTest cases check ordinary allocation and immutable selection without
+touching physical devices.
 
 ## Application integration
 

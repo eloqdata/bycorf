@@ -11,14 +11,16 @@
  * limitations under the License.
  */
 
+#include <gtest/gtest.h>
 #include <sys/resource.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "bycorf/runtime/task.h"
 
@@ -70,39 +72,62 @@ Task<std::uint64_t> CancelledParent() {
   Lifetime lifetime;
   co_return *co_await Delayed(7);
 }
-bool Run(Task<std::uint64_t> task, std::uint64_t expected) {
+bool RunTask(Task<std::uint64_t> task, std::uint64_t expected) {
   auto handle = std::move(task).ReleaseHandle();
   handle.resume();
   while (!handle.done()) {
-    if (!pending) return false;
+    if (!pending) {
+      handle.destroy();
+      return false;
+    }
     std::exchange(pending, {}).resume();
   }
   const bool okay = handle.promise().value_ == expected;
   handle.destroy();
   return okay && live == 0 && !pending;
 }
-int Check() {
-  if (!Run(Sequential(100000), 4999950000ULL)) return 1;
-  std::cout << "PASS 100000 sequential awaits\n";
-  if (!Run(Nested(100000), 100001)) return 1;
-  std::cout << "PASS 100000 nested awaits\n";
-  bycorf::MutableCurrentTaskClass() = bycorf::TaskClass::kBackground;
-  if (!Run(Mixed(), 20ULL * 49995000 + 190)) return 1;
-  bycorf::MutableCurrentTaskClass() = bycorf::TaskClass::kForeground;
-  if (background_registrations == 0) return 1;
-  std::cout
-      << "PASS real suspensions, move-only results and background hooks\n";
-  {
-    auto task = CancelledParent();
-    auto handle = std::move(task).ReleaseHandle();
-    handle.resume();
-    if (handle.done() || !pending || live != 2) return 1;
-    // The event owner cancels its outstanding wake before reclaiming the root.
+class TaskTransfer : public testing::Test {
+ protected:
+  void SetUp() override {
     pending = {};
-    handle.destroy();
-    if (live != 0) return 1;
+    live = background_registrations = forgotten = 0;
+    bycorf::MutableCurrentTaskClass() = bycorf::TaskClass::kForeground;
   }
-  std::cout << "PASS suspended child ownership on root destruction\n";
+  void TearDown() override {
+    EXPECT_EQ(live, 0u);
+    EXPECT_FALSE(pending);
+    bycorf::MutableCurrentTaskClass() = bycorf::TaskClass::kForeground;
+  }
+};
+
+TEST_F(TaskTransfer, SequentialAwaitsBoundNativeStack) {
+  EXPECT_TRUE(RunTask(Sequential(100000), 4999950000ULL));
+}
+
+TEST_F(TaskTransfer, NestedAwaitsBoundNativeStack) {
+  EXPECT_TRUE(RunTask(Nested(100000), 100001));
+}
+
+TEST_F(TaskTransfer, SuspensionsMoveOnlyResultsAndBackgroundHooks) {
+  bycorf::MutableCurrentTaskClass() = bycorf::TaskClass::kBackground;
+  EXPECT_TRUE(RunTask(Mixed(), 20ULL * 49995000 + 190));
+  EXPECT_GT(background_registrations, 0u);
+}
+
+TEST_F(TaskTransfer, RootDestructionOwnsSuspendedChild) {
+  auto task = CancelledParent();
+  auto handle = std::move(task).ReleaseHandle();
+  handle.resume();
+  EXPECT_FALSE(handle.done());
+  EXPECT_TRUE(pending);
+  EXPECT_EQ(live, 2u);
+  // The event owner cancels its outstanding wake before reclaiming the root.
+  pending = {};
+  handle.destroy();
+  EXPECT_EQ(live, 0u);
+}
+
+TEST_F(TaskTransfer, DetachedCompletionDestroysRootOnce) {
   unsigned completions = 0;
   auto task = Sequential(100000);
   task.SetCompletionCallback(&completions,
@@ -111,9 +136,13 @@ int Check() {
                                handle.destroy();
                              });
   std::move(task).ReleaseHandle().resume();
-  if (completions != 1 || live != 0 || forgotten == 0) return 1;
-  std::cout << "PASS detached completion destroys its root exactly once\n";
-  completions = 0;
+  EXPECT_EQ(completions, 1u);
+  EXPECT_EQ(live, 0u);
+  EXPECT_GT(forgotten, 0u);
+}
+
+TEST_F(TaskTransfer, ReentrantCompletionsRunEveryChild) {
+  unsigned completions = 0;
   auto reentrant = Sequential(1000);
   reentrant.SetCompletionCallback(
       &completions, [](void* context, auto handle) noexcept {
@@ -130,9 +159,8 @@ int Check() {
         }
       });
   std::move(reentrant).ReleaseHandle().resume();
-  if (completions != 3 || live != 0) return 1;
-  std::cout << "PASS reentrant completions run every child\n";
-  return 0;
+  EXPECT_EQ(completions, 3u);
+  EXPECT_EQ(live, 0u);
 }
 }  // namespace
 
@@ -146,24 +174,26 @@ void ForgetTaskScheduling(std::coroutine_handle<>) noexcept { ++forgotten; }
 }  // namespace bycorf
 
 int main(int argc, char** argv) {
-  if (argc == 2) return Check();
-  const pid_t child = fork();
-  if (child < 0) return 1;
-  if (child == 0) {
-    // Set before exec so the runtime's native stack starts with a bounded size.
-    const rlimit stack{512 * 1024, 512 * 1024};
-    const rlimit core{0, 0};
-    if (setrlimit(RLIMIT_STACK, &stack) || setrlimit(RLIMIT_CORE, &core))
-      _exit(127);
-    execl(argv[0], argv[0], "--child", nullptr);
-    _exit(127);
-  }
-  int status = 0;
-  if (waitpid(child, &status, 0) != child) return 1;
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    std::cerr << "FAIL bounded-stack Task checks, wait status=" << status
-              << '\n';
+  constexpr char kChild[] = "--bycorf-bounded-stack";
+  const bool child = argc > 1 && std::strcmp(argv[argc - 1], kChild) == 0;
+  if (child) argv[--argc] = nullptr;
+  // Preserve filters, shuffle/repeat, and XML output across exec; GoogleTest
+  // removes its own flags from argv during initialization.
+  std::vector<char*> arguments(argv, argv + argc);
+  testing::InitGoogleTest(&argc, argv);
+  if (child || GTEST_FLAG_GET(list_tests)) return RUN_ALL_TESTS();
+
+  // The limit must precede exec so the native stack mapping starts bounded.
+  // Discovery only lists cases and must never run this stress setup.
+  const rlimit stack{512 * 1024, 512 * 1024};
+  const rlimit core{0, 0};
+  if (setrlimit(RLIMIT_STACK, &stack) || setrlimit(RLIMIT_CORE, &core)) {
+    std::cerr << "cannot set bounded-stack test limits\n";
     return 1;
   }
-  return 0;
+  arguments.push_back(const_cast<char*>(kChild));
+  arguments.push_back(nullptr);
+  execv("/proc/self/exe", arguments.data());
+  std::cerr << "cannot exec bounded-stack tests\n";
+  return 1;
 }

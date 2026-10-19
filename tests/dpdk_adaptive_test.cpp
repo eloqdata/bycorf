@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <gtest/gtest.h>
 #include <rte_ethdev.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -23,6 +24,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -98,9 +100,9 @@ extern "C" int __wrap_rte_eth_dev_rx_intr_disable(uint16_t, uint16_t) {
   return 0;
 }
 
-int main(int argc, char** argv) {
-  if (argc != 2) return 2;
-  scenario = argv[1];
+namespace {
+int RunScenario(std::string_view selected) {
+  scenario = selected;
   const bool poll = scenario == "poll";
   const bool mlx5 = scenario == "mlx5-empty";
   const bool runtime = scenario.starts_with("runtime-");
@@ -144,4 +146,26 @@ int main(int argc, char** argv) {
   }
   close(notification_fd);
   std::cout << "PASS " << scenario << '\n';
+  return 0;
 }
+
+class DpdkAdaptiveDeathTest : public testing::TestWithParam<const char*> {};
+
+TEST_P(DpdkAdaptiveDeathTest, HandlesInterruptFailure) {
+  // EAL, backend selection, and FreeBSD bootstrap have process lifetime.
+  // GoogleTest discovery must only list cases, never initialize those states.
+  const auto selected = GetParam();
+  ASSERT_EXIT(std::exit(RunScenario(selected)), testing::ExitedWithCode(0), "");
+}
+
+INSTANTIATE_TEST_SUITE_P(Scenarios, DpdkAdaptiveDeathTest,
+                         testing::Values("configure", "descriptor", "enable",
+                                         "disable", "poll", "runtime-enable",
+                                         "runtime-disable", "mlx5-empty"),
+                         [](const testing::TestParamInfo<const char*>& info) {
+                           std::string name = info.param;
+                           for (auto& character : name)
+                             if (character == '-') character = '_';
+                           return name;
+                         });
+}  // namespace

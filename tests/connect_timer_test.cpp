@@ -19,7 +19,7 @@
 //   - bycorf::CancellableSleepFor (one-shot timer with a thread-safe cancel)
 //   - bycorf::Runtime           (stop requests racing worker startup)
 //   - bycorf::TcpService        (foreign stop before/after listener startup)
-// Runs every check on one bycorf worker and exits non-zero on any failure.
+// Each asynchronous case owns one worker and reports assertions to GoogleTest.
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -41,24 +41,13 @@
 #include "bycorf/net/tcp_listener.h"
 #include "bycorf/net/tcp_service.h"
 #include "bycorf/net/tcp_stream.h"
-#include "bycorf/runtime/runtime.h"
 #include "bycorf/runtime/worker.h"
+#include "runtime_test.h"
 #include "spdlog/spdlog.h"
 
 namespace {
 
 using namespace std::chrono_literals;
-
-int g_failures = 0;
-
-void Check(bool condition, std::string_view name) {
-  if (condition) {
-    spdlog::info("[pass] {}", name);
-  } else {
-    spdlog::error("[FAIL] {}", name);
-    ++g_failures;
-  }
-}
 
 void CheckStopDuringStartup(bool before_init) {
   bycorf::Runtime runtime;
@@ -93,9 +82,9 @@ void CheckStopDuringStartup(bool before_init) {
   runtime.RequestStop();
   release.set_value();
   runtime.WaitUntilStopped();
-  Check(initialized.ok() && runtime.exit_code() == 0,
-        before_init ? "startup stop: before Worker::Init"
-                    : "startup stop: after Init, before Run");
+  EXPECT_TRUE(initialized.ok() && runtime.exit_code() == 0)
+      << (before_init ? "startup stop: before Worker::Init"
+                      : "startup stop: after Init, before Run");
 }
 
 class StopCheckService final : public bycorf::TcpService {
@@ -134,7 +123,7 @@ void CheckTcpServiceStop(bool before_run) {
       getsockname(reservation, reinterpret_cast<sockaddr*>(&address),
                   &length) == 0;
   if (reservation >= 0) close(reservation);
-  Check(reserved, "TCP service stop: reserve loopback port");
+  EXPECT_TRUE(reserved) << "TCP service stop: reserve loopback port";
   if (!reserved) return;
 
   StopCheckService service(ntohs(address.sin_port));
@@ -175,7 +164,7 @@ void CheckTcpServiceStop(bool before_run) {
       /*pin_workers=*/false);
   const bool initialized =
       ready.wait_for(5s) == std::future_status::ready && ready.get().ok();
-  Check(initialized, "TCP service stop: startup reached gate");
+  EXPECT_TRUE(initialized) << "TCP service stop: startup reached gate";
   service.Stop();
   service.Stop();
   if (before_run) release.set_value();
@@ -186,19 +175,21 @@ void CheckTcpServiceStop(bool before_run) {
     // runtime teardown must not hide a lost stop-before-publication race.
     const bool completed =
         stopped.wait_for(5s) == std::future_status::ready && stopped.get().ok();
-    Check(completed, "TCP service stop: before Run publishes owner");
+    EXPECT_TRUE(completed) << "TCP service stop: before Run publishes owner";
   } else {
     // Stop posts listener closure before this marker on the same ingress.
     // A consumed accept may still retain the socket until ring teardown, so
     // require owner-side dispatch here rather than completion of that accept.
     const bool posted = runtime.GetForeignExecutor(0).Notify(
         [&owner_marker]() noexcept { owner_marker.set_value(); });
-    Check(posted && owner_reached.wait_for(5s) == std::future_status::ready,
-          "TCP service stop: foreign close reaches owning worker");
+    EXPECT_TRUE(posted &&
+                owner_reached.wait_for(5s) == std::future_status::ready)
+        << "TCP service stop: foreign close reaches owning worker";
   }
   runtime.RequestStop();
   runtime.WaitUntilStopped();
-  Check(runtime.exit_code() == 0, "TCP service stop: clean worker teardown");
+  EXPECT_TRUE(runtime.exit_code() == 0)
+      << "TCP service stop: clean worker teardown";
 }
 
 std::int64_t ElapsedMs(std::chrono::steady_clock::time_point start) {
@@ -221,8 +212,8 @@ bycorf::Task<absl::Status> CheckTimerFire(bycorf::Worker& worker) {
   auto timer = bycorf::CancellableSleepFor(worker, 100ms);
   const auto started = std::chrono::steady_clock::now();
   const absl::Status fired = co_await timer;
-  Check(fired.ok(), "timer fires with OkStatus");
-  Check(ElapsedMs(started) >= 90, "timer fire respects the deadline");
+  EXPECT_TRUE(fired.ok()) << "timer fires with OkStatus";
+  EXPECT_TRUE(ElapsedMs(started) >= 90) << "timer fire respects the deadline";
   co_return absl::OkStatus();
 }
 
@@ -232,11 +223,11 @@ bycorf::Task<absl::Status> CheckTimerCancelOnWorker(bycorf::Worker& worker) {
   worker.Spawn(CancelAfterOnWorker(worker, handle, 50ms));
   const auto started = std::chrono::steady_clock::now();
   const absl::Status fired = co_await timer;
-  Check(fired.code() == absl::StatusCode::kCancelled,
-        "on-worker cancel resolves kCancelled");
+  EXPECT_TRUE(fired.code() == absl::StatusCode::kCancelled)
+      << "on-worker cancel resolves kCancelled";
   // The pending timeout is pulled off the ring, so the resume is prompt
   // (~50ms), not at the 5s deadline.
-  Check(ElapsedMs(started) < 2000, "on-worker cancel resumes promptly");
+  EXPECT_TRUE(ElapsedMs(started) < 2000) << "on-worker cancel resumes promptly";
   co_return absl::OkStatus();
 }
 
@@ -254,10 +245,10 @@ bycorf::Task<absl::Status> CheckTimerCancelForeignThread(
   const auto started = std::chrono::steady_clock::now();
   const absl::Status fired = co_await timer;
   canceller.join();
-  Check(fired.code() == absl::StatusCode::kCancelled,
-        "foreign-thread cancel resolves kCancelled");
-  Check(ElapsedMs(started) >= 700,
-        "foreign-thread cancel: late fire is a no-op at the deadline");
+  EXPECT_TRUE(fired.code() == absl::StatusCode::kCancelled)
+      << "foreign-thread cancel resolves kCancelled";
+  EXPECT_TRUE(ElapsedMs(started) >= 700)
+      << "foreign-thread cancel: late fire is a no-op at the deadline";
   co_return absl::OkStatus();
 }
 
@@ -265,13 +256,12 @@ bycorf::Task<absl::Status> CheckTimerCancelAfterFire(bycorf::Worker& worker) {
   auto timer = bycorf::CancellableSleepFor(worker, 30ms);
   bycorf::TimerCancelHandle handle = timer.CancelHandle();
   const absl::Status fired = co_await timer;
-  Check(fired.ok(), "timer fires before the cancel");
+  EXPECT_TRUE(fired.ok()) << "timer fires before the cancel";
   // Cancel-after-fire and double cancel are safe no-ops on live shared state.
   handle.Cancel();
   handle.Cancel();
   bycorf::TimerCancelHandle empty;
   empty.Cancel();
-  Check(true, "cancel-after-fire and double cancel are safe");
   co_return absl::OkStatus();
 }
 
@@ -280,9 +270,10 @@ bycorf::Task<absl::Status> CheckTimerCancelBeforeAwait(bycorf::Worker& worker) {
   timer.CancelHandle().Cancel();
   const auto started = std::chrono::steady_clock::now();
   const absl::Status fired = co_await timer;
-  Check(fired.code() == absl::StatusCode::kCancelled,
-        "cancel-before-await resolves kCancelled");
-  Check(ElapsedMs(started) < 100, "cancel-before-await never hits the ring");
+  EXPECT_TRUE(fired.code() == absl::StatusCode::kCancelled)
+      << "cancel-before-await resolves kCancelled";
+  EXPECT_TRUE(ElapsedMs(started) < 100)
+      << "cancel-before-await never hits the ring";
   co_return absl::OkStatus();
 }
 
@@ -303,12 +294,12 @@ bycorf::Task<absl::Status> CheckConnectSuccess(bycorf::Worker& worker) {
   bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
-    Check(false, "connect-success: listener bind");
+    ADD_FAILURE() << "connect-success: listener bind";
     co_return bound;
   }
   auto port = BoundPort(listener);
   if (!port.ok()) {
-    Check(false, "connect-success: bound port");
+    ADD_FAILURE() << "connect-success: bound port";
     co_return port.status();
   }
 
@@ -317,12 +308,12 @@ bycorf::Task<absl::Status> CheckConnectSuccess(bycorf::Worker& worker) {
       worker, "127.0.0.1", *port, 2s, &cancellation);
   cancellation.Cancel();
   cancellation.Cancel();
-  Check(client.ok(), "connect-success: ConnectTcp to local listener");
+  EXPECT_TRUE(client.ok()) << "connect-success: ConnectTcp to local listener";
   if (!client.ok()) {
     co_return client.status();
   }
   auto accepted = co_await listener.Accept();
-  Check(accepted.ok(), "connect-success: listener accepts");
+  EXPECT_TRUE(accepted.ok()) << "connect-success: listener accepts";
   if (!accepted.ok()) {
     co_return accepted.status();
   }
@@ -331,26 +322,26 @@ bycorf::Task<absl::Status> CheckConnectSuccess(bycorf::Worker& worker) {
   constexpr std::string_view kPing = "ping";
   absl::Status written = co_await client->WriteAll(std::span<const std::byte>(
       reinterpret_cast<const std::byte*>(kPing.data()), kPing.size()));
-  Check(written.ok(), "connect-success: client write");
+  EXPECT_TRUE(written.ok()) << "connect-success: client write";
 
   std::array<std::byte, 16> buffer{};
   auto server_read = co_await server.ReadSome(buffer);
-  Check(server_read.ok() && *server_read == kPing.size() &&
-            std::memcmp(buffer.data(), kPing.data(), kPing.size()) == 0,
-        "connect-success: server read");
+  EXPECT_TRUE(server_read.ok() && *server_read == kPing.size() &&
+              std::memcmp(buffer.data(), kPing.data(), kPing.size()) == 0)
+      << "connect-success: server read";
   if (server_read.ok()) {
     absl::Status echoed = co_await server.WriteAll(
         std::span<const std::byte>(buffer.data(), *server_read));
-    Check(echoed.ok(), "connect-success: server echo");
+    EXPECT_TRUE(echoed.ok()) << "connect-success: server echo";
   }
   auto client_read = co_await client->ReadSome(buffer);
-  Check(client_read.ok() && *client_read == kPing.size() &&
-            std::memcmp(buffer.data(), kPing.data(), kPing.size()) == 0,
-        "connect-success: client read echo");
+  EXPECT_TRUE(client_read.ok() && *client_read == kPing.size() &&
+              std::memcmp(buffer.data(), kPing.data(), kPing.size()) == 0)
+      << "connect-success: client read echo";
 
   auto peer = client->PeerAddress();
-  Check(peer.ok() && *peer == "127.0.0.1:" + std::to_string(*port),
-        "connect-success: peer address");
+  EXPECT_TRUE(peer.ok() && *peer == "127.0.0.1:" + std::to_string(*port))
+      << "connect-success: peer address";
 
   server.Close().IgnoreError();
   client->Close().IgnoreError();
@@ -365,21 +356,21 @@ bycorf::Task<absl::Status> CheckConnectRefused(bycorf::Worker& worker) {
   bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
-    Check(false, "connect-refused: listener bind");
+    ADD_FAILURE() << "connect-refused: listener bind";
     co_return bound;
   }
   auto port = BoundPort(listener);
   listener.Close().IgnoreError();
   if (!port.ok()) {
-    Check(false, "connect-refused: bound port");
+    ADD_FAILURE() << "connect-refused: bound port";
     co_return port.status();
   }
   const auto started = std::chrono::steady_clock::now();
   auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 5s);
-  Check(
-      !client.ok() && client.status().code() == absl::StatusCode::kUnavailable,
-      "connect-refused: ECONNREFUSED maps to kUnavailable");
-  Check(ElapsedMs(started) < 2000, "connect-refused: fails fast");
+  EXPECT_TRUE(!client.ok() &&
+              client.status().code() == absl::StatusCode::kUnavailable)
+      << "connect-refused: ECONNREFUSED maps to kUnavailable";
+  EXPECT_TRUE(ElapsedMs(started) < 2000) << "connect-refused: fails fast";
   co_return absl::OkStatus();
 }
 
@@ -399,22 +390,21 @@ bycorf::Task<absl::Status> CheckConnectTimeout(bycorf::Worker& worker) {
         "[warn] connect-timeout: immediate unreachable after {}ms (no route "
         "to 10/8 in this environment)",
         elapsed);
-    Check(true, "connect-timeout: immediate unreachable (see warning)");
     co_return absl::OkStatus();
   }
-  Check(!client.ok() &&
-            client.status().code() == absl::StatusCode::kDeadlineExceeded,
-        "connect-timeout: resolves kDeadlineExceeded");
-  Check(elapsed >= 280 && elapsed < 10000,
-        "connect-timeout: deadline bounds the wait");
+  EXPECT_TRUE(!client.ok() &&
+              client.status().code() == absl::StatusCode::kDeadlineExceeded)
+      << "connect-timeout: resolves kDeadlineExceeded";
+  EXPECT_TRUE(elapsed >= 280 && elapsed < 10000)
+      << "connect-timeout: deadline bounds the wait";
   co_return absl::OkStatus();
 }
 
 bycorf::Task<absl::Status> CheckConnectRejectsHostname(bycorf::Worker& worker) {
   auto client = co_await bycorf::ConnectTcp(worker, "localhost", 17699, 100ms);
-  Check(!client.ok() &&
-            client.status().code() == absl::StatusCode::kInvalidArgument,
-        "connect: non-numeric host is rejected without DNS");
+  EXPECT_TRUE(!client.ok() &&
+              client.status().code() == absl::StatusCode::kInvalidArgument)
+      << "connect: non-numeric host is rejected without DNS";
   co_return absl::OkStatus();
 }
 
@@ -431,13 +421,13 @@ bycorf::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
   bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
-    Check(false, "deadline-retired(fail): listener bind");
+    ADD_FAILURE() << "deadline-retired(fail): listener bind";
     co_return bound;
   }
   auto port = BoundPort(listener);
   listener.Close().IgnoreError();
   if (!port.ok()) {
-    Check(false, "deadline-retired(fail): bound port");
+    ADD_FAILURE() << "deadline-retired(fail): bound port";
     co_return port.status();
   }
 
@@ -447,17 +437,14 @@ bycorf::Task<absl::Status> CheckConnectFastFailDeadlineRetired(
     auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 1s);
     if (client.ok() ||
         client.status().code() != absl::StatusCode::kUnavailable) {
-      Check(false,
-            "deadline-retired(fail): refused connect maps to "
-            "kUnavailable");
+      ADD_FAILURE() << "deadline-retired(fail): refused connect maps to "
+                       "kUnavailable";
       co_return absl::OkStatus();
     }
   }
-  Check(ElapsedMs(started) < 2000,
-        "deadline-retired(fail): refused loop stays fast");
+  EXPECT_TRUE(ElapsedMs(started) < 2000)
+      << "deadline-retired(fail): refused loop stays fast";
   (void)co_await bycorf::SleepFor(worker, 1500ms);
-  Check(true,
-        "deadline-retired(fail): no late timeout dispatch after teardown");
   co_return absl::OkStatus();
 }
 
@@ -469,12 +456,12 @@ bycorf::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
   bycorf::TcpListener listener;
   absl::Status bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) {
-    Check(false, "deadline-retired(ok): listener bind");
+    ADD_FAILURE() << "deadline-retired(ok): listener bind";
     co_return bound;
   }
   auto port = BoundPort(listener);
   if (!port.ok()) {
-    Check(false, "deadline-retired(ok): bound port");
+    ADD_FAILURE() << "deadline-retired(ok): bound port";
     co_return port.status();
   }
 
@@ -485,20 +472,19 @@ bycorf::Task<absl::Status> CheckConnectFastSuccessDeadlineRetired(
     // userspace accept is needed for the connect to win instantly.
     auto client = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 1s);
     if (!client.ok()) {
-      Check(false, "deadline-retired(ok): connect succeeds");
+      ADD_FAILURE() << "deadline-retired(ok): connect succeeds";
       co_return client.status();
     }
     client->Close().IgnoreError();
   }
-  Check(ElapsedMs(started) < 2000,
-        "deadline-retired(ok): connect loop stays fast");
+  EXPECT_TRUE(ElapsedMs(started) < 2000)
+      << "deadline-retired(ok): connect loop stays fast";
   (void)co_await bycorf::SleepFor(worker, 1500ms);
-  Check(true, "deadline-retired(ok): no late timeout dispatch after teardown");
 
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
     auto accepted = co_await listener.Accept();
     if (!accepted.ok()) {
-      Check(false, "deadline-retired(ok): drain accepted sockets");
+      ADD_FAILURE() << "deadline-retired(ok): drain accepted sockets";
       break;
     }
     bycorf::TcpStream server(*accepted);
@@ -522,8 +508,8 @@ bycorf::Task<absl::Status> CheckConnectCancellation(bycorf::Worker& worker) {
   before.Cancel();
   auto cancelled = co_await bycorf::ConnectTcpCancellable(worker, "127.0.0.1",
                                                           1, 5s, &before);
-  Check(!cancelled.ok() && absl::IsCancelled(cancelled.status()),
-        "connect: cancel before submission");
+  EXPECT_TRUE(!cancelled.ok() && absl::IsCancelled(cancelled.status()))
+      << "connect: cancel before submission";
 
   // A full, zero-length listen backlog drops subsequent SYNs on loopback.
   // Exercise a real pending connect without relying on an external route or
@@ -531,7 +517,8 @@ bycorf::Task<absl::Status> CheckConnectCancellation(bycorf::Worker& worker) {
   bycorf::TcpListener listener;
   auto bound = listener.Bind(&worker, "127.0.0.1", 0);
   if (!bound.ok()) co_return bound;
-  Check(::listen(listener.NativeFd(), 0) == 0, "connect-cancel: tiny backlog");
+  EXPECT_TRUE(::listen(listener.NativeFd(), 0) == 0)
+      << "connect-cancel: tiny backlog";
   auto port = BoundPort(listener);
   if (!port.ok()) co_return port.status();
   auto filler = co_await bycorf::ConnectTcp(worker, "127.0.0.1", *port, 1s);
@@ -543,58 +530,77 @@ bycorf::Task<absl::Status> CheckConnectCancellation(bycorf::Worker& worker) {
     const auto started = std::chrono::steady_clock::now();
     auto client = co_await bycorf::ConnectTcpCancellable(
         worker, "127.0.0.1", *port, 1s, cancellation.get());
-    Check(!client.ok() && absl::IsCancelled(client.status()),
-          "connect: pending attempt resolves Cancelled");
-    Check(ElapsedMs(started) < 500, "connect: cancellation beats deadline");
+    EXPECT_TRUE(!client.ok() && absl::IsCancelled(client.status()))
+        << "connect: pending attempt resolves Cancelled";
+    EXPECT_TRUE(ElapsedMs(started) < 500)
+        << "connect: cancellation beats deadline";
     if (client.ok()) client->Close().IgnoreError();
   }
   (void)co_await bycorf::SleepFor(worker, 1100ms);
-  Check(true, "connect: cancelled frames have no late deadline completion");
   filler->Close().IgnoreError();
   listener.Close().IgnoreError();
   co_return absl::OkStatus();
 }
 
-bycorf::Task<absl::Status> RunAllChecks(bycorf::Worker& worker) {
-  co_await CheckTimerFire(worker);
-  co_await CheckTimerCancelOnWorker(worker);
-  co_await CheckTimerCancelForeignThread(worker);
-  co_await CheckTimerCancelAfterFire(worker);
-  co_await CheckTimerCancelBeforeAwait(worker);
-  co_await CheckConnectSuccess(worker);
-  const auto cancellation = co_await CheckConnectCancellation(worker);
-  Check(cancellation.ok(), "connect: cancellation scenario completed");
-  co_await CheckConnectRefused(worker);
-  co_await CheckConnectTimeout(worker);
-  co_await CheckConnectRejectsHostname(worker);
-  co_await CheckConnectFastFailDeadlineRetired(worker);
-  co_await CheckConnectFastSuccessDeadlineRetired(worker);
-  spdlog::info("checks complete: {} failure(s)", g_failures);
-  worker.RequestStop();
-  co_return absl::OkStatus();
+TEST(RuntimeStartup, StopBeforeWorkerInit) { CheckStopDuringStartup(true); }
+TEST(RuntimeStartup, StopBeforeWorkerRun) { CheckStopDuringStartup(false); }
+TEST(TcpServiceStop, BeforeRun) { CheckTcpServiceStop(true); }
+TEST(TcpServiceStop, AfterListenerStartup) { CheckTcpServiceStop(false); }
+
+TEST(Timer, Fire) {
+  bycorf::test::RunOnWorker(CheckTimerFire, {.recv_buffer_count_ = 64});
+}
+
+TEST(Timer, CancelOnWorker) {
+  bycorf::test::RunOnWorker(CheckTimerCancelOnWorker,
+                            {.recv_buffer_count_ = 64});
+}
+
+TEST(Timer, CancelForeignThread) {
+  bycorf::test::RunOnWorker(CheckTimerCancelForeignThread,
+                            {.recv_buffer_count_ = 64});
+}
+
+TEST(Timer, CancelAfterFire) {
+  bycorf::test::RunOnWorker(CheckTimerCancelAfterFire,
+                            {.recv_buffer_count_ = 64});
+}
+
+TEST(Timer, CancelBeforeAwait) {
+  bycorf::test::RunOnWorker(CheckTimerCancelBeforeAwait,
+                            {.recv_buffer_count_ = 64});
+}
+
+TEST(Connect, Success) {
+  bycorf::test::RunOnWorker(CheckConnectSuccess, {.recv_buffer_count_ = 64});
+}
+
+TEST(Connect, Cancellation) {
+  bycorf::test::RunOnWorker(CheckConnectCancellation,
+                            {.recv_buffer_count_ = 64});
+}
+
+TEST(Connect, Refused) {
+  bycorf::test::RunOnWorker(CheckConnectRefused, {.recv_buffer_count_ = 64});
+}
+
+TEST(Connect, Timeout) {
+  bycorf::test::RunOnWorker(CheckConnectTimeout, {.recv_buffer_count_ = 64});
+}
+
+TEST(Connect, RejectsHostname) {
+  bycorf::test::RunOnWorker(CheckConnectRejectsHostname,
+                            {.recv_buffer_count_ = 64});
+}
+
+TEST(Connect, FastFailDeadlineRetired) {
+  bycorf::test::RunOnWorker(CheckConnectFastFailDeadlineRetired,
+                            {.recv_buffer_count_ = 64});
+}
+
+TEST(Connect, FastSuccessDeadlineRetired) {
+  bycorf::test::RunOnWorker(CheckConnectFastSuccessDeadlineRetired,
+                            {.recv_buffer_count_ = 64});
 }
 
 }  // namespace
-
-int main() {
-  CheckStopDuringStartup(/*before_init=*/true);
-  CheckStopDuringStartup(/*before_init=*/false);
-  CheckTcpServiceStop(/*before_run=*/true);
-  CheckTcpServiceStop(/*before_run=*/false);
-  bycorf::Runtime runtime;
-  runtime.Start(
-      1,
-      [](unsigned, bycorf::Worker& worker) -> int {
-        bycorf::WorkerOptions options;
-        options.recv_buffer_count_ = 64;
-        if (!worker.Init(options).ok()) {
-          return 1;
-        }
-        worker.Spawn(RunAllChecks(worker));
-        worker.Run();
-        return g_failures == 0 ? 0 : 1;
-      },
-      /*pin_workers=*/false);
-  runtime.WaitUntilStopped();
-  return runtime.exit_code();
-}

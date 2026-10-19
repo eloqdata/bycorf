@@ -29,7 +29,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "bycorf/io/storage.h"
 #include "bycorf/net/tcp_stream.h"
-#include "bycorf/runtime/runtime.h"
+#include "runtime_test.h"
 
 namespace {
 
@@ -251,34 +251,15 @@ absl::Status CheckCloseDoesNotShrink(bycorf::Worker& worker) {
       "close discards queued buffers without shrinking storage");
 }
 
-bycorf::Task<absl::Status> RunChecks(bycorf::Worker& worker, bool& passed) {
-  auto status = co_await CheckReads(worker);
-  if (status.ok()) status = CheckCloseDoesNotShrink(worker);
-  passed = status.ok();
-  if (!status.ok()) std::cerr << status << '\n';
-  worker.RequestStop();
-  co_return status;
+TEST(TcpBufferedRead, QueuedAndLiveReads) {
+  bycorf::test::RunOnWorker(CheckReads);
+}
+
+TEST(TcpBufferedRead, CloseDoesNotShrink) {
+  bycorf::test::RunOnWorker(
+      [](bycorf::Worker& worker) -> bycorf::Task<absl::Status> {
+        co_return CheckCloseDoesNotShrink(worker);
+      });
 }
 
 }  // namespace
-
-int main() {
-  bycorf::Runtime runtime;
-  runtime.Start(
-      1,
-      [](unsigned, bycorf::Worker& worker) {
-        auto status = worker.Init();
-        if (!status.ok()) {
-          std::cerr << status << '\n';
-          return 1;
-        }
-        bool passed = false;
-        worker.Spawn(RunChecks(worker, passed));
-        worker.Run();
-        worker.Shutdown();
-        return passed ? 0 : 1;
-      },
-      false);
-  runtime.WaitUntilStopped();
-  return runtime.exit_code();
-}

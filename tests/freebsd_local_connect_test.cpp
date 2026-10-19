@@ -3,6 +3,7 @@
 
 // Real BSD sockets and packet input, without DPDK, TAP, or kernel TCP.
 #include <arpa/inet.h>
+#include <gtest/gtest.h>
 #include <sys/random.h>
 #include <time.h>
 
@@ -69,9 +70,8 @@ void Exchange(struct socket* source, struct socket* target) {
             actual == expected,
         "segmented binary local payload");
 }
-}  // namespace
 
-int main() {
+void CheckLocalConnect() {
   bycorf_bsd_host host{
       [](size_t n, size_t alignment) -> void* {
         void* p = nullptr;
@@ -167,3 +167,15 @@ int main() {
       "PASS BSD local connect, binary duplex transfer, EOF, refusal and "
       "physical source validation");
 }
+
+TEST(FreeBsdLocalConnectDeathTest, DuplexTransferRejectionEofAndRefusal) {
+  // The native stack cannot be reinitialized in-process. Its C callbacks use
+  // fail-fast checks; the exit assertion reports those failures for this case.
+  ASSERT_EXIT(
+      {
+        CheckLocalConnect();
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+}  // namespace

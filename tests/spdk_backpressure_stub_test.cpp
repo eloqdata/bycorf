@@ -18,6 +18,7 @@
 // device discovery, environment initialization and NVMe commands are replaced;
 // the pending FIFO, polling and callback ownership stay real.
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <spdk/env.h>
 #include <spdk/nvme.h>
 #include <sys/eventfd.h>
@@ -38,6 +39,8 @@
 #include "bycorf/runtime/worker.h"
 
 namespace {
+// Stub C callbacks cannot return GoogleTest fatal assertions or unwind.
+// Fail the isolated child immediately; ASSERT_EXIT attributes it to its case.
 #define CHECK(condition)                                                \
   do {                                                                  \
     if (!(condition)) {                                                 \
@@ -607,9 +610,33 @@ void CheckSyntheticShutdown(bycorf::Worker& worker) {
   }
   std::cout << "PASS shutdown delivers synthetic open/close/no-VWC flush\n";
 }
-}  // namespace
+void CheckShutdown(bycorf::Worker& worker, std::span<std::byte> buffer) {
+  std::vector<Completion> shutdown(5000);
+  for (std::size_t i = 0; i < shutdown.size(); ++i) {
+    CHECK((i % 2 == 0 ? worker.SubmitRead({0}, buffer, 0, &shutdown[i])
+                      : worker.SubmitWrite({0}, buffer, 0, &shutdown[i]))
+              .ok());
+    CHECK(shutdown[i].calls == 0);
+  }
+  Completion other;
+  CHECK(worker.SubmitRead({2}, std::span(buffer).first(512), 0, &other).ok());
+  CHECK(other.calls == 0);
+  qpairs[0]->completion_tokens = shutdown.size();
+  qpairs[1]->completion_tokens = 1;
+  worker.Shutdown();
+  for (const auto& tag : shutdown) CHECK(tag.calls == 1 && tag.result == 4096);
+  CHECK(other.calls == 1 && other.result == 512);
+  CHECK(qpairs.empty());
+  std::cout << "PASS shutdown drains in-flight and deferred I/O on the owning "
+               "worker\n";
+}
 
-int main() {
+void CheckSyntheticCompletions(bycorf::Worker& worker, std::span<std::byte>) {
+  worker.Shutdown();
+  CheckSyntheticShutdown(worker);
+}
+
+void RunCase(void (*check)(bycorf::Worker&, std::span<std::byte>)) {
   CHECK(bycorf::ConfigureIoBackends({.spdk_storage = true}).ok());
   for (auto path : paths) CHECK(bycorf::ProbeSpdkStorage(path).ok());
   CHECK(environment_calls == 1);
@@ -635,32 +662,94 @@ int main() {
   // Stub commands do not DMA: ordinary memory suffices, with no hugepages,
   // device binding, root privileges or PCI discovery required.
   std::array<std::byte, 4096> buffer{};
-  CheckQueues(worker, buffer);
-  CheckErrors(worker, buffer);
-  CheckLargeBursts(worker, buffer);
-  CheckLateSubmissionFifo(worker, buffer);
-  CheckCompletionOwnership(worker, buffer);
-  CheckRetryErrorReentry(worker, buffer);
-  CheckChannelReopen(worker, buffer);
-
-  std::vector<Completion> shutdown(5000);
-  for (std::size_t i = 0; i < shutdown.size(); ++i) {
-    CHECK((i % 2 == 0 ? worker.SubmitRead({0}, buffer, 0, &shutdown[i])
-                      : worker.SubmitWrite({0}, buffer, 0, &shutdown[i]))
-              .ok());
-    CHECK(shutdown[i].calls == 0);
-  }
-  Completion other;
-  CHECK(worker.SubmitRead({2}, std::span(buffer).first(512), 0, &other).ok());
-  CHECK(other.calls == 0);
-  qpairs[0]->completion_tokens = shutdown.size();
-  qpairs[1]->completion_tokens = 1;
+  check(worker, buffer);
   worker.Shutdown();
-  for (const auto& tag : shutdown) CHECK(tag.calls == 1 && tag.result == 4096);
-  CHECK(other.calls == 1 && other.result == 512);
   CHECK(qpairs.empty());
-  std::cout << "PASS shutdown drains in-flight and deferred I/O on the owning "
-               "worker\n";
-  CheckSyntheticShutdown(worker);
   close(wake_fd);
 }
+
+// SPDK metadata and the allocator selection are process-global. Each child
+// starts with fresh stubs and qpairs even when the binary runs every case or
+// repeats them in shuffled order.
+TEST(SpdkBackpressureDeathTest, Queues) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckQueues);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, Errors) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckErrors);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, LargeBursts) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckLargeBursts);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, LateSubmissionFifo) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckLateSubmissionFifo);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, CompletionOwnership) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckCompletionOwnership);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, RetryErrorReentry) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckRetryErrorReentry);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, ChannelReopen) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckChannelReopen);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, Shutdown) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckShutdown);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, SyntheticCompletions) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckSyntheticCompletions);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+}  // namespace

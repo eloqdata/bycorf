@@ -71,6 +71,7 @@ file(GLOB_RECURSE BYCORF_FORMAT_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h
   ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.h
 )
 list(FILTER BYCORF_FORMAT_FILES EXCLUDE REGEX "/runtime/concurrentqueue\\.h$")
 if (BYCORF_CLANG_FORMAT)
@@ -406,35 +407,9 @@ if (BYCORF_BUILD_EXAMPLES)
   target_link_libraries(rpc_bench PRIVATE bycorf::rpc)
 endif()
 
+# Command-line probes keep their explicit environment/argument contracts. They
+# are separate from automatic software regressions and never discovered by GTest.
 if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
-  add_executable(bycorf_received_buffer_queue_check tests/received_buffer_queue_check.cpp)
-  target_link_libraries(bycorf_received_buffer_queue_check PRIVATE bycorf::core)
-
-  add_executable(bycorf_task_transfer_check tests/task_transfer_check.cpp)
-  target_include_directories(bycorf_task_transfer_check PRIVATE include)
-  # Exercise the public compile policy with this build's actual optimization
-  # level. Avoid linking Worker because this isolated check supplies its own
-  # scheduling hooks to observe Task ownership and background classification.
-  target_compile_options(bycorf_task_transfer_check PRIVATE
-    $<TARGET_PROPERTY:bycorf,INTERFACE_COMPILE_OPTIONS>)
-
-  add_executable(bycorf_connect_timer_check
-    example/connect_timer_check.cpp
-  )
-  target_link_libraries(bycorf_connect_timer_check PRIVATE bycorf::core)
-
-  add_executable(bycorf_connection_storage_check example/connection_storage_check.cpp)
-  target_link_libraries(bycorf_connection_storage_check PRIVATE bycorf::core)
-
-  add_executable(bycorf_tcp_buffered_read_check tests/tcp_buffered_read_check.cpp)
-  target_link_libraries(bycorf_tcp_buffered_read_check PRIVATE bycorf::core)
-
-  add_executable(bycorf_io_uring_backpressure_check tests/io_uring_backpressure_check.cpp)
-  target_link_libraries(bycorf_io_uring_backpressure_check PRIVATE bycorf::core)
-
-  add_executable(bycorf_backend_selection_check example/backend_selection_check.cpp)
-  target_link_libraries(bycorf_backend_selection_check PRIVATE bycorf::core)
-
   add_executable(bycorf_backend_startup_check example/backend_startup_check.cpp)
   target_link_libraries(bycorf_backend_startup_check PRIVATE bycorf::core)
 
@@ -452,19 +427,74 @@ if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
 endif()
 
 if (BYCORF_BUILD_TESTS)
+  # Reuse a parent's GoogleTest targets when available. The pinned fallback
+  # matches Lavik and is fetched only for test builds, never for library users.
+  if (NOT TARGET GTest::gtest_main)
+    include(FetchContent)
+    FetchContent_Declare(googletest
+      GIT_REPOSITORY https://github.com/google/googletest.git
+      GIT_TAG 52eb8108c5bdec04579160ae17225d66034bd723 # v1.17.0
+    )
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+  endif()
+  include(GoogleTest)
+  enable_testing()
+
+  function(bycorf_discover_tests target timeout labels)
+    gtest_discover_tests(${target}
+      TEST_PREFIX "bycorf_" NO_PRETTY_TYPES NO_PRETTY_VALUES
+      PROPERTIES TIMEOUT ${timeout} ${ARGN})
+    # GoogleTest's discovery helper flattens list-valued properties. Apply
+    # labels after discovery, retaining every label and keeping the generated
+    # CTest metadata self-contained for copied CI build bundles.
+    set(labels_file "${CMAKE_CURRENT_BINARY_DIR}/${target}_labels.cmake")
+    file(WRITE "${labels_file}"
+      "if(DEFINED ${target}_TESTS)\n"
+      "  set_tests_properties(\${${target}_TESTS} PROPERTIES LABELS \"${labels}\")\n"
+      "endif()\n")
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${labels_file}")
+  endfunction()
+
+  add_executable(bycorf_unit_tests
+    tests/received_buffer_queue_test.cpp
+    tests/backend_selection_test.cpp)
+  target_link_libraries(bycorf_unit_tests PRIVATE bycorf::core GTest::gtest_main)
+  bycorf_discover_tests(bycorf_unit_tests 30 "runtime;unit")
+
+  add_executable(bycorf_task_tests tests/task_transfer_test.cpp)
+  target_link_libraries(bycorf_task_tests PRIVATE GTest::gtest)
+  target_include_directories(bycorf_task_tests PRIVATE include)
+  # Use this build's real optimization level and public coroutine compile
+  # policy. The test supplies scheduler hooks, so it must not link Worker.
+  target_compile_options(bycorf_task_tests PRIVATE
+    $<TARGET_PROPERTY:bycorf,INTERFACE_COMPILE_OPTIONS>)
+  bycorf_discover_tests(bycorf_task_tests 30 "runtime;task")
+
+  add_executable(bycorf_runtime_tests
+    tests/connect_timer_test.cpp
+    tests/connection_storage_test.cpp
+    tests/tcp_buffered_read_test.cpp
+    tests/io_uring_backpressure_test.cpp)
+  target_link_libraries(bycorf_runtime_tests PRIVATE bycorf::core GTest::gtest_main)
+  bycorf_discover_tests(bycorf_runtime_tests 90 "runtime;net;io_uring")
+
   if (BYCORF_KERNEL_BYPASS)
-    add_executable(bycorf_dpdk_adaptive_check tests/dpdk_adaptive_check.cpp)
-    target_link_libraries(bycorf_dpdk_adaptive_check PRIVATE bycorf::core)
-    target_include_directories(bycorf_dpdk_adaptive_check PRIVATE
+    add_executable(bycorf_dpdk_adaptive_tests tests/dpdk_adaptive_test.cpp)
+    target_link_libraries(bycorf_dpdk_adaptive_tests PRIVATE bycorf::core GTest::gtest_main)
+    target_include_directories(bycorf_dpdk_adaptive_tests PRIVATE
       "${BYCORF_DPDK_PREFIX}/include")
-    target_compile_options(bycorf_dpdk_adaptive_check PRIVATE
+    target_compile_options(bycorf_dpdk_adaptive_tests PRIVATE
       ${BYCORF_DPDK_COMPILE_FLAGS})
     foreach(symbol IN ITEMS rte_eth_dev_configure rte_eth_dev_info_get
         rte_eth_dev_rx_intr_ctl_q_get_fd rte_eth_dev_rx_intr_enable
         rte_eth_dev_rx_intr_disable)
-      target_link_options(bycorf_dpdk_adaptive_check PRIVATE
+      target_link_options(bycorf_dpdk_adaptive_tests PRIVATE
         "LINKER:--wrap=${symbol}")
     endforeach()
+    bycorf_discover_tests(bycorf_dpdk_adaptive_tests 30 "runtime;net;dpdk;stub"
+      RUN_SERIAL TRUE)
 
     # Explicit hardware paths/allowlists are required; do not run in ctest.
     add_executable(bycorf_spdk_backpressure_check tests/spdk_backpressure_check.cpp)
@@ -473,10 +503,10 @@ if (BYCORF_BUILD_TESTS)
     # Run the real backend against link-time NVMe stubs in hosted CI. Keep
     # device emulation out of the production request path and use SPDK's own
     # headers so API changes also type-check the stub signatures.
-    add_executable(bycorf_spdk_backpressure_stub_check
-      tests/spdk_backpressure_stub_check.cpp)
-    target_link_libraries(bycorf_spdk_backpressure_stub_check PRIVATE bycorf::core)
-    target_include_directories(bycorf_spdk_backpressure_stub_check PRIVATE
+    add_executable(bycorf_spdk_backpressure_tests
+      tests/spdk_backpressure_stub_test.cpp)
+    target_link_libraries(bycorf_spdk_backpressure_tests PRIVATE bycorf::core GTest::gtest_main)
+    target_include_directories(bycorf_spdk_backpressure_tests PRIVATE
       "${BYCORF_SPDK_SOURCE_DIR}/include")
     foreach(symbol IN ITEMS
         spdk_env_init spdk_nvme_probe spdk_nvme_ctrlr_get_ns
@@ -485,46 +515,14 @@ if (BYCORF_BUILD_TESTS)
         spdk_nvme_ctrlr_free_io_qpair spdk_nvme_qpair_get_num_outstanding_reqs
         spdk_nvme_qpair_process_completions spdk_nvme_ns_cmd_read
         spdk_nvme_ns_cmd_write spdk_nvme_ns_cmd_flush)
-      target_link_options(bycorf_spdk_backpressure_stub_check PRIVATE
+      target_link_options(bycorf_spdk_backpressure_tests PRIVATE
         "LINKER:--wrap=${symbol}")
     endforeach()
+    bycorf_discover_tests(bycorf_spdk_backpressure_tests 30 "runtime;storage;spdk;stub")
+
+    add_executable(bycorf_freebsd_local_connect_tests
+      tests/freebsd_local_connect_test.cpp)
+    target_link_libraries(bycorf_freebsd_local_connect_tests PRIVATE bycorf_freebsd GTest::gtest_main)
+    bycorf_discover_tests(bycorf_freebsd_local_connect_tests 15 "runtime;net;freebsd")
   endif()
-  enable_testing()
-  add_test(NAME bycorf_received_buffer_queue_check COMMAND bycorf_received_buffer_queue_check)
-  set_tests_properties(bycorf_received_buffer_queue_check PROPERTIES
-    TIMEOUT 30 LABELS "runtime;net")
-  add_test(NAME bycorf_task_transfer_check COMMAND bycorf_task_transfer_check)
-  set_tests_properties(bycorf_task_transfer_check PROPERTIES
-    TIMEOUT 30 LABELS "runtime;task")
-  if (BYCORF_KERNEL_BYPASS)
-    foreach(scenario IN ITEMS configure descriptor enable disable poll
-        runtime-enable runtime-disable mlx5-empty)
-      add_test(NAME bycorf_dpdk_adaptive_${scenario}
-        COMMAND bycorf_dpdk_adaptive_check ${scenario})
-      set_tests_properties(bycorf_dpdk_adaptive_${scenario} PROPERTIES
-        TIMEOUT 30 LABELS "runtime;net;dpdk;stub" RUN_SERIAL TRUE)
-    endforeach()
-    add_test(NAME bycorf_spdk_backpressure_stub_check
-      COMMAND bycorf_spdk_backpressure_stub_check)
-    set_tests_properties(bycorf_spdk_backpressure_stub_check PROPERTIES
-      TIMEOUT 30 LABELS "runtime;storage;spdk;stub")
-    add_executable(bycorf_freebsd_local_connect_check
-      tests/freebsd_local_connect_check.cpp)
-    target_link_libraries(bycorf_freebsd_local_connect_check PRIVATE bycorf_freebsd)
-    add_test(NAME bycorf_freebsd_local_connect_check
-      COMMAND bycorf_freebsd_local_connect_check)
-    set_tests_properties(bycorf_freebsd_local_connect_check PROPERTIES
-      TIMEOUT 15 LABELS "runtime;net;freebsd")
-  endif()
-  add_test(NAME bycorf_connect_timer_check COMMAND bycorf_connect_timer_check)
-  add_test(NAME bycorf_connection_storage_check COMMAND bycorf_connection_storage_check)
-  add_test(NAME bycorf_tcp_buffered_read_check COMMAND bycorf_tcp_buffered_read_check)
-  add_test(NAME bycorf_io_uring_backpressure_check COMMAND bycorf_io_uring_backpressure_check)
-  add_test(NAME bycorf_backend_selection_check COMMAND bycorf_backend_selection_check)
-  set_tests_properties(bycorf_connection_storage_check bycorf_backend_selection_check
-    bycorf_tcp_buffered_read_check bycorf_io_uring_backpressure_check
-    PROPERTIES TIMEOUT 90 LABELS "runtime;net;io_uring")
-  set_tests_properties(bycorf_connect_timer_check PROPERTIES
-    TIMEOUT 90 LABELS "runtime;net;io_uring"
-  )
 endif()
