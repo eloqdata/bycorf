@@ -18,14 +18,17 @@
 #include <deque>
 #include <iostream>
 #include <random>
+#include <source_location>
 #include <utility>
 
 #include "bycorf/net/received_buffer_queue.h"
 
 namespace {
-void Check(bool ok) {
+void Check(bool ok,
+           std::source_location location = std::source_location::current()) {
   if (!ok) {
-    std::cerr << "received buffer queue check failed\n";
+    std::cerr << "received buffer queue check failed at line "
+              << location.line() << "\n";
     std::abort();
   }
 }
@@ -39,11 +42,62 @@ void Compare(const bycorf::ReceivedBufferQueue& queue,
   for (std::uint32_t i = 0; i < queue.size(); ++i)
     Check(Equal(queue[i], reference[i]));
 }
+void CheckInlineAndHeapMoves() {
+  for (bool source_heap : {false, true}) {
+    for (bool destination_heap : {false, true}) {
+      bycorf::ReceivedBufferQueue destination;
+      for (unsigned i = 0; i < (destination_heap ? 4u : 1u); ++i)
+        destination.push_back({.buffer_id_ = 99});
+      std::deque<bycorf::ReceivedBuffer> expected;
+      {
+        bycorf::ReceivedBufferQueue source;
+        for (unsigned i = 0; i < (source_heap ? 4u : 1u); ++i) {
+          bycorf::ReceivedBuffer value{
+              .buffer_id_ = static_cast<std::uint16_t>(i),
+              .size_ = 100 + i,
+              .offset_ = i};
+          source.push_back(value);
+          expected.push_back(value);
+        }
+        destination = std::move(source);
+        Check(source.empty() && source.capacity() == 1);
+        // Reusing and destroying the source must not alias an inline element.
+        source.push_back({.buffer_id_ = 77, .size_ = 7});
+        Compare(destination, expected);
+      }
+      Compare(destination, expected);
+      bycorf::ReceivedBufferQueue constructed(std::move(destination));
+      Check(destination.empty() && destination.capacity() == 1);
+      destination.push_back({.buffer_id_ = 88});
+      Compare(constructed, expected);
+      auto& same = constructed;
+      constructed = std::move(same);
+      Compare(constructed, expected);
+    }
+  }
+  bycorf::ReceivedBufferQueue small;
+  for (unsigned cycle = 0; cycle < 100; ++cycle) {
+    small.push_back({.buffer_id_ = 1});
+    Check(small.capacity() == 1);
+    small.push_back({.buffer_id_ = 2});
+    Check(small.capacity() == 8);
+    small.pop_front();
+    Check(small.front().buffer_id_ == 2 && small.capacity() == 8);
+    small.pop_front();
+    Check(small.empty() && small.capacity() == 8);
+    for (unsigned i = 0; i < 6; ++i) {
+      small.push_back({.buffer_id_ = 3});
+      small.pop_front();
+    }
+    Check(small.empty() && small.capacity() == 1);
+  }
+}
 }  // namespace
 
 int main() {
+  CheckInlineAndHeapMoves();
   bycorf::ReceivedBufferQueue queue;
-  Check(queue.empty() && queue.capacity() == 0);
+  Check(queue.empty() && queue.capacity() == 1);
   std::deque<bycorf::ReceivedBuffer> reference;
   std::mt19937 random(20261019);
   // Alternate sustained growth and draining, with partial front consumption.
@@ -89,11 +143,11 @@ int main() {
   }
   Check(queue.capacity() < peak && queue.capacity() >= queue.size());
   auto moved = std::move(queue);
-  Check(queue.empty() && queue.capacity() == 0);
+  Check(queue.empty() && queue.capacity() == 1);
   Compare(moved, reference);
   queue.push_back({.buffer_id_ = 99});
   queue = std::move(moved);
-  Check(moved.empty() && moved.capacity() == 0);
+  Check(moved.empty() && moved.capacity() == 1);
   Compare(queue, reference);
   queue.clear();
   Check(queue.empty());
@@ -102,7 +156,7 @@ int main() {
     Check(queue.front().size_ == 32);
     queue.pop_front();
   }
-  Check(queue.capacity() == 8);
+  Check(queue.capacity() == 1);
   std::cout << "PASS FIFO, wrap, growth, delayed shrink, partial offsets, "
                "move, clear\n";
 }
