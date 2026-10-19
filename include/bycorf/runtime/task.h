@@ -66,10 +66,12 @@ class Task {
     // Task has exactly one successful co_return and unhandled exceptions
     // terminate. Keep the result directly in the promise so return_value does
     // not pay optional::emplace's reset/engagement branch on every completion.
+    // The flag is still required for destroying a frame before it completes.
     union {
       char empty_;
       T value_;
     };
+    bool value_constructed_ = false;
     std::coroutine_handle<> continuation_{};
     void* completion_context_ = nullptr;
     completion_fn completion_ = nullptr;
@@ -77,9 +79,6 @@ class Task {
     // or kNotDetached while the task is owned by a Task object/awaiter.
     static constexpr std::uint32_t kNotDetached = 0xffffffffu;
     std::uint32_t detached_index_ = kNotDetached;
-    // Keep the flag beside the index to avoid a separate alignment gap. It is
-    // still required when a frame is destroyed before constructing its result.
-    bool value_constructed_ = false;
 
     static void* operator new(std::size_t size) {
       return detail::AllocateCoroutineFrame(size);

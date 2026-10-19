@@ -96,9 +96,9 @@ class SizeIoAwaitable final : public OneShotIoAwaitable {
  private:
   Worker* worker_ = nullptr;
   FixedFile file_{};
-  Operation operation_ = Operation::kRead;
   FixedBuffer buffer_{};
   std::uint64_t offset_ = 0;
+  Operation operation_ = Operation::kRead;
 };
 
 class OpenFixedFileAwaitable final : public OneShotIoAwaitable {
@@ -111,10 +111,9 @@ class OpenFixedFileAwaitable final : public OneShotIoAwaitable {
   absl::Status await_resume();
 
  private:
-  // A leading int can occupy OneShotIoAwaitable's tail padding.
-  int flags_ = 0;
   Worker* worker_ = nullptr;
   std::string path_;
+  int flags_ = 0;
   mode_t mode_ = 0;
   FixedFile file_{};
 };

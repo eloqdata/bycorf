@@ -68,8 +68,15 @@ struct ReceivedBuffer {
 struct Connection {
   using PeerDisconnectCallback = void (*)(void*) noexcept;
 
-  // Group owner-local read readiness and completion bookkeeping: these fields
-  // are checked together when a reader suspends and a receive completes.
+  // Keep read-suspension writes together: read_waiter_ and read_inflight_
+  // moved from offsets 176/51 to 8/52 in the audited GCC 13 x86-64 layout.
+  // With 64-byte-aligned allocations, these writes touch one cache line
+  // instead of two. This alignment depends on the allocator, not alignof;
+  // recheck actual addresses and generated stores when changing the layout.
+  // Normal receive completion still writes the deque tail on another line,
+  // so this does not establish fewer lines for the whole receive/GET path.
+  // Smaller sizeof or fewer touched lines alone does not establish a speedup:
+  // require correctness and paired throughput/tail-latency regression tests.
   Worker* worker_ = nullptr;
   std::coroutine_handle<> read_waiter_{};
   absl::Status last_error_ = absl::OkStatus();
