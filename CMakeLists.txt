@@ -408,7 +408,7 @@ endif()
 
 if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
   add_executable(bycorf_received_buffer_queue_check tests/received_buffer_queue_check.cpp)
-  target_include_directories(bycorf_received_buffer_queue_check PRIVATE include)
+  target_link_libraries(bycorf_received_buffer_queue_check PRIVATE bycorf::core)
 
   add_executable(bycorf_task_transfer_check tests/task_transfer_check.cpp)
   target_include_directories(bycorf_task_transfer_check PRIVATE include)

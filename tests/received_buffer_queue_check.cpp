@@ -21,9 +21,11 @@
 #include <source_location>
 #include <utility>
 
-#include "bycorf/net/received_buffer_queue.h"
+#include "bycorf/net/connection.h"
 
 namespace {
+using ReceiveQueue = decltype(bycorf::Connection::received_buffers_);
+
 void Check(bool ok,
            std::source_location location = std::source_location::current()) {
   if (!ok) {
@@ -36,7 +38,7 @@ bool Equal(const bycorf::ReceivedBuffer& a, const bycorf::ReceivedBuffer& b) {
   return a.buffer_id_ == b.buffer_id_ && a.size_ == b.size_ &&
          a.offset_ == b.offset_;
 }
-void Compare(const bycorf::ReceivedBufferQueue& queue,
+void Compare(const ReceiveQueue& queue,
              const std::deque<bycorf::ReceivedBuffer>& reference) {
   Check(queue.size() == reference.size());
   for (std::uint32_t i = 0; i < queue.size(); ++i)
@@ -45,12 +47,12 @@ void Compare(const bycorf::ReceivedBufferQueue& queue,
 void CheckInlineAndHeapMoves() {
   for (bool source_heap : {false, true}) {
     for (bool destination_heap : {false, true}) {
-      bycorf::ReceivedBufferQueue destination;
+      ReceiveQueue destination;
       for (unsigned i = 0; i < (destination_heap ? 4u : 1u); ++i)
         destination.push_back({.buffer_id_ = 99});
       std::deque<bycorf::ReceivedBuffer> expected;
       {
-        bycorf::ReceivedBufferQueue source;
+        ReceiveQueue source;
         for (unsigned i = 0; i < (source_heap ? 4u : 1u); ++i) {
           bycorf::ReceivedBuffer value{
               .buffer_id_ = static_cast<std::uint16_t>(i),
@@ -66,7 +68,7 @@ void CheckInlineAndHeapMoves() {
         Compare(destination, expected);
       }
       Compare(destination, expected);
-      bycorf::ReceivedBufferQueue constructed(std::move(destination));
+      ReceiveQueue constructed(std::move(destination));
       Check(destination.empty() && destination.capacity() == 1);
       destination.push_back({.buffer_id_ = 88});
       Compare(constructed, expected);
@@ -75,7 +77,7 @@ void CheckInlineAndHeapMoves() {
       Compare(constructed, expected);
     }
   }
-  bycorf::ReceivedBufferQueue small;
+  ReceiveQueue small;
   for (unsigned cycle = 0; cycle < 100; ++cycle) {
     small.push_back({.buffer_id_ = 1});
     Check(small.capacity() == 1);
@@ -236,7 +238,7 @@ int main() {
   CheckGenericTypes<16>();
   CheckGenericTypes<32>();
   CheckInlineAndHeapMoves();
-  bycorf::ReceivedBufferQueue queue;
+  ReceiveQueue queue;
   Check(queue.empty() && queue.capacity() == 1);
   std::deque<bycorf::ReceivedBuffer> reference;
   std::mt19937 random(20261019);

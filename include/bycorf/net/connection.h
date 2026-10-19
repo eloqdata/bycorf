@@ -26,7 +26,7 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/status/statusor.h"
-#include "bycorf/net/received_buffer_queue.h"
+#include "bycorf/base/inline_ring_queue.h"
 
 namespace bycorf {
 
@@ -57,6 +57,12 @@ struct RegisteredFile {
   int fd_ = -1;
   std::uint32_t fixed_index_ = 0;
   bool is_fixed_ = false;
+};
+
+struct ReceivedBuffer {
+  std::uint16_t buffer_id_ = 0;
+  std::uint32_t size_ = 0;
+  std::uint32_t offset_ = 0;
 };
 
 struct Connection {
@@ -103,7 +109,15 @@ struct Connection {
   // reclaimed memory. Borrow and release run on the owning worker thread (or
   // before the first await that could observe retirement).
   std::uint32_t storage_borrows_ = 0;
-  ReceivedBufferQueue received_buffers_;
+  // Owner-worker FIFO of receive descriptors, not the network bytes themselves.
+  // Callers own recycling backend buffers, including before clear(). References
+  // must not survive push/pop or moving the queue.
+  // The inline descriptor and mutable counters occupy the first 32 bytes. In
+  // the audited x86 layout the queue starts at Connection+96, so these fit one
+  // cache line when the Connection is 64-byte aligned. The heap owner shares
+  // storage with the inline descriptor. Recheck allocator addresses and
+  // throughput/tails after layout changes.
+  InlineRingQueue<ReceivedBuffer, 1> received_buffers_;
 
   std::uint64_t id_ = 0;
   std::uint64_t generation_ = 0;
