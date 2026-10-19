@@ -153,6 +153,25 @@ void CheckGenericQueue() {
       compare(constructed, expected);
     }
   }
+  // Empty queues may still own heap storage after clear(). Moving them must
+  // release the destination's old array and leave both queues reusable.
+  for (bool source_heap : {false, true}) {
+    for (bool destination_heap : {false, true}) {
+      Queue source, destination;
+      if (source_heap)
+        for (unsigned i = 0; i <= N; ++i) source.push_back(T(i));
+      if (destination_heap)
+        for (unsigned i = 0; i <= N; ++i) destination.push_back(T(i));
+      const auto capacity = source.capacity();
+      source.clear();
+      destination = std::move(source);
+      Check(destination.empty() && destination.capacity() == capacity);
+      Check(source.empty() && source.capacity() == N);
+      source.push_back(T(7));
+      destination.push_back(T(8));
+      Check(source.front() == T(7) && destination.front() == T(8));
+    }
+  }
   Queue queue;
   std::deque<T> expected;
   std::mt19937 random(20261019 + N);

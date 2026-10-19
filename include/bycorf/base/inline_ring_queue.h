@@ -47,7 +47,7 @@ class InlineRingQueue {
   // inline slots before their first values are constructed.
   InlineRingQueue() noexcept {}
   ~InlineRingQueue() {
-    if (capacity_ > kInlineCapacity) std::destroy_at(&storage_.data_);
+    if (capacity_ > kInlineCapacity) delete[] storage_.data_;
   }
   InlineRingQueue(const InlineRingQueue&) = delete;
   InlineRingQueue& operator=(const InlineRingQueue&) = delete;
@@ -60,18 +60,16 @@ class InlineRingQueue {
         // Inline elements belong to the queue object and must be copied before
         // the moved-from queue can be reused or destroyed.
         if (capacity_ > kInlineCapacity) {
-          std::destroy_at(&storage_.data_);
+          delete[] storage_.data_;
           std::construct_at(&storage_.inline_);
         }
         other.CopyTo(storage_.inline_.slots_);
         head_ = 0;
       } else {
-        if (capacity_ == kInlineCapacity)
-          std::construct_at(&storage_.data_, std::move(other.storage_.data_));
-        else
-          storage_.data_ = std::move(other.storage_.data_);
+        if (capacity_ > kInlineCapacity) delete[] storage_.data_;
+        // Assignment starts the trivial pointer member's lifetime when needed.
+        storage_.data_ = other.storage_.data_;
         head_ = other.head_;
-        std::destroy_at(&other.storage_.data_);
         std::construct_at(&other.storage_.inline_);
       }
       other.head_ = 0;
@@ -151,19 +149,17 @@ class InlineRingQueue {
   };
   union StorageUnion {
     InlineStorage inline_;
-    std::unique_ptr<Slot[]> data_;
+    Slot* data_;
     StorageUnion() noexcept : inline_() {}
-    // capacity_ selects the active member; the queue destroys heap ownership.
-    ~StorageUnion() {}
   };
 
   Slot* Storage() noexcept {
     return capacity_ == kInlineCapacity ? storage_.inline_.slots_
-                                        : storage_.data_.get();
+                                        : storage_.data_;
   }
   const Slot* Storage() const noexcept {
     return capacity_ == kInlineCapacity ? storage_.inline_.slots_
-                                        : storage_.data_.get();
+                                        : storage_.data_;
   }
 
   std::uint32_t LowWaterLimit() const noexcept {
@@ -178,13 +174,12 @@ class InlineRingQueue {
     if (capacity_ == kMaxCapacity) throw std::bad_alloc();
     const auto capacity =
         capacity_ == kInlineCapacity ? kMinHeapCapacity : capacity_ * 2;
-    auto data = std::make_unique<Slot[]>(capacity);
-    CopyTo(data.get());
-    // Allocation and copying finish before replacing the active union member.
-    if (capacity_ == kInlineCapacity)
-      std::construct_at(&storage_.data_, std::move(data));
-    else
-      storage_.data_ = std::move(data);
+    auto* data = new Slot[capacity];
+    CopyTo(data);
+    // Copying cannot throw. Keep the old storage until all live values have
+    // been copied, then transfer sole ownership to the active pointer member.
+    if (capacity_ > kInlineCapacity) delete[] storage_.data_;
+    storage_.data_ = data;
     head_ = 0;
     capacity_ = capacity;
     low_water_pops_ = 0;
@@ -195,17 +190,18 @@ class InlineRingQueue {
     const auto capacity =
         capacity_ == kMinHeapCapacity ? kInlineCapacity : capacity_ / 2;
     if (capacity == kInlineCapacity) {
-      // Keep the source array alive locally before its owner is overwritten by
-      // inline slots. CopyFrom uses the old head/capacity until copying ends.
-      auto data = std::move(storage_.data_);
-      std::destroy_at(&storage_.data_);
+      // Save the owned array before inline slots overwrite the pointer.
+      // CopyFrom uses the old head/capacity and cannot throw.
+      auto* data = storage_.data_;
       std::construct_at(&storage_.inline_);
-      CopyFrom(data.get(), storage_.inline_.slots_);
+      CopyFrom(data, storage_.inline_.slots_);
+      delete[] data;
     } else {
-      std::unique_ptr<Slot[]> data(new (std::nothrow) Slot[capacity]);
+      auto* data = new (std::nothrow) Slot[capacity];
       if (!data) return;
-      CopyTo(data.get());
-      storage_.data_ = std::move(data);
+      CopyTo(data);
+      delete[] storage_.data_;
+      storage_.data_ = data;
     }
     head_ = 0;
     capacity_ = capacity;
@@ -228,7 +224,9 @@ class InlineRingQueue {
       std::max(8u, InlineCapacity * 2);
   static constexpr std::uint32_t kMaxCapacity = 1u << 30;
   // Inline values and heap ownership are mutually exclusive. capacity_ is the
-  // discriminator; every transition explicitly starts/ends member lifetimes.
+  // discriminator and the queue is the sole owner of data_ in heap mode.
+  // Every transition starts the new union member's lifetime. Slot construction
+  // and value copying cannot throw, so allocation is the only failure point.
   StorageUnion storage_;
   std::uint32_t head_ = 0;
   std::uint32_t size_ = 0;
