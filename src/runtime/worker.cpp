@@ -790,11 +790,14 @@ void Worker::DiscardReceivedBuffers(Connection* connection) {
   if (connection == nullptr) {
     return;
   }
-  while (!connection->received_buffers_.empty()) {
-    auto received = connection->received_buffers_.front();
-    connection->received_buffers_.pop_front();
-    backend_.ReleaseRecvBuffer(connection, received.buffer_id_);
+  auto& received = connection->received_buffers_;
+  const auto count = received.size();
+  // ReleaseRecvBuffer only recycles backend storage; it does not mutate this
+  // queue or resume readers. Clear once to avoid shrinking while discarding.
+  for (std::uint32_t i = 0; i < count; ++i) {
+    backend_.ReleaseRecvBuffer(connection, received[i].buffer_id_);
   }
+  received.clear();
 }
 
 void Worker::CheckIdleConnections() {

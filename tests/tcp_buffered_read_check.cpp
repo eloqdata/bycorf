@@ -212,8 +212,48 @@ bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
                   "live EOF returns zero after the queue drains");
 }
 
+absl::Status CheckCloseDoesNotShrink(bycorf::Worker& worker) {
+  int sockets[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+                 sockets) != 0)
+    return absl::InternalError("socketpair failed");
+  absl::Cleanup close_peer = [&] { close(sockets[1]); };
+  bycorf::Connection initial;
+  initial.worker_ = &worker;
+  initial.file_.fd_ = sockets[0];
+  initial.closed_ = false;
+  initial.recv_mode_ = bycorf::RecvMode::kOneShot;
+  auto* connection = worker.AddConnection(std::move(initial));
+  bycorf::TcpStream stream(connection);
+  auto storage = stream.BorrowStorage();
+  absl::Cleanup close_stream = [&] { (void)stream.Close(); };
+  connection->read_buffer_.resize(1);
+  auto& queue = connection->received_buffers_;
+  const bycorf::ReceivedBuffer buffer{.buffer_id_ = 0, .size_ = 1};
+  constexpr std::uint32_t capacity = 64;
+  for (std::uint32_t i = 0; i < capacity; ++i) queue.push_back(buffer);
+  while (queue.size() > capacity / 4) queue.pop_front();
+  // Synthetic one-shot views do not borrow provided buffers. Leave the queue
+  // one low-water pop before shrinking: the old close loop allocated 32 new
+  // descriptors here even though it was about to discard every descriptor.
+  for (std::uint32_t i = 0; i < capacity - 2; ++i) {
+    queue.pop_front();
+    queue.push_back(buffer);
+  }
+  auto status =
+      Check(queue.size() == capacity / 4 && queue.capacity() == capacity,
+            "close regression starts near the shrink threshold");
+  if (!status.ok()) return status;
+  status = stream.Close();
+  if (!status.ok()) return status;
+  return Check(
+      connection->closed_ && queue.empty() && queue.capacity() == capacity,
+      "close discards queued buffers without shrinking storage");
+}
+
 bycorf::Task<absl::Status> RunChecks(bycorf::Worker& worker, bool& passed) {
-  const auto status = co_await CheckReads(worker);
+  auto status = co_await CheckReads(worker);
+  if (status.ok()) status = CheckCloseDoesNotShrink(worker);
   passed = status.ok();
   if (!status.ok()) std::cerr << status << '\n';
   worker.RequestStop();
