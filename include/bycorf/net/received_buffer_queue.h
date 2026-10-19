@@ -32,9 +32,10 @@ struct ReceivedBuffer {
 // Owner-worker FIFO of receive descriptors, not the network bytes themselves.
 // Callers own recycling backend buffers, including before clear(). References
 // must not survive push/pop or moving the queue.
-// The inline descriptor and mutable counters occupy the first 28 bytes. In the
+// The inline descriptor and mutable counters occupy the first 32 bytes. In the
 // audited x86 layout the queue starts at Connection+96, so these fit one cache
-// line when the Connection is 64-byte aligned; the heap pointer follows them.
+// line when the Connection is 64-byte aligned. The heap owner shares storage
+// with the inline descriptor.
 // Recheck allocator addresses and throughput/tails after layout changes.
 using ReceivedBufferQueue = InlineRingQueue<ReceivedBuffer, 1>;
 
