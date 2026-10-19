@@ -68,24 +68,40 @@ struct ReceivedBuffer {
 struct Connection {
   using PeerDisconnectCallback = void (*)(void*) noexcept;
 
+  // Keep read-suspension writes together: read_waiter_ and read_inflight_
+  // moved from offsets 176/51 to 8/52 in the audited GCC 13 x86-64 layout.
+  // With 64-byte-aligned allocations, these writes touch one cache line
+  // instead of two. This alignment depends on the allocator, not alignof;
+  // recheck actual addresses and generated stores when changing the layout.
+  // Normal receive completion still writes the deque tail on another line,
+  // so this does not establish fewer lines for the whole receive/GET path.
+  // Smaller sizeof or fewer touched lines alone does not establish a speedup:
+  // require correctness and paired throughput/tail-latency regression tests.
   Worker* worker_ = nullptr;
-  std::uint64_t id_ = 0;
-  RegisteredFile file_;
-  ConnectionState state_ = ConnectionState::kActive;
-  std::uint64_t generation_ = 0;
+  std::coroutine_handle<> read_waiter_{};
+  absl::Status last_error_ = absl::OkStatus();
   std::int64_t last_active_ms_ = 0;
-
+  RegisteredFile file_;
+  std::uint32_t inflight_ops_ = 0;
+  ConnectionState state_ = ConnectionState::kActive;
+  RecvMode recv_mode_ = RecvMode::kMultishot;
   bool closing_ = false;
   bool closed_ = true;
-  bool retired_ = false;
   bool read_inflight_ = false;
   bool write_inflight_ = false;
   // Live connection handoff pauses recv before the fd is duplicated onto a
   // different worker.  In particular, an armed multishot recv must not keep
   // consuming bytes from the shared socket after the handoff.
   bool recv_paused_ = false;
+  bool recv_armed_ = false;
+  bool needs_recv_rearm_ =
+      false;  // re-arm deferred out of the completion handler
+  bool recv_eof_ = false;
+  bool retired_ = false;
+  bool peer_disconnect_poll_armed_ = false;
+  bool peer_disconnect_poll_cancel_requested_ = false;
 
-  std::uint32_t inflight_ops_ = 0;
+  std::vector<std::byte> read_buffer_;
   // Session coroutines borrow their Connection storage for their whole
   // lifetime: BeginClose/RetireConnection still close the fd and wake waiters
   // immediately, but ReclaimConnections skips storage while it is borrowed, so
@@ -93,20 +109,12 @@ struct Connection {
   // reclaimed memory. Borrow and release run on the owning worker thread (or
   // before the first await that could observe retirement).
   std::uint32_t storage_borrows_ = 0;
-  absl::Status last_error_ = absl::OkStatus();
-
-  std::vector<std::byte> read_buffer_;
   std::deque<ReceivedBuffer> received_buffers_;
-  std::coroutine_handle<> read_waiter_{};
-  bool recv_armed_ = false;
-  bool needs_recv_rearm_ =
-      false;  // re-arm deferred out of the completion handler
-  bool recv_eof_ = false;
-  bool peer_disconnect_poll_armed_ = false;
-  bool peer_disconnect_poll_cancel_requested_ = false;
+
+  std::uint64_t id_ = 0;
+  std::uint64_t generation_ = 0;
   PeerDisconnectCallback peer_disconnect_callback_ = nullptr;
   void* peer_disconnect_context_ = nullptr;
-  RecvMode recv_mode_ = RecvMode::kMultishot;
   std::shared_ptr<TlsState> tls_state_;
   void* protocol_context_ = nullptr;
 };
