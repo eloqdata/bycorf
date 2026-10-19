@@ -68,25 +68,33 @@ struct ReceivedBuffer {
 struct Connection {
   using PeerDisconnectCallback = void (*)(void*) noexcept;
 
+  // Group owner-local read readiness and completion bookkeeping: these fields
+  // are checked together when a reader suspends and a receive completes.
   Worker* worker_ = nullptr;
-  std::uint64_t id_ = 0;
+  std::coroutine_handle<> read_waiter_{};
+  absl::Status last_error_ = absl::OkStatus();
+  std::int64_t last_active_ms_ = 0;
   RegisteredFile file_;
+  std::uint32_t inflight_ops_ = 0;
   ConnectionState state_ = ConnectionState::kActive;
   RecvMode recv_mode_ = RecvMode::kMultishot;
-  std::uint64_t generation_ = 0;
-  std::int64_t last_active_ms_ = 0;
-
   bool closing_ = false;
   bool closed_ = true;
-  bool retired_ = false;
   bool read_inflight_ = false;
   bool write_inflight_ = false;
   // Live connection handoff pauses recv before the fd is duplicated onto a
   // different worker.  In particular, an armed multishot recv must not keep
   // consuming bytes from the shared socket after the handoff.
   bool recv_paused_ = false;
+  bool recv_armed_ = false;
+  bool needs_recv_rearm_ =
+      false;  // re-arm deferred out of the completion handler
+  bool recv_eof_ = false;
+  bool retired_ = false;
+  bool peer_disconnect_poll_armed_ = false;
+  bool peer_disconnect_poll_cancel_requested_ = false;
 
-  std::uint32_t inflight_ops_ = 0;
+  std::vector<std::byte> read_buffer_;
   // Session coroutines borrow their Connection storage for their whole
   // lifetime: BeginClose/RetireConnection still close the fd and wake waiters
   // immediately, but ReclaimConnections skips storage while it is borrowed, so
@@ -94,17 +102,10 @@ struct Connection {
   // reclaimed memory. Borrow and release run on the owning worker thread (or
   // before the first await that could observe retirement).
   std::uint32_t storage_borrows_ = 0;
-  absl::Status last_error_ = absl::OkStatus();
-
-  std::vector<std::byte> read_buffer_;
   std::deque<ReceivedBuffer> received_buffers_;
-  std::coroutine_handle<> read_waiter_{};
-  bool recv_armed_ = false;
-  bool needs_recv_rearm_ =
-      false;  // re-arm deferred out of the completion handler
-  bool recv_eof_ = false;
-  bool peer_disconnect_poll_armed_ = false;
-  bool peer_disconnect_poll_cancel_requested_ = false;
+
+  std::uint64_t id_ = 0;
+  std::uint64_t generation_ = 0;
   PeerDisconnectCallback peer_disconnect_callback_ = nullptr;
   void* peer_disconnect_context_ = nullptr;
   std::shared_ptr<TlsState> tls_state_;
