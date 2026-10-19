@@ -20,13 +20,13 @@
 #include <coroutine>
 #include <cstdint>
 #include <cstdlib>
-#include <deque>
 #include <limits>
 #include <memory>
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/status/statusor.h"
+#include "bycorf/base/inline_ring_queue.h"
 
 namespace bycorf {
 
@@ -73,7 +73,7 @@ struct Connection {
   // With 64-byte-aligned allocations, these writes touch one cache line
   // instead of two. This alignment depends on the allocator, not alignof;
   // recheck actual addresses and generated stores when changing the layout.
-  // Normal receive completion still writes the deque tail on another line,
+  // Normal receive completion still writes queue bookkeeping on another line,
   // so this does not establish fewer lines for the whole receive/GET path.
   // Smaller sizeof or fewer touched lines alone does not establish a speedup:
   // require correctness and paired throughput/tail-latency regression tests.
@@ -109,7 +109,15 @@ struct Connection {
   // reclaimed memory. Borrow and release run on the owning worker thread (or
   // before the first await that could observe retirement).
   std::uint32_t storage_borrows_ = 0;
-  std::deque<ReceivedBuffer> received_buffers_;
+  // Owner-worker FIFO of receive descriptors, not the network bytes themselves.
+  // Callers own recycling backend buffers, including before clear(). References
+  // must not survive push/pop or moving the queue.
+  // The inline descriptor and mutable counters occupy the first 32 bytes. In
+  // the audited x86 layout the queue starts at Connection+96, so these fit one
+  // cache line when the Connection is 64-byte aligned. The heap owner shares
+  // storage with the inline descriptor. Recheck allocator addresses and
+  // throughput/tails after layout changes.
+  InlineRingQueue<ReceivedBuffer, 1> received_buffers_;
 
   std::uint64_t id_ = 0;
   std::uint64_t generation_ = 0;

@@ -217,11 +217,13 @@ absl::StatusOr<std::size_t> ReadOperation::await_resume() noexcept {
 
     std::memcpy(buffer_.data() + copied, chunk.data(), chunk.size());
     copied += to_copy;
-    received.offset_ += static_cast<std::uint32_t>(to_copy);
-    if (received.offset_ == received.size_) {
+    if (to_copy == available) {
+      // The descriptor is about to leave the queue; no offset store is needed.
       const auto buffer_id = received.buffer_id_;
       connection_->received_buffers_.pop_front();
       connection_->worker_->ReleaseReceivedBuffer(connection_, buffer_id);
+    } else {
+      received.offset_ += static_cast<std::uint32_t>(to_copy);
     }
     // Do not poll or suspend between buffers. Only already queued data belongs
     // to this read, and ordinary ReadSome retains its single-buffer behavior.

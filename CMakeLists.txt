@@ -407,6 +407,9 @@ if (BYCORF_BUILD_EXAMPLES)
 endif()
 
 if (BYCORF_BUILD_EXAMPLES OR BYCORF_BUILD_TESTS)
+  add_executable(bycorf_received_buffer_queue_check tests/received_buffer_queue_check.cpp)
+  target_link_libraries(bycorf_received_buffer_queue_check PRIVATE bycorf::core)
+
   add_executable(bycorf_task_transfer_check tests/task_transfer_check.cpp)
   target_include_directories(bycorf_task_transfer_check PRIVATE include)
   # Exercise the public compile policy with this build's actual optimization
@@ -487,6 +490,9 @@ if (BYCORF_BUILD_TESTS)
     endforeach()
   endif()
   enable_testing()
+  add_test(NAME bycorf_received_buffer_queue_check COMMAND bycorf_received_buffer_queue_check)
+  set_tests_properties(bycorf_received_buffer_queue_check PROPERTIES
+    TIMEOUT 30 LABELS "runtime;net")
   add_test(NAME bycorf_task_transfer_check COMMAND bycorf_task_transfer_check)
   set_tests_properties(bycorf_task_transfer_check PROPERTIES
     TIMEOUT 30 LABELS "runtime;task")
