@@ -92,9 +92,130 @@ void CheckInlineAndHeapMoves() {
     Check(small.empty() && small.capacity() == 1);
   }
 }
+// No default construction is needed, even for over-aligned values. Its copy
+// constructor and destructor remain trivial.
+struct alignas(32) Value {
+  Value() = delete;
+  explicit Value(std::uint64_t v) : value(v) {}
+  bool operator==(const Value&) const = default;
+  std::uint64_t value;
+};
+
+template <typename T, std::uint32_t N>
+void CheckGenericQueue() {
+  using Queue = bycorf::InlineRingQueue<T, N>;
+  auto compare = [](const Queue& q, const std::deque<T>& expected) {
+    Check(q.size() == expected.size());
+    Check(q.capacity() >= q.size());
+    if (!q.empty()) Check(q.front() == expected.front());
+    for (std::uint32_t i = 0; i < q.size(); ++i) Check(q[i] == expected[i]);
+  };
+  // Exercise wrapped inline and heap sources against both destination modes.
+  for (bool source_heap : {false, true}) {
+    for (bool destination_heap : {false, true}) {
+      Queue destination;
+      for (unsigned i = 0; i < (destination_heap ? N + 1 : N); ++i)
+        destination.push_back(T(999));
+      std::deque<T> expected;
+      {
+        Queue source;
+        const auto count = source_heap ? N + 1 : N;
+        for (unsigned i = 0; i < count; ++i) {
+          source.push_back(T(i));
+          expected.push_back(T(i));
+        }
+        for (unsigned i = 0; i < count * 3 + 1; ++i) {
+          source.pop_front();
+          expected.pop_front();
+          source.push_back(T(100 + i));
+          expected.push_back(T(100 + i));
+        }
+        destination = std::move(source);
+        Check(source.empty() && source.capacity() == N);
+        source.push_back(T(777));
+        compare(destination, expected);
+      }
+      compare(destination, expected);
+      Queue constructed(std::move(destination));
+      Check(destination.empty() && destination.capacity() == N);
+      destination.push_back(T(888));
+      compare(constructed, expected);
+      auto& same = constructed;
+      constructed = std::move(same);
+      compare(constructed, expected);
+      // Argument aliases a live value when growth relocates the source.
+      while (constructed.size() < constructed.capacity()) {
+        constructed.push_back(T(42));
+        expected.push_back(T(42));
+      }
+      expected.push_back(constructed.front());
+      constructed.push_back(constructed.front());
+      compare(constructed, expected);
+    }
+  }
+  Queue queue;
+  std::deque<T> expected;
+  std::mt19937 random(20261019 + N);
+  for (unsigned phase = 0; phase < 8; ++phase) {
+    for (unsigned step = 0; step < 4000; ++step) {
+      auto v = random();
+      if (queue.empty() || v % 100 < (phase % 2 == 0 ? 60 : 40)) {
+        queue.push_back(T(v));
+        expected.push_back(T(v));
+      } else {
+        queue.pop_front();
+        expected.pop_front();
+      }
+      if (step % 113 == 0) compare(queue, expected);
+    }
+    compare(queue, expected);
+  }
+  while (queue.size() < N * 4) {
+    queue.push_back(T(42));
+    expected.push_back(T(42));
+  }
+  const auto peak = queue.capacity();
+  while (queue.size() > N) {
+    queue.pop_front();
+    expected.pop_front();
+  }
+  // Shrink with N live values, including wrapped sources. Pop before push so
+  // the push never resets the final heap-to-inline low-water count.
+  for (unsigned i = 0; i < peak * 4; ++i) {
+    queue.pop_front();
+    expected.pop_front();
+    queue.push_back(T(i));
+    expected.push_back(T(i));
+    compare(queue, expected);
+  }
+  Check(queue.capacity() == N);
+  queue.push_back(T(123));
+  Check(queue.capacity() > N);
+  const auto capacity = queue.capacity();
+  queue.clear();
+  Check(queue.empty() && queue.capacity() == capacity);
+  for (unsigned i = 0; i < capacity * 2; ++i) {
+    queue.push_back(T(i));
+    Check(queue.front() == T(i));
+    queue.pop_front();
+  }
+  Check(queue.capacity() == N);
+}
+
+template <std::uint32_t N>
+void CheckGenericTypes() {
+  CheckGenericQueue<std::uint64_t, N>();
+  CheckGenericQueue<Value, N>();
+}
 }  // namespace
 
 int main() {
+  CheckGenericTypes<1>();
+  CheckGenericTypes<2>();
+  CheckGenericTypes<4>();
+  CheckGenericTypes<8>();
+  CheckGenericTypes<16>();
+  CheckGenericTypes<32>();
   CheckInlineAndHeapMoves();
   bycorf::ReceivedBufferQueue queue;
   Check(queue.empty() && queue.capacity() == 1);
@@ -157,6 +278,7 @@ int main() {
     queue.pop_front();
   }
   Check(queue.capacity() == 1);
-  std::cout << "PASS FIFO, wrap, growth, delayed shrink, partial offsets, "
-               "move, clear\n";
+  std::cout
+      << "PASS FIFO, wrap, growth, delayed shrink, partial offsets, "
+         "move, clear, generic types and inline capacities 1/2/4/8/16/32\n";
 }
