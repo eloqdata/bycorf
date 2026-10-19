@@ -76,13 +76,7 @@ class ReceivedBufferQueue {
   }
 
   void push_back(ReceivedBuffer value) {
-    if (size_ == capacity_) {
-      // Bound both doubling and head + index arithmetic. Allocation failure
-      // leaves every queued descriptor intact, as with deque::push_back.
-      if (capacity_ == kMaxCapacity) throw std::bad_alloc();
-      const auto capacity = capacity_ == 0 ? kMinCapacity : capacity_ * 2;
-      Reallocate(std::make_unique<ReceivedBuffer[]>(capacity), capacity);
-    }
+    if (size_ == capacity_) Grow();
     data_[(head_ + size_) & (capacity_ - 1)] = value;
     ++size_;
     if (size_ > capacity_ / 4) low_water_pops_ = 0;
@@ -97,13 +91,7 @@ class ReceivedBufferQueue {
       // Brief bursts and ordinary empty/nonempty alternation at the minimum
       // capacity do not allocate. Shrinking is best-effort: reads and close
       // cleanup must keep working even when allocation fails.
-      if (++low_water_pops_ == capacity_) {
-        low_water_pops_ = 0;
-        const auto capacity = capacity_ / 2;
-        std::unique_ptr<ReceivedBuffer[]> data(new (std::nothrow)
-                                                   ReceivedBuffer[capacity]);
-        if (data) Reallocate(std::move(data), capacity);
-      }
+      if (++low_water_pops_ == capacity_) Shrink();
     } else {
       low_water_pops_ = 0;
     }
@@ -114,6 +102,24 @@ class ReceivedBufferQueue {
   void clear() noexcept { head_ = size_ = low_water_pops_ = 0; }
 
  private:
+  // Keep allocation and descriptor relocation out of inlined push/pop callers.
+  // These paths are rare; inlining them bloats the ordinary receive hot path.
+  [[gnu::noinline]] void Grow() {
+    // Bound both doubling and head + index arithmetic. Allocation failure
+    // leaves every queued descriptor intact, as with deque::push_back.
+    if (capacity_ == kMaxCapacity) throw std::bad_alloc();
+    const auto capacity = capacity_ == 0 ? kMinCapacity : capacity_ * 2;
+    Reallocate(std::make_unique<ReceivedBuffer[]>(capacity), capacity);
+  }
+
+  [[gnu::noinline]] void Shrink() noexcept {
+    low_water_pops_ = 0;
+    const auto capacity = capacity_ / 2;
+    std::unique_ptr<ReceivedBuffer[]> data(new (std::nothrow)
+                                               ReceivedBuffer[capacity]);
+    if (data) Reallocate(std::move(data), capacity);
+  }
+
   void Reallocate(std::unique_ptr<ReceivedBuffer[]> data,
                   std::uint32_t capacity) noexcept {
     if (size_ != 0) {
