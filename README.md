@@ -101,6 +101,7 @@ results.
 | Test suite | Coverage |
 |---|---|
 | `InlineRingQueue`, `ReceivedBufferQueue` | Queue types and inline capacities, moves, FIFO order, wrapping, growth, and shrinking |
+| `CrossCoreDrain`, `CrossCoreDrainState` | Shared sender quotas across message kinds, overflow fairness, bitmap wrapping, and concurrent publication without lost work |
 | `TaskTransfer` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
 | `RuntimeStartup`, `TcpServiceStop`, `Timer`, `Connect` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
 | `ConnectionStorage` | Connection storage lifetime while suspended coroutines still borrow it |
