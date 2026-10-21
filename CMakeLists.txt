@@ -362,11 +362,11 @@ target_compile_features(bycorf PUBLIC cxx_std_23)
 target_link_libraries(bycorf PUBLIC
   bycorf_liburing
   absl::base
+  absl::flat_hash_map
   absl::status
   absl::statusor
 )
-target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto
-  absl::flat_hash_map)
+target_link_libraries(bycorf PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 # GCC lowers symmetric coroutine transfers to growing native calls unless
 # sibling-call optimization is enabled, including at -O0. Task is a public
@@ -459,6 +459,7 @@ if (BYCORF_BUILD_TESTS)
 
   add_executable(bycorf_unit_tests
     tests/cross_core_drain_test.cpp
+    tests/worker_scheduler_test.cpp
     tests/received_buffer_queue_test.cpp
     tests/backend_selection_test.cpp)
   target_link_libraries(bycorf_unit_tests PRIVATE bycorf::core GTest::gtest_main)

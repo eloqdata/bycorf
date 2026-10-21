@@ -102,9 +102,10 @@ results.
 |---|---|
 | `InlineRingQueue`, `ReceivedBufferQueue` | Queue types and inline capacities, moves, FIFO order, wrapping, growth, and shrinking |
 | `CrossCoreDrain`, `CrossCoreDrainState` | Shared sender quotas across message kinds, overflow fairness, bitmap wrapping, and concurrent publication without lost work |
+| `WorkerScheduler` | Foreground/background FIFO admission, deferred turns, and reentrant local/remote work across queue relocation |
 | `TaskTransfer` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
 | `RuntimeStartup`, `TcpServiceStop`, `Timer`, `Connect` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |
-| `ConnectionStorage` | Connection storage lifetime while suspended coroutines still borrow it |
+| `ConnectionStorage` | Connection table growth and storage lifetime while suspended coroutines still borrow it |
 | `TcpBufferedRead` | Bounded reads across queued receive buffers, partial buffers, unchanged ordinary reads, waiting, errors, EOF, and close without shrinking |
 | `IoUringBackpressure` | Full submission queues, deferred sends and storage reads, queued cancellation, descriptor reuse, peer wakes, and shutdown |
 | `BackendSelectionDeathTest` | Unsupported backend requests, inactive optional backends, and immutable allocator/backend selection |

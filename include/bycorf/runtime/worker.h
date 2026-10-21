@@ -24,14 +24,14 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <span>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
+#include "bycorf/base/inline_ring_queue.h"
 #include "bycorf/io/completion.h"
 #include "bycorf/io/net_backend.h"
 #include "bycorf/io/spdk_storage.h"
@@ -383,6 +383,9 @@ class Worker {
     return backend_.SubmitTimeout(timeout, tag);
   }
 
+  // Takes ownership of a connection with a valid socket; returns nullptr for
+  // an invalid fd. Its address survives table growth until retirement and
+  // reclamation. BorrowConnectionStorage extends that lifetime across waits.
   Connection* AddConnection(Connection connection);
   std::uint64_t ActiveConnectionCount() const noexcept {
     return active_connection_count_;
@@ -407,6 +410,7 @@ class Worker {
 
  private:
   friend class WorkerCrossCoreTestPeer;
+  friend class WorkerSchedulerTestPeer;
 
   // All message kinds share one sender visit and a combined consumption quota.
   // Retain its position across polls until it empties or exhausts that quota.
@@ -460,12 +464,18 @@ class Worker {
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> stopping_{false};
   WorkerOptions options_{};
-  std::deque<ReadyTask> ready_;
-  std::deque<ReadyTask> next_ready_;
-  std::deque<RemoteWork*> foreground_remote_work_;
-  std::deque<ReadyTask> background_ready_;
-  std::deque<ReadyTask> next_background_ready_;
-  std::deque<RemoteWork*> background_remote_work_;
+  // One cross-core batch fits inline. These owner-local queues do not own the
+  // frames or RemoteWork they reference. Copy a value before popping or
+  // invoking a callback: growth and shrinking can relocate the stored values.
+  static constexpr std::uint32_t kSchedulerInlineCapacity = 64;
+  InlineRingQueue<ReadyTask, kSchedulerInlineCapacity> ready_;
+  InlineRingQueue<ReadyTask, kSchedulerInlineCapacity> next_ready_;
+  InlineRingQueue<RemoteWork*, kSchedulerInlineCapacity>
+      foreground_remote_work_;
+  InlineRingQueue<ReadyTask, kSchedulerInlineCapacity> background_ready_;
+  InlineRingQueue<ReadyTask, kSchedulerInlineCapacity> next_background_ready_;
+  InlineRingQueue<RemoteWork*, kSchedulerInlineCapacity>
+      background_remote_work_;
   std::vector<void*> background_tasks_;
   // Root handles of Spawn/SpawnBackground tasks still alive. A task that
   // completes is removed when its frame is destroyed; anything left when the
@@ -474,7 +484,9 @@ class Worker {
   std::vector<void*> detached_tasks_;
   bool foreground_remote_turn_ = true;
   bool background_remote_turn_ = true;
-  std::unordered_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
+  // Completions and suspended sessions retain Connection*, so only the owning
+  // unique_ptr moves during table growth; the connection allocation stays put.
+  absl::flat_hash_map<std::uint64_t, std::unique_ptr<Connection>> connections_;
   std::vector<std::uint64_t> retired_connection_ids_;
   std::uint64_t next_connection_id_ = 1;
   std::uint64_t active_connection_count_ = 0;
