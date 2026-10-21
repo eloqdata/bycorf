@@ -171,6 +171,12 @@ struct alignas(64) WorkerMailbox {
   moodycamel::ConcurrentQueue<RemoteWork*>
       replies_;  // results coming back to me
   moodycamel::ConcurrentQueue<RemoteNotification> notifications_;
+  // The receiver reuses these tokens across drains so overflow producers also
+  // rotate after moodycamel's consumption quota instead of restarting at the
+  // producer-list head on every batch.
+  moodycamel::ConsumerToken request_consumer_{requests_};
+  moodycamel::ConsumerToken reply_consumer_{replies_};
+  moodycamel::ConsumerToken notification_consumer_{notifications_};
   std::atomic<bool> overflow_pending_{false};
   int ring_fd_ = -1;
   int wake_fd_ = -1;

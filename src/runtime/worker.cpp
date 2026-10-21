@@ -830,30 +830,33 @@ void Worker::RunRemoteWork(RemoteWork* work) {
   }
 }
 
-bool Worker::DrainCrossCore() {
-  WorkerMailbox& mb = cross_core_->mailbox(id_);
-  RemoteWork* batch[64];
+template <bool WithOverflow>
+[[gnu::always_inline]] inline bool Worker::DrainCrossCoreImpl() {
+  constexpr std::size_t kBatchSize = 64;
+  constexpr std::size_t kSenderQuota = 256;
+  RemoteWork* batch[kBatchSize];
   // Both dequeue paths assign all fields of [0, count); never read the unused
   // suffix. Default initialization intentionally leaves this scratch untouched.
-  RemoteNotification notifications[64];
+  RemoteNotification notifications[kBatchSize];
   std::size_t nreq = 0;
   std::size_t nrep = 0;
   std::size_t nnotifications = 0;
-  const auto schedule_request = [this](RemoteWork* work) {
+  const auto schedule_request =
+      [this] [[gnu::always_inline]] (RemoteWork* work) {
 #if BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
-    const std::uint64_t now = CrossCoreTraceNowNanos();
-    if (work->request_post_ns_ != 0 && now >= work->request_post_ns_) {
-      cross_core_latency_stats_.request_queue_.Add(now -
-                                                   work->request_post_ns_);
-    }
+        const std::uint64_t now = CrossCoreTraceNowNanos();
+        if (work->request_post_ns_ != 0 && now >= work->request_post_ns_) {
+          cross_core_latency_stats_.request_queue_.Add(now -
+                                                       work->request_post_ns_);
+        }
 #endif
-    if (work->task_class_ == TaskClass::kBackground) {
-      background_remote_work_.push_back(work);
-    } else {
-      foreground_remote_work_.push_back(work);
-    }
-  };
-  const auto schedule_reply = [this](RemoteWork* work) {
+        if (work->task_class_ == TaskClass::kBackground) {
+          background_remote_work_.push_back(work);
+        } else {
+          foreground_remote_work_.push_back(work);
+        }
+      };
+  const auto schedule_reply = [this] [[gnu::always_inline]] (RemoteWork* work) {
 #if BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
     const std::uint64_t now = CrossCoreTraceNowNanos();
     if (work->reply_post_ns_ != 0 && now >= work->reply_post_ns_) {
@@ -863,100 +866,151 @@ bool Worker::DrainCrossCore() {
     Enqueue(work->waiter_);
   };
 
-  // The bounded SPSC lane is the normal path. Only touch the old MPSC queues
-  // when a producer reported a full lane. A stale false from the read-only
-  // fast path only defers draining; the wake-sequence handshake prevents the
-  // receiver from parking past a producer that published overflow work.
-  if (mb.overflow_pending_.load(std::memory_order_relaxed) &&
-      mb.overflow_pending_.exchange(false, std::memory_order_acquire)) {
-    const std::size_t overflow_requests =
-        mb.requests_.try_dequeue_bulk(batch, 64);
-    for (std::size_t i = 0; i < overflow_requests; ++i) {
-      schedule_request(batch[i]);
-    }
-    nreq += overflow_requests;
-
-    const std::size_t overflow_replies =
-        mb.replies_.try_dequeue_bulk(batch, 64);
-    for (std::size_t i = 0; i < overflow_replies; ++i) {
-      schedule_reply(batch[i]);
-    }
-    nrep += overflow_replies;
-
-    const std::size_t overflow_notifications =
-        mb.notifications_.try_dequeue_bulk(notifications, 64);
-    for (std::size_t i = 0; i < overflow_notifications; ++i) {
-      RemoteNotification& notification = notifications[i];
-      notification.run_fn_(notification.context_, notification.value_);
-    }
-    nnotifications += overflow_notifications;
-
-    if (overflow_requests == 64 || overflow_replies == 64 ||
-        overflow_notifications == 64) {
-      mb.overflow_pending_.store(true, std::memory_order_release);
-    }
-  }
-
-  // Producers publish only inactive -> active lane transitions. At 64 workers
-  // the receiver checks one bitmap word instead of 64 distant lane flags.
-  for (unsigned word = 0; word < cross_core_->active_sender_word_count();
-       ++word) {
-    std::uint64_t active = cross_core_->TakeActiveSenders(id_, word);
-    while (active != 0) {
-      const unsigned bit = std::countr_zero(active);
-      active &= active - 1;
-      const unsigned sender = word * 64U + bit;
-      if (sender >= cross_core_->size()) {
-        continue;
+  const unsigned sender_count = cross_core_->size();
+  const unsigned word_count = cross_core_->active_sender_word_count();
+  const auto schedule_notification =
+      [] [[gnu::always_inline]] (RemoteNotification notification) {
+        notification.run_fn_(notification.context_, notification.value_);
+      };
+  const auto drain_spsc = [&] [[gnu::always_inline]] {
+    bool batch_full = nreq == kBatchSize || nrep == kBatchSize ||
+                      nnotifications == kBatchSize;
+    if (batch_full || word_count == 0) return;
+    auto& cursor = cross_core_cursor_;
+    const unsigned start_word = cursor.sender_ / 64U;
+    const unsigned start_bit = cursor.sender_ % 64U;
+    const std::uint64_t first_mask = ~std::uint64_t{0} << start_bit;
+    unsigned word = start_word;
+    std::uint64_t wrapped = 0;
+    // Consume each bitmap word once, processing all three queues at each lane.
+    // Only the first word's low bits wait for the wrap; there is no bitmap
+    // array or second atomic take that could lose the already-acquired bits.
+    for (unsigned step = 0; step <= word_count; ++step) {
+      std::uint64_t active = step == word_count
+                                 ? wrapped
+                                 : cross_core_->TakeActiveSenders(id_, word);
+      if (step == 0) {
+        wrapped = active & ~first_mask;
+        active &= first_mask;
       }
-
-      CrossCoreLane& lane = cross_core_->lane(id_, sender);
-      // Keep active=true while draining. A producer that races with the drain
-      // may therefore coalesce into this visit. Clearing followed by an empty
-      // check closes the case where it arrived after that message kind's tail
-      // snapshot and did not publish another active bit.
-      if (nreq < 64) {
-        const std::size_t count =
-            lane.requests_.try_dequeue_bulk(batch, 64 - nreq);
-        for (std::size_t i = 0; i < count; ++i) {
-          schedule_request(batch[i]);
+      while (active != 0) {
+        const unsigned bit = std::countr_zero(active);
+        active &= active - 1;
+        const unsigned sender = word * 64U + bit;
+        if (sender >= sender_count) continue;
+        CrossCoreLane& lane = cross_core_->lane(id_, sender);
+        if (!batch_full) {
+          if (cursor.sender_ != sender) {
+            cursor.sender_ = sender;
+            cursor.consumed_ = 0;
+          }
+          const auto drain_queue = [&] [[gnu::always_inline]] (
+                                       auto& queue, auto* output, auto schedule,
+                                       std::size_t& total) {
+            const std::size_t maximum =
+                std::min(kBatchSize - total, kSenderQuota - cursor.consumed_);
+            if (maximum == 0) return;
+            const std::size_t count = queue.try_dequeue_bulk(output, maximum);
+            for (std::size_t i = 0; i < count; ++i) schedule(output[i]);
+            total += count;
+            cursor.consumed_ += count;
+          };
+          drain_queue(lane.requests_, batch, schedule_request, nreq);
+          drain_queue(lane.replies_, batch, schedule_reply, nrep);
+          drain_queue(lane.notifications_, notifications, schedule_notification,
+                      nnotifications);
+          batch_full = nreq == kBatchSize || nrep == kBatchSize ||
+                       nnotifications == kBatchSize;
+          // A full per-kind batch retains this sender for the next poll, but
+          // only up to 256 messages combined. With neither limit reached all
+          // three reads were short: immediately move on to the next sender.
+          // Do not fill other kinds from later senders after a batch fills:
+          // that would interleave visits and lose the shared quota's meaning.
+          if (cursor.consumed_ == kSenderQuota || !batch_full) {
+            cursor.sender_ = sender + 1 == sender_count ? 0 : sender + 1;
+            cursor.consumed_ = 0;
+          }
         }
-        nreq += count;
-      }
 
-      if (nrep < 64) {
-        const std::size_t count =
-            lane.replies_.try_dequeue_bulk(batch, 64 - nrep);
-        for (std::size_t i = 0; i < count; ++i) {
-          schedule_reply(batch[i]);
+        // Every taken bit must finish the producer/consumer handshake, even
+        // when the batch limit skipped its queues. Acquire a coalesced post
+        // before the empty recheck so it cannot be left without an active bit.
+        (void)lane.active_.exchange(false, std::memory_order_acq_rel);
+        if (!lane.empty() &&
+            !lane.active_.exchange(true, std::memory_order_acq_rel)) {
+          cross_core_->ActivateSender(id_, sender);
         }
-        nrep += count;
       }
-
-      if (nnotifications < 64) {
-        const std::size_t count = lane.notifications_.try_dequeue_bulk(
-            notifications, 64 - nnotifications);
-        for (std::size_t i = 0; i < count; ++i) {
-          RemoteNotification& notification = notifications[i];
-          notification.run_fn_(notification.context_, notification.value_);
-        }
-        nnotifications += count;
-      }
-
-      // The producer publishes the ring entry before its active=true RMW. If
-      // it observed this lane already active, it deliberately did not set a
-      // second sender bit. Acquire that RMW while closing the lane so the
-      // empty recheck cannot miss the entry and strand a pending inactive
-      // lane forever.
-      (void)lane.active_.exchange(false, std::memory_order_acq_rel);
-      if (!lane.empty() &&
-          !lane.active_.exchange(true, std::memory_order_acq_rel)) {
-        cross_core_->ActivateSender(id_, sender);
-      }
+      if (++word == word_count) word = 0;
     }
+  };
+  if constexpr (WithOverflow) {
+    WorkerMailbox& mb = cross_core_->mailbox(id_);
+    const auto drain_overflow_queue = [&] [[gnu::always_inline]] (
+                                          auto& queue, auto& token,
+                                          auto* output, auto schedule,
+                                          std::size_t& total) {
+      const std::size_t maximum = kBatchSize - total;
+      if (maximum == 0) {
+        mb.overflow_pending_.store(true, std::memory_order_release);
+        return;
+      }
+      const std::size_t count = queue.try_dequeue_bulk(token, output, maximum);
+      for (std::size_t i = 0; i < count; ++i) schedule(output[i]);
+      total += count;
+      // A full batch may leave work behind. Concurrent producers can also set
+      // this flag; never clear their publication after dequeuing.
+      if (count == maximum) {
+        mb.overflow_pending_.store(true, std::memory_order_release);
+      }
+    };
+    // Keep the uncommon transport out of the normal drain's instruction stream;
+    // its two call sites share one body, including all three message kinds.
+    const auto drain_overflow = [&] [[gnu::noinline]] {
+      drain_overflow_queue(mb.requests_, mb.request_consumer_, batch,
+                           schedule_request, nreq);
+      drain_overflow_queue(mb.replies_, mb.reply_consumer_, batch,
+                           schedule_reply, nrep);
+      drain_overflow_queue(mb.notifications_, mb.notification_consumer_,
+                           notifications, schedule_notification,
+                           nnotifications);
+    };
+    const bool overflow_pending =
+        mb.overflow_pending_.exchange(false, std::memory_order_acquire);
+    // Both transports share the per-kind batch limit. Alternate first choice
+    // while overflow is pending so neither an overflowing producer nor a busy
+    // SPSC lane can consume every round's allowance indefinitely.
+    const bool overflow_first = overflow_first_;
+    if (overflow_pending) [[unlikely]] {
+      overflow_first_ = !overflow_first_;
+      if (overflow_first) drain_overflow();
+    }
+    drain_spsc();
+    if (overflow_pending && !overflow_first) [[unlikely]] {
+      drain_overflow();
+    }
+  } else {
+    drain_spsc();
   }
 
   return nreq > 0 || nrep > 0 || nnotifications > 0;
+}
+
+// A separate stack frame keeps overflow captures and address-taken counters
+// out of the SPSC path. The shared implementation is specialized at compile
+// time, so the normal drain carries no deferred-overflow flag or second check.
+[[gnu::noinline, gnu::cold]] bool Worker::DrainCrossCoreOverflow() {
+  return DrainCrossCoreImpl<true>();
+}
+
+bool Worker::DrainCrossCore() {
+  WorkerMailbox& mb = cross_core_->mailbox(id_);
+  // A concurrently published overflow can wait for the next poll. The existing
+  // wake-sequence recheck before parking still prevents a lost wakeup.
+  if (mb.overflow_pending_.load(std::memory_order_relaxed)) [[unlikely]] {
+    return DrainCrossCoreOverflow();
+  }
+  return DrainCrossCoreImpl<false>();
 }
 
 void Worker::FlushWakes() {

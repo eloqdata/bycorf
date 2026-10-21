@@ -458,6 +458,7 @@ if (BYCORF_BUILD_TESTS)
   endfunction()
 
   add_executable(bycorf_unit_tests
+    tests/cross_core_drain_test.cpp
     tests/received_buffer_queue_test.cpp
     tests/backend_selection_test.cpp)
   target_link_libraries(bycorf_unit_tests PRIVATE bycorf::core GTest::gtest_main)

@@ -143,10 +143,12 @@ class Worker {
 
   // Wire this worker into the cross-core mailbox set before Run(). Called by
   // the Runtime, which creates the CrossCore (and eventfds) before any thread
-  // starts.
+  // starts. Resets the receiver's sender cursor and overflow priority.
   void BindCrossCore(WorkerId id, CrossCore* cross_core) noexcept {
     id_ = id;
     cross_core_ = cross_core;
+    cross_core_cursor_ = {};
+    overflow_first_ = true;
   }
   WorkerId id() const noexcept { return id_; }
 
@@ -404,6 +406,15 @@ class Worker {
   void SpawnBackground(Task<absl::Status> task);
 
  private:
+  friend class WorkerCrossCoreTestPeer;
+
+  // All message kinds share one sender visit and a combined consumption quota.
+  // Retain its position across polls until it empties or exhausts that quota.
+  struct CrossCoreCursor {
+    unsigned sender_ = 0;
+    std::size_t consumed_ = 0;
+  };
+
 #if BYCORF_KERNEL_BYPASS
   // SPDK callbacks resolve this worker's sole storage backend through the
   // existing worker TLS instead of storing an owner pointer in every request.
@@ -433,6 +444,9 @@ class Worker {
   bool CanReclaim(const Connection& connection) const noexcept;
   void ReclaimConnections();
   void DiscardReceivedBuffers(Connection* connection);
+  template <bool WithOverflow>
+  bool DrainCrossCoreImpl();
+  bool DrainCrossCoreOverflow();
   bool DrainCrossCore();
 
   NetBackend backend_{};
@@ -466,6 +480,8 @@ class Worker {
   std::uint64_t active_connection_count_ = 0;
   WorkerId id_ = 0;
   CrossCore* cross_core_ = nullptr;
+  CrossCoreCursor cross_core_cursor_;
+  bool overflow_first_ = true;
   std::uint64_t wake_checks_ = 0;
   std::uint64_t wake_sent_ = 0;
   std::uint64_t foreground_runtime_cycles_ = 0;
