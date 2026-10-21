@@ -24,15 +24,20 @@ class WorkerCrossCoreTestPeer {
   static bool Drain(Worker& worker) { return worker.DrainCrossCore(); }
 
   static std::vector<RemoteWork*> TakeRequests(Worker& worker) {
-    std::vector<RemoteWork*> result(worker.foreground_remote_work_.begin(),
-                                    worker.foreground_remote_work_.end());
+    std::vector<RemoteWork*> result;
+    result.reserve(worker.foreground_remote_work_.size());
+    for (std::uint32_t i = 0; i < worker.foreground_remote_work_.size(); ++i) {
+      result.push_back(worker.foreground_remote_work_[i]);
+    }
     worker.foreground_remote_work_.clear();
     return result;
   }
 
   static std::vector<std::coroutine_handle<>> TakeReplies(Worker& worker) {
     std::vector<std::coroutine_handle<>> result;
-    for (auto ready : worker.ready_) result.push_back(ready.handle_);
+    for (std::uint32_t i = 0; i < worker.ready_.size(); ++i) {
+      result.push_back(worker.ready_[i].handle_);
+    }
     worker.ready_.clear();
     return result;
   }
