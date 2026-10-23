@@ -39,17 +39,29 @@ absl::StatusOr<SpdkStorageDeviceInfo> ProbeSpdkStorage(std::string_view path) {
                           std::string(path));
 }
 
-absl::Status ReadSpdkStorage(std::string_view, std::span<std::byte>,
-                             std::uint64_t) {
+namespace spdk::sync {
+
+absl::Status Read(std::string_view, std::span<std::byte>, std::uint64_t) {
   return absl::Status(absl::StatusCode::kUnimplemented,
                       "SPDK storage is not compiled in");
 }
 
-absl::Status WriteSpdkStorage(std::string_view, std::span<const std::byte>,
-                              std::uint64_t, bool) {
+absl::Status Write(std::string_view, std::span<const std::byte>, std::uint64_t,
+                   bool) {
   return absl::Status(absl::StatusCode::kUnimplemented,
                       "SPDK storage is not compiled in");
 }
+
+absl::Status ReadDma(std::string_view, std::span<std::byte>, std::uint64_t) {
+  return absl::UnimplementedError("SPDK storage is not compiled in");
+}
+
+absl::Status WriteDma(std::string_view, std::span<const std::byte>,
+                      std::uint64_t, bool) {
+  return absl::UnimplementedError("SPDK storage is not compiled in");
+}
+
+}  // namespace spdk::sync
 
 void ReleaseSpdkStorageMetadataQpairs() noexcept {}
 

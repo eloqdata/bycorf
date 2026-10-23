@@ -327,8 +327,10 @@ void ReleaseSpdkStorageMetadataQpairs() noexcept {
   }
 }
 
-absl::Status ReadSpdkStorage(std::string_view path, std::span<std::byte> output,
-                             std::uint64_t offset) {
+namespace spdk::sync {
+
+absl::Status Read(std::string_view path, std::span<std::byte> output,
+                  std::uint64_t offset) {
   auto device = GetDevice(path);
   if (!device.ok()) {
     return device.status();
@@ -348,9 +350,8 @@ absl::Status ReadSpdkStorage(std::string_view path, std::span<std::byte> output,
   return status;
 }
 
-absl::Status WriteSpdkStorage(std::string_view path,
-                              std::span<const std::byte> input,
-                              std::uint64_t offset, bool flush) {
+absl::Status Write(std::string_view path, std::span<const std::byte> input,
+                   std::uint64_t offset, bool flush) {
   auto device = GetDevice(path);
   if (!device.ok()) {
     return device.status();
@@ -367,6 +368,28 @@ absl::Status WriteSpdkStorage(std::string_view path,
   spdk_dma_free(dma);
   return status;
 }
+
+absl::Status ReadDma(std::string_view path, std::span<std::byte> output,
+                     std::uint64_t offset) {
+  if (output.empty()) return absl::InvalidArgumentError("empty SPDK DMA read");
+  auto device = GetDevice(path);
+  if (!device.ok()) return device.status();
+  std::lock_guard<std::mutex> lock((*device)->controller_->sync_mutex_);
+  return SubmitSync(**device, output.data(), output.size(), offset, false,
+                    false);
+}
+
+absl::Status WriteDma(std::string_view path, std::span<const std::byte> input,
+                      std::uint64_t offset, bool flush) {
+  if (input.empty()) return absl::InvalidArgumentError("empty SPDK DMA write");
+  auto device = GetDevice(path);
+  if (!device.ok()) return device.status();
+  std::lock_guard<std::mutex> lock((*device)->controller_->sync_mutex_);
+  return SubmitSync(**device, const_cast<std::byte*>(input.data()),
+                    input.size(), offset, true, flush);
+}
+
+}  // namespace spdk::sync
 
 void* AllocateStorageBuffer(std::size_t bytes, std::size_t alignment) noexcept {
   FreezeIoBackends();
