@@ -63,6 +63,18 @@ absl::Status ReadSpdkStorage(std::string_view path, std::span<std::byte> output,
 absl::Status WriteSpdkStorage(std::string_view path,
                               std::span<const std::byte> input,
                               std::uint64_t offset, bool flush);
+// Synchronous startup I/O using caller-owned DMA memory, with no temporary
+// buffer allocation or payload copy. The nonempty buffer, offset and length
+// must satisfy the device's sector alignment. Keep the buffer alive through
+// the call; read fills it directly and write never modifies it. Like the
+// copying helpers above, these use the metadata qpair and must run before
+// ReleaseSpdkStorageMetadataQpairs(), outside worker request paths.
+absl::Status ReadSpdkStorageDma(std::string_view path,
+                                std::span<std::byte> output,
+                                std::uint64_t offset);
+absl::Status WriteSpdkStorageDma(std::string_view path,
+                                 std::span<const std::byte> input,
+                                 std::uint64_t offset, bool flush);
 // Releases the temporary qpairs used by synchronous metadata I/O. Call after
 // metadata preparation and before allocating per-worker qpairs.
 void ReleaseSpdkStorageMetadataQpairs() noexcept;

@@ -53,6 +53,16 @@ absl::Status WriteSpdkStorage(std::string_view, std::span<const std::byte>,
 
 void ReleaseSpdkStorageMetadataQpairs() noexcept {}
 
+absl::Status ReadSpdkStorageDma(std::string_view, std::span<std::byte>,
+                                std::uint64_t) {
+  return absl::UnimplementedError("SPDK storage is not compiled in");
+}
+
+absl::Status WriteSpdkStorageDma(std::string_view, std::span<const std::byte>,
+                                 std::uint64_t, bool) {
+  return absl::UnimplementedError("SPDK storage is not compiled in");
+}
+
 void* AllocateStorageBuffer(std::size_t bytes, std::size_t alignment) noexcept {
   FreezeIoBackends();
   return ::operator new[](bytes, std::align_val_t(alignment), std::nothrow);
