@@ -77,13 +77,14 @@ callers await data writes before requesting a barrier. Controllers that report
 no volatile write cache already make completed writes durable, so their no-op
 FLUSH completes through the worker's deferred completion queue.
 
-Synchronous startup metadata I/O uses temporary controller queue pairs before
-worker queues are created. Callers can supply existing DMA buffers for direct
-reads and writes without intermediate allocation or copying; the convenience
-helpers for ordinary memory allocate and copy a temporary DMA image. These
-startup calls serialize on the controller's metadata mutex and complete before
-their buffers can be reused. Releasing metadata queue pairs ends this phase;
-worker request paths use the asynchronous backend instead.
+Synchronous startup metadata I/O is exposed under `bycorf::spdk::sync` and uses
+temporary controller queue pairs before worker queues are created. Callers can
+supply existing DMA buffers for direct reads and writes without intermediate
+allocation or copying; helpers for ordinary memory allocate and copy a temporary
+DMA image. These startup calls serialize on the controller's metadata mutex and
+complete before their buffers can be reused. Releasing metadata queue pairs ends
+this phase; worker request and shutdown paths use the asynchronous backend
+instead.
 
 Either accelerator can initialize the one process-wide DPDK EAL, through the
 shared `spdk_env_init` wrapper. Calling this wrapper alone does not activate
