@@ -41,7 +41,8 @@ def tcp_input_overlay(upstream, output, patch_tool="patch"):
     incremental rebuild never applies the fix twice or edits imported files.
     """
     path = upstream / "sys/netinet/tcp_input.c"
-    patch = Path(__file__).resolve().parent / "patches/freebsd-tcp-iss-retirement.patch"
+    patch = (Path(__file__).resolve().parents[1] /
+             "third_party/patches/freebsd/freebsd-tcp-iss-retirement.patch")
     generated = output / "tcp_input.c"
     generated.write_bytes(path.read_bytes())
     run([patch_tool, "--batch", "--forward", "--fuzz=0", "--no-backup-if-mismatch",

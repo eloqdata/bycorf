@@ -29,6 +29,16 @@ math(EXPR BYCORF_DPDK_REQUIRED_LCORES "${BYCORF_DPDK_MAX_WORKERS} + 1")
 target_compile_definitions(bycorf PRIVATE
   BYCORF_DPDK_MAX_WORKERS=${BYCORF_DPDK_MAX_WORKERS})
 if (NOT BYCORF_DPDK_PREFIX)
+  include("${CMAKE_CURRENT_LIST_DIR}/ApplyPatch.cmake")
+  set(BYCORF_DPDK_PATCHES
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/patches/dpdk/netvsc-realloc.patch")
+  # Patch changes must rerun configuration, which owns the DPDK build/install.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${BYCORF_DPDK_PATCHES})
+  foreach(patch_file IN LISTS BYCORF_DPDK_PATCHES)
+    bycorf_apply_patch("${CMAKE_CURRENT_SOURCE_DIR}/third_party/dpdk"
+      "${patch_file}")
+  endforeach()
   find_program(BYCORF_MESON_EXECUTABLE meson REQUIRED)
   find_program(BYCORF_NINJA_EXECUTABLE ninja REQUIRED)
   set(BYCORF_DPDK_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/dpdk-install")

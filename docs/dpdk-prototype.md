@@ -47,10 +47,21 @@ cmake -S . -B build-dpdk-net -G Ninja \
 cmake --build build-dpdk-net -j4
 ```
 
+Dependency patches are grouped under `third_party/patches/<dependency>/`.
+The FreeBSD build applies the TCP patch from `third_party/patches/freebsd/`
+to a fresh build-directory source copy, preserving the imported source digests.
+
 Bycorf builds and installs one static DPDK, then configures SPDK with
 `--with-dpdk=<that-installation>`. It never builds SPDK's nested DPDK.
+CMake applies the patches in `third_party/patches/dpdk/` to the direct DPDK
+submodule before compiling it. These are working-tree changes, not commits;
+reconfiguration recognizes fully applied patches, and conflicting or partially
+applied patches stop configuration. The netvsc patch frees the old event buffer
+when expansion fails, preventing a leak before the next allocation attempt.
 `BYCORF_DPDK_PREFIX` may point to an existing installation built from the same
-pinned DPDK commit, with static libraries in `lib/` and headers in `include/`.
+pinned DPDK commit with those patches applied, with static libraries in `lib/`
+and headers in `include/`. An external prefix skips the source build and patch
+application; its provider is responsible for including the fixes.
 `BYCORF_DPDK_DRIVERS` defaults to `net/tap,net/ring,net/virtio`; select additional
 PMDs at configuration time for other hardware. SPDK currently builds in its
 submodule directory, so configure builds that use different DPDK prefixes

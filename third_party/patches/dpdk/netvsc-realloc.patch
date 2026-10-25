@@ -1,0 +1,58 @@
+From b30b45c6b547c96ac4ee0267d4a016d68fb1c459 Mon Sep 17 00:00:00 2001
+From: Chen Zhao <ch3nzhao@gmail.com>
+Date: Sun, 25 Oct 2026 01:22:25 +0000
+Subject: [PATCH] net/netvsc: fix event buffer leak on realloc failure
+
+rte_realloc() failure overwrites event_buf and leaks the old allocation.
+Save the old pointer and free it on failure before resetting event_sz.
+
+Fixes: 1f2766b7ee02 ("net/netvsc: resize event buffer as needed")
+Cc: sthemmin@microsoft.com
+Cc: stable@dpdk.org
+Signed-off-by: Chen Zhao <ch3nzhao@gmail.com>
+---
+ .mailmap                     | 1 +
+ drivers/net/netvsc/hn_rxtx.c | 8 ++++++--
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/.mailmap b/.mailmap
+index 6d9e262cfb..deae6514dd 100644
+--- a/.mailmap
++++ b/.mailmap
+@@ -267,6 +267,7 @@ Charles Myers <charles.myers@spirent.com>
+ Charles Stoll <charles.stoll@intel.com>
+ Chas Williams <3chas3@gmail.com> <chas3@att.com>
+ Chas Williams <3chas3@gmail.com> <ciwillia@brocade.com>
++Chen Zhao <ch3nzhao@gmail.com>
+ Chenbo Xia <chenbox@nvidia.com> <chenbo.xia@intel.com>
+ Cheng Jiang <honest.jiang@foxmail.com> <cheng1.jiang@intel.com>
+ Cheng Liu <liucheng11@huawei.com>
+diff --git a/drivers/net/netvsc/hn_rxtx.c b/drivers/net/netvsc/hn_rxtx.c
+index 6f536610f2..4db6c933c9 100644
+--- a/drivers/net/netvsc/hn_rxtx.c
++++ b/drivers/net/netvsc/hn_rxtx.c
+@@ -1131,15 +1131,19 @@ uint32_t hn_process_events(struct hn_data *hv, uint16_t queue_id,
+ 
+ 		if (unlikely(ret == -ENOBUFS)) {
+ 			/* event buffer not large enough to read ring */
++			void *old_buf = rxq->event_buf;
+ 
+ 			PMD_DRV_LOG(DEBUG,
+ 				    "event buffer expansion (need %u)", len);
+ 			rxq->event_sz = len + len / 4;
+-			rxq->event_buf = rte_realloc(rxq->event_buf, rxq->event_sz,
++			rxq->event_buf = rte_realloc(old_buf, rxq->event_sz,
+ 						     RTE_CACHE_LINE_SIZE);
+ 			if (rxq->event_buf)
+ 				goto retry;
+-			/* out of memory, no more events now */
++			/*
++			 * out of memory, free the old buffer, no more events now
++			 */
++			rte_free(old_buf);
+ 			rxq->event_sz = 0;
+ 			break;
+ 		}
+-- 
+2.43.0
+

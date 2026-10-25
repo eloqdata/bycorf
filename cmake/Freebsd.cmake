@@ -35,7 +35,7 @@ add_custom_command(OUTPUT "${BYCORF_FREEBSD_ARCHIVE}"
     --target "${BYCORF_FREEBSD_TARGET}"
     --max-workers "${BYCORF_DPDK_MAX_WORKERS}"
   DEPENDS ${BYCORF_FREEBSD_INPUTS} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_freebsd.py"
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/freebsd-tcp-iss-retirement.patch"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/patches/freebsd/freebsd-tcp-iss-retirement.patch"
   COMMENT "Building the private FreeBSD IPv4/TCP stack" VERBATIM)
 add_custom_target(bycorf_freebsd_build DEPENDS "${BYCORF_FREEBSD_ARCHIVE}")
 add_library(bycorf_freebsd STATIC IMPORTED GLOBAL)
