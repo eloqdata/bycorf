@@ -47,6 +47,10 @@ cmake -S . -B build-dpdk-net -G Ninja \
 cmake --build build-dpdk-net -j4
 ```
 
+Dependency patches are grouped under `third_party/patches/<dependency>/`.
+The FreeBSD build applies the TCP patch from `third_party/patches/freebsd/`
+to a fresh build-directory source copy, preserving the imported source digests.
+
 Bycorf builds and installs one static DPDK, then configures SPDK with
 `--with-dpdk=<that-installation>`. It never builds SPDK's nested DPDK.
 CMake applies the patches in `third_party/patches/dpdk/` to the direct DPDK
