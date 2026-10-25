@@ -16,3 +16,6 @@
 # verifies them; Git checkout and whitespace cleanup must not rewrite them.
 third_party/freebsd/sys/** -text -whitespace
 third_party/freebsd/COPYRIGHT -text -whitespace
+
+# Preserve upstream patch context and email trailers verbatim.
+third_party/patches/**/*.patch -text -whitespace
