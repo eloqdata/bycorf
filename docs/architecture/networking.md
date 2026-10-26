@@ -70,6 +70,15 @@ PMD such as netvsc can own an accelerated VF beneath that single visible port;
 the parent controls child queues, datapath selection, fallback, and shutdown.
 Bycorf does not independently configure or close that owned child port.
 
+After application startup allocations, `DpdkBackend::CheckMemoryBudget` checks
+the remaining shared EAL heap capacity before the application publishes
+readiness. Its fixed-topology allowance covers netvsc event-buffer growth,
+concurrent RNDIS scratch, mlx5 lookup-cache growth, and allocator headroom.
+Each populated NUMA heap must independently satisfy the byte and largest-block
+requirements; host free hugepages are diagnostic and do not count as acquired
+capacity. An insufficient or unavailable heap snapshot fails admission. The
+check does not reserve memory or authorize later device or pool expansion.
+
 With default `hash` steering, a receive owner hashes the TCP tuple before
 entering the stack. If another worker owns the flow, the receive owner publishes
 the packet to that worker's bounded software ring. The connection owner runs
@@ -163,4 +172,4 @@ both modes; this is separate from Bycorf's worker sleep protocol.
 
 Sources: `include/bycorf/net/connection.h`, `src/net/tcp_service.cpp`, `src/net/tcp_listener.cpp`,
 `src/net/tcp_stream.cpp`, `src/net/socket_ops.cpp`, `src/io/dpdk_backend.cpp`,
-`src/io/freebsd/abi.h`, `src/io/freebsd/`.
+`src/io/dpdk_memory_budget.cpp`, `src/io/freebsd/abi.h`, `src/io/freebsd/`.
