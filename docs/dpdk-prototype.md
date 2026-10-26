@@ -217,6 +217,41 @@ requires exactly one available Ethernet port. Changing the
 selected backend or these settings requires process restart. The binary must
 include the requested capability; compilation alone does not activate it.
 
+### Startup memory allowance
+
+Applications call `DpdkBackend::CheckMemoryBudget()` after their fixed EAL
+allocations, including SPDK buffers and queue pairs when enabled, and before
+publishing readiness. With kernel networking the call is a no-op. The check
+uses existing heap capacity even in `--no-huge` test mode; it does not acquire
+additional pages or initialize EAL.
+
+For the pinned PMDs the remaining allowance is:
+
+| Component | Allowance |
+|---|---|
+| netvsc VMBus events | 1.25 MiB per configured queue pair, covering old/new images during growth |
+| netvsc RNDIS scratch | 8 KiB per possible control caller: workers plus main and EAL control threads |
+| mlx5 TX lookup caches, including netvsc's optional VF | Old/new tables per queue, sized from the packet pool's memory-chunk count; no growth allowance when the initial cache suffices |
+| Allocator headroom | Greater of 2 MiB or 25% of the above growth allowance |
+
+Fixed mbufs, descriptors, software queues, and SPDK allocations are already
+charged in the heap snapshot and are not added again. Every populated NUMA
+heap must have the full remaining allowance and a free block large enough for
+the largest individual allocation plus alignment/header space. This deliberately
+conservative policy avoids counting remote fragments as local capacity. Other
+PMDs receive the allocator-headroom floor, not a driver-specific growth model.
+The allowance covers the fixed configuration, not device hotplug, additional
+mempools, or a proof against all future fragmentation.
+
+Logs identify the driver, queue count, each allowance component, EAL heap
+total/allocated/free/largest-block bytes, and `BYCORF_DPDK_MEMORY_MB` when set.
+Host hugepage totals and free counts are reported separately by page size and
+NUMA node, with reservations reported globally. Unreadable host statistics are
+marked unavailable and do not prevent the heap check. A failed check reports
+the byte and largest-block shortfalls; increase the EAL allocation on the
+affected nodes and provision sufficient host hugepages. System free pages do
+not increase an existing fixed mbuf pool, and are not credited by this check.
+
 ### Worker capacity
 
 `BYCORF_DPDK_MAX_WORKERS` is a CMake capacity setting, default 128 (range

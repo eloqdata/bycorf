@@ -36,6 +36,13 @@ class DpdkBackend {
   // Adaptive mode requires usable RX notifications on every queue; unsupported
   // devices fail startup rather than silently selecting poll mode.
   static absl::Status PrepareRuntime(unsigned workers);
+  // Call once after application startup allocations (including SPDK buffers
+  // and qpairs) and before publishing service readiness. Logs remaining EAL
+  // capacity, the network growth allowance, and host hugepages; returns an
+  // error if any populated heap cannot meet the allowance. This is a startup
+  // admission check, not a reservation or a guarantee for runtime hotplug.
+  // Does not initialize EAL; with DPDK networking disabled it is a no-op.
+  static absl::Status CheckMemoryBudget();
   // Startup-only port placement. Every segment is steered to the same member
   // of this service's worker set; non-listening control workers are excluded.
   static absl::Status ConfigureListenerWorkers(

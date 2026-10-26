@@ -22,6 +22,7 @@
 #include <rte_errno.h>
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
+#include <rte_malloc.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
 #include <sys/random.h>
@@ -50,6 +51,7 @@
 #include "bycorf/io/dpdk_environment.h"
 #include "bycorf/net/socket_ops.h"
 #include "bycorf/runtime/worker.h"
+#include "dpdk_memory_budget.h"
 #include "freebsd/abi.h"
 #include "freebsd_errno.h"
 
@@ -120,6 +122,8 @@ struct Fabric {
   rte_mempool* pool = nullptr;
   bycorf_bsd_interface interface{};
   bool adaptive = false, tap = false, mlx5 = false, rss_owner = false;
+  bool netvsc = false;
+  std::string driver;
   // Populated before workers start, immutable throughout their lifetime.
   absl::flat_hash_map<std::uint16_t, std::vector<unsigned>> listener_workers;
   // A source port retains its owner through TIME_WAIT and is reused only by
@@ -668,6 +672,8 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
   fabric.tap =
       info.driver_name && std::string_view(info.driver_name) == "net_tap";
   const std::string_view driver = info.driver_name ? info.driver_name : "";
+  fabric.driver = driver;
+  fabric.netvsc = driver == "net_netvsc";
   fabric.mlx5 = driver == "mlx5_pci" || driver == "mlx5_auxiliary" ||
                 driver == "net_mlx5";
   unsigned requested = workers;
@@ -787,6 +793,58 @@ absl::Status DpdkBackend::PrepareRuntime(unsigned workers) {
       fabric.adaptive ? "adaptive" : "poll", address ? address : "198.18.0.2",
       fabric.rss_owner ? "rss" : "hash");
   return absl::OkStatus();
+}
+
+absl::Status DpdkBackend::CheckMemoryBudget() {
+  if (!DpdkNetworkEnabled()) return absl::OkStatus();
+  // Fabric's topology is immutable after preparation. The caller owns the
+  // startup readiness barrier; no cross-worker blocking mutex is needed here.
+  if (!fabric.prepared || fabric.stopped || !fabric.pool)
+    return absl::FailedPreconditionError("DPDK network has not been prepared");
+  const auto budget = detail::EstimateDpdkMemoryBudget(
+      fabric.workers, fabric.queues, fabric.pool->nb_mem_chunks, fabric.netvsc,
+      fabric.mlx5);
+  std::fprintf(
+      stderr,
+      "DPDK memory budget driver=%s workers=%u queues=%u pool_chunks=%u "
+      "spdk=%d hugepages=%d required_per_heap_bytes=%llu vmbus_bytes=%llu "
+      "rndis_bytes=%llu mlx5_cache_bytes=%llu allocator_margin_bytes=%llu "
+      "largest_required_block_bytes=%llu\n",
+      fabric.driver.c_str(), fabric.workers, fabric.queues,
+      fabric.pool->nb_mem_chunks, SpdkStorageEnabled(), rte_eal_has_hugepages(),
+      (unsigned long long)budget.total_bytes(),
+      (unsigned long long)budget.vmbus_bytes,
+      (unsigned long long)budget.rndis_bytes,
+      (unsigned long long)budget.mlx5_cache_bytes,
+      (unsigned long long)budget.margin_bytes,
+      (unsigned long long)budget.largest_allocation_bytes);
+  const char* configured = std::getenv("BYCORF_DPDK_MEMORY_MB");
+  std::fprintf(stderr, "DPDK memory configuration BYCORF_DPDK_MEMORY_MB=%s\n",
+               configured ? configured : "unset (EAL configuration)");
+  const auto host = detail::DescribeHostHugepages();
+  std::fwrite(host.data(), 1, host.size(), stderr);
+  std::vector<detail::DpdkHeapStats> heaps;
+  for (unsigned i = 0; i < rte_socket_count(); ++i) {
+    const int numa = rte_socket_id_by_idx(i);
+    rte_malloc_socket_stats stats{};
+    if (numa < 0 || rte_malloc_get_socket_stats(numa, &stats) != 0) {
+      std::fprintf(stderr, "DPDK memory statistics failed numa=%d\n", numa);
+      return absl::UnavailableError(
+          "DPDK memory budget cannot read EAL heap statistics");
+    }
+    std::fprintf(
+        stderr,
+        "DPDK memory numa=%d heap_total_bytes=%zu heap_allocated_bytes=%zu "
+        "heap_free_bytes=%zu largest_free_block_bytes=%zu\n",
+        numa, stats.heap_totalsz_bytes, stats.heap_allocsz_bytes,
+        stats.heap_freesz_bytes, stats.greatest_free_size);
+    heaps.push_back({numa, stats.heap_totalsz_bytes, stats.heap_allocsz_bytes,
+                     stats.heap_freesz_bytes, stats.greatest_free_size});
+  }
+  const auto status = detail::ValidateDpdkMemoryBudget(budget, heaps);
+  std::fprintf(stderr, "DPDK memory budget %s\n",
+               status.ok() ? "passed" : status.ToString().c_str());
+  return status;
 }
 
 void DpdkBackend::StopRuntime() {

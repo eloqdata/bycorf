@@ -311,7 +311,7 @@ if (BYCORF_KERNEL_BYPASS)
   list(FILTER BYCORF_SPDK_SYSTEM_ARCHIVES EXCLUDE REGEX "^-pthread$")
   include(cmake/Freebsd.cmake)
   target_sources(bycorf PRIVATE
-    src/io/dpdk_environment.cpp src/io/spdk_storage.cpp
+    src/io/dpdk_environment.cpp src/io/dpdk_memory_budget.cpp src/io/spdk_storage.cpp
     src/io/dpdk_backend.cpp src/net/socket_ops.cpp)
   target_include_directories(bycorf SYSTEM PUBLIC
     "${BYCORF_SPDK_SOURCE_DIR}/include"
@@ -465,6 +465,13 @@ if (BYCORF_BUILD_TESTS)
   target_link_libraries(bycorf_unit_tests PRIVATE bycorf::core GTest::gtest_main)
   bycorf_discover_tests(bycorf_unit_tests 30 "runtime;unit")
 
+  add_executable(bycorf_dpdk_memory_budget_tests
+    tests/dpdk_memory_budget_test.cpp src/io/dpdk_memory_budget.cpp)
+  target_link_libraries(bycorf_dpdk_memory_budget_tests PRIVATE
+    absl::status absl::strings GTest::gtest_main)
+  target_include_directories(bycorf_dpdk_memory_budget_tests PRIVATE src/io)
+  bycorf_discover_tests(bycorf_dpdk_memory_budget_tests 30 "runtime;net;unit")
+
   add_executable(bycorf_task_tests tests/task_transfer_test.cpp)
   target_link_libraries(bycorf_task_tests PRIVATE GTest::gtest)
   target_include_directories(bycorf_task_tests PRIVATE include)
@@ -483,6 +490,19 @@ if (BYCORF_BUILD_TESTS)
   bycorf_discover_tests(bycorf_runtime_tests 90 "runtime;net;io_uring")
 
   if (BYCORF_KERNEL_BYPASS)
+    add_executable(bycorf_dpdk_memory_startup_tests
+      tests/dpdk_memory_startup_test.cpp)
+    target_link_libraries(bycorf_dpdk_memory_startup_tests PRIVATE
+      bycorf::core GTest::gtest_main)
+    target_compile_options(bycorf_dpdk_memory_startup_tests PRIVATE
+      ${BYCORF_DPDK_COMPILE_FLAGS})
+    foreach(symbol IN ITEMS rte_malloc_get_socket_stats rte_eth_dev_info_get)
+      target_link_options(bycorf_dpdk_memory_startup_tests PRIVATE
+        "LINKER:--wrap=${symbol}")
+    endforeach()
+    bycorf_discover_tests(bycorf_dpdk_memory_startup_tests 30 "runtime;net;dpdk;stub"
+      RUN_SERIAL TRUE)
+
     add_executable(bycorf_dpdk_adaptive_tests tests/dpdk_adaptive_test.cpp)
     target_link_libraries(bycorf_dpdk_adaptive_tests PRIVATE bycorf::core GTest::gtest_main)
     target_include_directories(bycorf_dpdk_adaptive_tests PRIVATE
