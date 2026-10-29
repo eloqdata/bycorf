@@ -576,7 +576,12 @@ Task<absl::Status> TcpStream::WriteRawAll(std::span<const std::byte> buffer) {
 Task<absl::Status> TcpStream::WriteAll(std::span<const std::byte> buffer) {
   std::size_t written = 0;
   while (written < buffer.size()) {
-    auto result = co_await WriteSome(buffer.subspan(written));
+    // The plain transport operation already implements partial writes and
+    // suspension. Await it here instead of allocating a forwarding WriteSome
+    // task for every chunk; TLS still owns encryption and its write lifecycle.
+    auto result = tls_ != nullptr
+                      ? co_await tls_->WriteSome(*this, buffer.subspan(written))
+                      : co_await WriteRawSome(buffer.subspan(written));
     if (!result.ok()) {
       co_return result.status();
     }
