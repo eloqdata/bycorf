@@ -16,6 +16,9 @@
 
 #include "bycorf/net/http_service.h"
 
+#include <limits.h>
+
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <span>
@@ -37,6 +40,39 @@ std::span<const std::byte> Bytes(std::string_view value) {
 
 }  // namespace
 
+void HttpResponse::AppendBorrowedBody(std::string_view text) {
+  if (text.empty()) return;
+  if (body_parts_.empty() && !body_.empty()) {
+    body_parts_.push_back({nullptr, 0, body_.size()});
+  }
+  body_parts_.push_back({text.data(), 0, text.size()});
+}
+
+void HttpResponse::AppendBody(std::string_view text) {
+  if (text.empty()) return;
+  const auto offset = body_.size();
+  body_.append(text);
+  if (body_parts_.empty()) return;
+  auto& last = body_parts_.back();
+  if (last.data_ == nullptr && last.offset_ + last.size_ == offset) {
+    last.size_ += text.size();
+  } else {
+    body_parts_.push_back({nullptr, offset, text.size()});
+  }
+}
+
+std::size_t HttpResponse::BodySize() const noexcept {
+  if (body_parts_.empty()) return body_.size();
+  std::size_t size = 0;
+  for (const auto& part : body_parts_) size += part.size_;
+  return size;
+}
+
+std::string_view HttpResponse::Part(const BodyPart& part) const noexcept {
+  return {part.data_ == nullptr ? body_.data() + part.offset_ : part.data_,
+          part.size_};
+}
+
 bool HttpService::RegisterGet(std::string path, Handler handler) {
   for (const Route& route : get_routes_) {
     if (route.path_ == path) {
@@ -56,28 +92,28 @@ void HttpService::Prepare(unsigned thread_count) {
 Task<absl::Status> HttpService::Serve(TcpStream stream) {
   constexpr std::size_t kMaxRetainedBuffers = 4;
   constexpr std::size_t kMaxRetainedBufferBytes = 1024 * 1024;
-  std::vector<std::string>& buffer_pool =
-      response_buffers_[ThisWorker().id_].buffers_;
+  auto& buffer_pool = response_buffers_[ThisWorker().id_].buffers_;
   HttpResponse response;
   if (!buffer_pool.empty()) {
-    response.body_ = std::move(buffer_pool.back());
+    response.body_ = std::move(buffer_pool.back().body_);
+    response.body_parts_ = std::move(buffer_pool.back().body_parts_);
     buffer_pool.pop_back();
-    response.body_.clear();
   }
   struct ReturnResponseBuffer {
-    std::string* body_;
-    std::vector<std::string>* pool_;
-    std::size_t max_buffers_;
-    std::size_t max_buffer_bytes_;
+    HttpResponse& response_;
+    std::vector<HttpResponse>& pool_;
     ~ReturnResponseBuffer() {
-      if (body_->capacity() <= max_buffer_bytes_ &&
-          pool_->size() < max_buffers_) {
-        body_->clear();
-        pool_->push_back(std::move(*body_));
+      response_.body_.clear();
+      response_.body_parts_.clear();
+      // Retain scratch capacity only after all socket writes have retired.
+      if (response_.body_.capacity() + response_.body_parts_.capacity() *
+                                           sizeof(HttpResponse::BodyPart) <=
+              kMaxRetainedBufferBytes &&
+          pool_.size() < kMaxRetainedBuffers) {
+        pool_.push_back(std::move(response_));
       }
     }
-  } return_buffer{&response.body_, &buffer_pool, kMaxRetainedBuffers,
-                  kMaxRetainedBufferBytes};
+  } return_buffer{response, buffer_pool};
 
   constexpr std::size_t kMaxRequestBytes = 16 * 1024;
   std::array<std::byte, 2048> buffer{};
@@ -137,6 +173,7 @@ Task<absl::Status> HttpService::Serve(TcpStream stream) {
       if (!handled.ok()) {
         response.status_ = "500 Internal Server Error";
         response.content_type_ = "text/plain; charset=utf-8";
+        response.body_parts_.clear();
         response.body_ = "request handler failed\n";
       }
       co_return co_await WriteResponse(stream, response);
@@ -152,13 +189,31 @@ Task<absl::Status> HttpService::WriteResponse(TcpStream& stream,
   const std::string header =
       absl::StrCat("HTTP/1.1 ", response.status_,
                    "\r\nContent-Type: ", response.content_type_,
-                   "\r\nContent-Length: ", response.body_.size(),
+                   "\r\nContent-Length: ", response.BodySize(),
                    "\r\nConnection: close\r\n\r\n");
   absl::Status written = co_await stream.WriteAll(Bytes(header));
   if (!written.ok()) {
     co_return written;
   }
-  co_return co_await stream.WriteAll(Bytes(response.body_));
+  if (response.body_parts_.empty()) {
+    co_return co_await stream.WriteAll(Bytes(response.body_));
+  }
+  // Bound each sendmsg even when the body contains thousands of pieces.
+  // WriteAllV handles partial writes; every referenced byte stays alive in
+  // response or in the handler's borrowed immutable storage through the await.
+  std::array<iovec, std::min<std::size_t>(IOV_MAX, 1024)> buffers;
+  for (std::size_t first = 0; first < response.body_parts_.size();) {
+    const auto count =
+        std::min(buffers.size(), response.body_parts_.size() - first);
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto text = response.Part(response.body_parts_[first + i]);
+      buffers[i] = {const_cast<char*>(text.data()), text.size()};
+    }
+    written = co_await stream.WriteAllV(std::span(buffers).first(count));
+    if (!written.ok()) co_return written;
+    first += count;
+  }
+  co_return absl::OkStatus();
 }
 
 }  // namespace bycorf
