@@ -17,6 +17,7 @@
 #ifndef BYCORF_NET_HTTP_SERVICE_H_
 #define BYCORF_NET_HTTP_SERVICE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -37,9 +38,25 @@ struct HttpRequest {
 };
 
 struct HttpResponse {
+  struct BodyPart {
+    // Null data selects an offset in body_; offsets survive string growth.
+    const char* data_ = nullptr;
+    std::size_t offset_ = 0;
+    std::size_t size_ = 0;
+  };
   std::string status_ = "200 OK";
   std::string content_type_ = "text/plain; charset=utf-8";
   std::string body_;
+  std::vector<BodyPart> body_parts_;
+
+  // Optional segmented body. Borrowed text must remain immutable and alive
+  // until the service finishes sending, including after the handler returns.
+  // Owned pieces are copied into body_ and addressed by offset. Once parts
+  // are used, do not mutate body_ directly; use these append methods instead.
+  void AppendBorrowedBody(std::string_view text);
+  void AppendBody(std::string_view text);
+  [[nodiscard]] std::size_t BodySize() const noexcept;
+  [[nodiscard]] std::string_view Part(const BodyPart& part) const noexcept;
 };
 
 // Small pull-endpoint HTTP service. It intentionally supports one request per
@@ -58,13 +75,14 @@ class HttpService final : public TcpService {
   Task<absl::Status> Serve(TcpStream stream) override;
 
  private:
+  friend class HttpServiceTestPeer;
   struct Route {
     std::string path_;
     Handler handler_;
   };
 
   struct alignas(64) ResponseBufferPool {
-    std::vector<std::string> buffers_;
+    std::vector<HttpResponse> buffers_;
   };
 
   static Task<absl::Status> WriteResponse(TcpStream& stream,

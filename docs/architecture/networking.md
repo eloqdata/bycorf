@@ -39,6 +39,13 @@ one-attempt cancellation object on the same worker. Cancelling requests retireme
 callers still join the connecting coroutine before releasing its cancellation
 object or worker. Cancellation after return cannot affect the resulting stream.
 
+The HTTP service accepts either a contiguous owned response or an ordered body
+of borrowed immutable pieces and owned text. Handlers keep borrowed storage
+alive through response completion; owned offsets remain valid when scratch grows.
+The service sends bounded vectored batches, handles partial writes through
+`TcpStream`, and returns per-worker scratch to its bounded pool only after sends
+retire. Failed handlers discard their partial body before emitting an error.
+
 ## Kernel TCP
 
 Linux owns the TCP state and NIC receive processing. An accepted Linux socket

@@ -484,6 +484,7 @@ if (BYCORF_BUILD_TESTS)
   add_executable(bycorf_runtime_tests
     tests/connect_timer_test.cpp
     tests/connection_storage_test.cpp
+    tests/http_service_test.cpp
     tests/tcp_buffered_read_test.cpp
     tests/io_uring_backpressure_test.cpp)
   target_link_libraries(bycorf_runtime_tests PRIVATE bycorf::core GTest::gtest_main)
