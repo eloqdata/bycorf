@@ -52,10 +52,7 @@ Linux owns the TCP state and NIC receive processing. An accepted Linux socket
 may be assigned to another worker before its session starts. The service uses
 round-robin assignment within the service's selected worker set, then retains
 that worker for the session. io_uring
-completions make received byte ranges available to the stream. Plaintext reads
-expose orderly EOF as a successful zero-byte result after queued data drains;
-receive failures retain errno-derived status codes and diagnostics, with
-connection reset/abort reported as unavailable.
+completions make received byte ranges available to the stream.
 Connection closure cancels an armed receive by its operation identity before
 closing the descriptor. A receive may otherwise retain the kernel socket after
 `close`, delaying peer EOF and session replacement. Cancellation preserves a

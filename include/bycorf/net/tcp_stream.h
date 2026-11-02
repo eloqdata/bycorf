@@ -200,10 +200,6 @@ class TcpStream {
   // with their own bounded ingress queues.
   absl::Status SetReadAhead(bool enabled) noexcept;
 
-  // Read available bytes. For a nonempty destination, orderly peer EOF
-  // returns zero after queued bytes drain. Plaintext socket resets/aborts
-  // return kUnavailable; kernel receive failures retain errno-derived status
-  // codes and diagnostic messages rather than becoming generic kUnknown.
   Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
   // Wait for initial data, then copy currently queued receive buffers up to
   // buffer.size(). Never wait to fill the destination; its size bounds work
