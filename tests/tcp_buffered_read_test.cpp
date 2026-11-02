@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -25,6 +27,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "absl/cleanup/cleanup.h"
 #include "bycorf/io/storage.h"
@@ -249,6 +252,86 @@ absl::Status CheckCloseDoesNotShrink(bycorf::Worker& worker) {
   return Check(
       connection->closed_ && queue.empty() && queue.capacity() == capacity,
       "close discards queued buffers without shrinking storage");
+}
+
+// Use real loopback TCP: AF_UNIX socket pairs do not model TCP RST.
+bycorf::Task<absl::Status> CheckPeerClose(bycorf::Worker& worker, bool reset,
+                                          bool buffered) {
+  const int listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (listener < 0) co_return absl::ErrnoToStatus(errno, "socket listener");
+  absl::Cleanup close_listener = [&] { close(listener); };
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+          0 ||
+      listen(listener, 1) != 0)
+    co_return absl::ErrnoToStatus(errno, "listen");
+  socklen_t length = sizeof(address);
+  if (getsockname(listener, reinterpret_cast<sockaddr*>(&address), &length) !=
+      0)
+    co_return absl::ErrnoToStatus(errno, "getsockname");
+  int peer = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (peer < 0) co_return absl::ErrnoToStatus(errno, "socket peer");
+  absl::Cleanup close_peer = [&] {
+    if (peer >= 0) close(peer);
+  };
+  if (connect(peer, reinterpret_cast<sockaddr*>(&address), sizeof(address)) !=
+      0)
+    co_return absl::ErrnoToStatus(errno, "connect");
+  const int accepted =
+      accept4(listener, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+  if (accepted < 0) co_return absl::ErrnoToStatus(errno, "accept");
+  bycorf::Connection initial;
+  initial.worker_ = &worker;
+  initial.file_.fd_ = accepted;
+  initial.closed_ = false;
+  auto* connection = worker.AddConnection(std::move(initial));
+  bycorf::TcpStream stream(connection);
+  auto storage = stream.BorrowStorage();
+  absl::Cleanup close_stream = [&] { (void)stream.Close(); };
+  std::array<std::byte, 16> output;
+  // Establish a live receive before closing; drain the payload so no unread
+  // bytes can change a nominal FIN into a reset.
+  auto status = Send(peer, "hello");
+  if (!status.ok()) co_return status;
+  auto read = co_await stream.ReadSome(output);
+  if (!read.ok()) co_return read.status();
+  if (*read != 5) co_return absl::InternalError("unexpected greeting size");
+  if (reset) {
+    linger option{1, 0};
+    if (setsockopt(peer, SOL_SOCKET, SO_LINGER, &option, sizeof(option)) != 0)
+      co_return absl::ErrnoToStatus(errno, "SO_LINGER");
+  }
+  close(std::exchange(peer, -1));
+  read = buffered ? co_await stream.ReadSomeBuffered(output)
+                  : co_await stream.ReadSome(output);
+  if (!reset)
+    co_return Check(read.ok() && *read == 0, "FIN returns successful EOF");
+  status = Check(absl::IsUnavailable(read.status()),
+                 "RST returns unavailable instead of unknown");
+  if (!status.ok()) co_return status;
+  co_return Check(read.status().message() ==
+                      absl::ErrnoToStatus(ECONNRESET, "recv failed").message(),
+                  "RST preserves the kernel error diagnostic");
+}
+
+bycorf::Task<absl::Status> CheckPeerCloses(bycorf::Worker& worker) {
+  for (bool buffered : {false, true}) {
+    for (bool reset : {false, true}) {
+      auto status = co_await CheckPeerClose(worker, reset, buffered);
+      if (!status.ok()) co_return status;
+    }
+  }
+  co_return absl::OkStatus();
+}
+
+TEST(TcpBufferedRead, PeerCloseStatus) {
+  bycorf::test::RunOnWorker(CheckPeerCloses);
+}
+
+TEST(TcpBufferedRead, OneShotPeerCloseStatus) {
+  bycorf::test::RunOnWorker(CheckPeerCloses, {.recv_buffer_count_ = 0});
 }
 
 TEST(TcpBufferedRead, QueuedAndLiveReads) {

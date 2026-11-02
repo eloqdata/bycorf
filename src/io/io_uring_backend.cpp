@@ -818,8 +818,10 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
     connection->recv_eof_ = true;
     notify_reader = true;
   } else if (cqe->res < 0 && cqe->res != -ECANCELED && cqe->res != -ENOBUFS) {
-    connection->last_error_ =
-        absl::Status(absl::StatusCode::kUnknown, "recv multishot failed");
+    // Preserve errno classification and diagnostics for both receive modes.
+    // In particular, a reset/aborted connection is unavailable to its reader,
+    // not an unclassified protocol or application failure.
+    connection->last_error_ = absl::ErrnoToStatus(-cqe->res, "recv failed");
     notify_reader = true;
   } else if (cqe->res > 0) {
     connection->last_error_ = absl::Status(
