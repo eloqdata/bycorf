@@ -818,8 +818,7 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
     connection->recv_eof_ = true;
     notify_reader = true;
   } else if (cqe->res < 0 && cqe->res != -ECANCELED && cqe->res != -ENOBUFS) {
-    connection->last_error_ =
-        absl::Status(absl::StatusCode::kUnknown, "recv multishot failed");
+    connection->last_error_ = absl::ErrnoToStatus(-cqe->res, "recv failed");
     notify_reader = true;
   } else if (cqe->res > 0) {
     connection->last_error_ = absl::Status(
