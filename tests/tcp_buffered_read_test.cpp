@@ -304,12 +304,16 @@ bycorf::Task<absl::Status> CheckPeerClose(bycorf::Worker& worker, bool reset,
       co_return absl::ErrnoToStatus(errno, "SO_LINGER");
   }
   close(std::exchange(peer, -1));
-  read = buffered ? co_await stream.ReadSomeBuffered(output)
-                  : co_await stream.ReadSome(output);
+  if (buffered) {
+    read = co_await stream.ReadSomeBuffered(output);
+  } else {
+    read = co_await stream.ReadSome(output);
+  }
   if (!reset)
     co_return Check(read.ok() && *read == 0, "FIN returns successful EOF");
-  status = Check(absl::IsUnavailable(read.status()),
-                 "RST returns unavailable instead of unknown");
+  status = Check(
+      absl::IsUnavailable(read.status()),
+      "RST returns unavailable; actual status: " + read.status().ToString());
   if (!status.ok()) co_return status;
   co_return Check(read.status().message() ==
                       absl::ErrnoToStatus(ECONNRESET, "recv failed").message(),
