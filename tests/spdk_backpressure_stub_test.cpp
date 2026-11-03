@@ -52,6 +52,8 @@ namespace {
 enum class Operation { kRead, kWrite, kFlush };
 struct Namespace {
   unsigned controller;
+  std::uint32_t sector_size = 512;
+  std::uint64_t size_bytes = 1ULL << 34;
 };
 struct Controller {
   std::array<Namespace, 2> namespaces;
@@ -139,8 +141,12 @@ spdk_nvme_ns* __wrap_spdk_nvme_ctrlr_get_ns(spdk_nvme_ctrlr* ctrlr,
       &reinterpret_cast<Controller*>(ctrlr)->namespaces[id - 1]);
 }
 bool __wrap_spdk_nvme_ns_is_active(spdk_nvme_ns*) { return true; }
-uint32_t __wrap_spdk_nvme_ns_get_sector_size(spdk_nvme_ns*) { return 512; }
-uint64_t __wrap_spdk_nvme_ns_get_size(spdk_nvme_ns*) { return 1ULL << 34; }
+uint32_t __wrap_spdk_nvme_ns_get_sector_size(spdk_nvme_ns* ns) {
+  return reinterpret_cast<Namespace*>(ns)->sector_size;
+}
+uint64_t __wrap_spdk_nvme_ns_get_size(spdk_nvme_ns* ns) {
+  return reinterpret_cast<Namespace*>(ns)->size_bytes;
+}
 const spdk_nvme_ctrlr_data* __wrap_spdk_nvme_ctrlr_get_data(spdk_nvme_ctrlr*) {
   static const auto data = [] {
     spdk_nvme_ctrlr_data value{};
@@ -339,6 +345,96 @@ void CheckFixedBufferDescriptorLifetime(bycorf::Worker& worker,
   CHECK(saved_read.context == &read);
   CHECK(saved_read.buffer == buffer.data() + 2048);
   CHECK(saved_read.lba == 4 && saved_read.count == 1);
+}
+
+void CheckSectorArithmetic(bycorf::Worker& worker,
+                           std::span<std::byte> buffer) {
+  const auto sector = controllers[0].namespaces[0].sector_size;
+  const auto capacity = controllers[0].namespaces[0].size_bytes;
+  auto& queue = *qpairs[0];
+  Completion tail, write, read;
+  CHECK(worker.SubmitRead({0}, buffer, capacity - buffer.size(), &tail).ok());
+  CHECK(worker.SubmitWrite({1}, buffer, sector, &write).ok());
+  CHECK(worker.SubmitRead({0}, buffer, 2ULL * sector, &read).ok());
+  CHECK(queue.accepted.size() == 1);
+  CHECK(tail.calls + write.calls + read.calls == 0);
+  queue.completion_tokens = 3;
+  Drain(worker, [&] { return read.calls != 0; });
+  CHECK(tail.result == static_cast<int>(buffer.size()));
+  CHECK(write.result == static_cast<int>(buffer.size()));
+  CHECK(read.result == static_cast<int>(buffer.size()));
+  CHECK(queue.accepted.size() == 3);
+  CHECK(queue.accepted[0].lba == (capacity - buffer.size()) / sector);
+  CHECK(queue.accepted[1].operation == Operation::kWrite);
+  CHECK(queue.accepted[1].lba == 1 && queue.accepted[2].lba == 2);
+  for (const auto& command : queue.accepted) {
+    CHECK(command.buffer == buffer.data());
+    CHECK(command.count == buffer.size() / sector);
+  }
+
+  Completion rejected;
+  const auto attempts = queue.attempts;
+  if (sector > 1) {
+    CHECK(
+        absl::IsInvalidArgument(worker.SubmitRead({0}, buffer, 1, &rejected)));
+    CHECK(absl::IsInvalidArgument(worker.SubmitWrite(
+        {0}, buffer.first(buffer.size() - 1), 0, &rejected)));
+  }
+  CHECK(absl::IsInvalidArgument(
+      worker.SubmitRead({0}, buffer, capacity, &rejected)));
+  // Aligned offset whose addition with the request size would wrap. Bounds
+  // checks must continue to reject it before constructing a device command.
+  const auto overflowing_offset =
+      std::numeric_limits<std::uint64_t>::max() - (sector - 1);
+  CHECK(absl::IsInvalidArgument(
+      worker.SubmitWrite({0}, buffer, overflowing_offset, &rejected)));
+  CHECK(absl::IsInvalidArgument(worker.SubmitReadFixed(
+      {0}, {.data_ = buffer.data(), .size_ = 0}, 0, &rejected)));
+  CHECK(absl::IsInvalidArgument(worker.SubmitReadFixed(
+      {0},
+      {.data_ = buffer.data(),
+       .size_ = static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1},
+      0, &rejected)));
+  CHECK(rejected.calls == 0 && queue.attempts == attempts);
+}
+
+void CheckSyncSectorArithmetic() {
+  CHECK(bycorf::ConfigureIoBackends({.spdk_storage = true}).ok());
+  CHECK(bycorf::ProbeSpdkStorage(paths[0]).ok());
+  CHECK(qpairs.size() == 1);
+  auto& queue = *qpairs[0];
+  const auto sector = controllers[0].namespaces[0].sector_size;
+  const auto capacity = controllers[0].namespaces[0].size_bytes;
+  // Link-time stubs do not DMA; direct metadata I/O needs no DMA allocator.
+  std::array<std::byte, 4096> buffer{};
+  queue.completion_tokens = 2;
+  CHECK(bycorf::spdk::sync::ReadDma(paths[0], buffer, capacity - buffer.size())
+            .ok());
+  CHECK(bycorf::spdk::sync::WriteDma(paths[0], buffer, sector, false).ok());
+  CHECK(queue.accepted.size() == 2);
+  CHECK(queue.accepted[0].lba == (capacity - buffer.size()) / sector);
+  CHECK(queue.accepted[1].operation == Operation::kWrite);
+  CHECK(queue.accepted[1].lba == 1);
+  for (const auto& command : queue.accepted) {
+    CHECK(command.buffer == buffer.data());
+    CHECK(command.count == buffer.size() / sector);
+  }
+  const auto attempts = queue.attempts;
+  if (sector > 1) {
+    CHECK(absl::IsInvalidArgument(
+        bycorf::spdk::sync::ReadDma(paths[0], buffer, 1)));
+    CHECK(absl::IsInvalidArgument(bycorf::spdk::sync::WriteDma(
+        paths[0], std::span(buffer).first(buffer.size() - 1), 0, false)));
+  }
+  CHECK(absl::IsInvalidArgument(
+      bycorf::spdk::sync::ReadDma(paths[0], buffer, capacity)));
+  const auto overflowing_offset =
+      std::numeric_limits<std::uint64_t>::max() - (sector - 1);
+  CHECK(absl::IsInvalidArgument(bycorf::spdk::sync::WriteDma(
+      paths[0], buffer, overflowing_offset, false)));
+  CHECK(queue.attempts == attempts);
+  bycorf::ReleaseSpdkStorageMetadataQpairs();
+  CHECK(qpairs.empty());
 }
 
 void CheckErrors(bycorf::Worker& worker, std::span<std::byte> buffer) {
@@ -705,6 +801,51 @@ void RunCase(void (*check)(bycorf::Worker&, std::span<std::byte>)) {
 // SPDK metadata and the allocator selection are process-global. Each child
 // starts with fresh stubs and qpairs even when the binary runs every case or
 // repeats them in shuffled order.
+class SpdkSectorArithmeticDeathTest
+    : public testing::TestWithParam<std::uint32_t> {};
+
+TEST_P(SpdkSectorArithmeticDeathTest, Async) {
+  const auto sector = GetParam();
+  ASSERT_EXIT(
+      {
+        for (auto& controller : controllers)
+          for (auto& ns : controller.namespaces) ns.sector_size = sector;
+        RunCase(CheckSectorArithmetic);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST_P(SpdkSectorArithmeticDeathTest, Sync) {
+  const auto sector = GetParam();
+  ASSERT_EXIT(
+      {
+        controllers[0].namespaces[0].sector_size = sector;
+        CheckSyncSectorArithmetic();
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+INSTANTIATE_TEST_SUITE_P(SectorSizes, SpdkSectorArithmeticDeathTest,
+                         testing::Values(1, 512, 4096));
+
+TEST(SpdkBackpressureDeathTest, InvalidSectorSize) {
+  ASSERT_EXIT(
+      {
+        CHECK(bycorf::ConfigureIoBackends({.spdk_storage = true}).ok());
+        for (const std::uint32_t sector : {0u, 520u, 0xffffffffu}) {
+          controllers[0].namespaces[0].sector_size = sector;
+          CHECK(absl::IsFailedPrecondition(
+              bycorf::ProbeSpdkStorage(paths[0]).status()));
+        }
+        bycorf::ReleaseSpdkStorageMetadataQpairs();
+        CHECK(qpairs.empty());
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
 TEST(SpdkBackpressureDeathTest, Queues) {
   ASSERT_EXIT(
       {

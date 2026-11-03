@@ -24,6 +24,7 @@
 #include <spdk/nvme.h>
 
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
@@ -77,6 +78,9 @@ struct SpdkDevice {
   SpdkController* controller_ = nullptr;
   spdk_nvme_ns* ns_ = nullptr;
   std::uint32_t sector_size_ = 0;
+  // Discovery accepts only nonzero powers of two. Cache their exponent so
+  // request validation and LBA conversion need no variable integer division.
+  unsigned sector_shift_ = 0;
   std::uint64_t size_bytes_ = 0;
 };
 
@@ -220,6 +224,7 @@ absl::StatusOr<SpdkDevice*> GetDevice(std::string_view path) {
   device->controller_ = controller;
   device->ns_ = ns;
   device->sector_size_ = sector_size;
+  device->sector_shift_ = std::countr_zero(sector_size);
   device->size_bytes_ = spdk_nvme_ns_get_size(ns);
   SpdkDevice* raw = device.get();
   g_spdk_devices.emplace(parsed->canonical_, std::move(device));
@@ -242,14 +247,14 @@ absl::Status SubmitSync(SpdkDevice& device, void* buffer, std::size_t bytes,
   if (bytes == 0) {
     return absl::OkStatus();
   }
-  if (offset % device.sector_size_ != 0 || bytes % device.sector_size_ != 0 ||
+  if (((offset | bytes) & (device.sector_size_ - 1)) != 0 ||
       offset > device.size_bytes_ || bytes > device.size_bytes_ - offset) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "unaligned or out-of-range SPDK I/O");
   }
-  const std::uint64_t lba = offset / device.sector_size_;
+  const std::uint64_t lba = offset >> device.sector_shift_;
   const std::uint32_t lba_count =
-      static_cast<std::uint32_t>(bytes / device.sector_size_);
+      static_cast<std::uint32_t>(bytes >> device.sector_shift_);
   SpdkController& controller = *device.controller_;
   if (controller.sync_qpair_ == nullptr) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
@@ -573,20 +578,22 @@ absl::Status SpdkBackend::SubmitIo(FixedFile file, void* buffer,
   }
   auto* device = static_cast<SpdkDevice*>(opened->device_);
   const std::uint32_t sector = device->sector_size_;
+  const unsigned sector_shift = device->sector_shift_;
   if (bytes > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-      offset % sector != 0 || bytes % sector != 0 ||
-      bytes / sector > std::numeric_limits<std::uint32_t>::max() ||
+      ((offset | bytes) & (sector - 1)) != 0 ||
+      (bytes >> sector_shift) > std::numeric_limits<std::uint32_t>::max() ||
       offset > device->size_bytes_ || bytes > device->size_bytes_ - offset) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid SPDK I/O range or alignment");
   }
-  const PendingIo request{.tag_ = tag,
-                          .buffer_ = buffer,
-                          .lba_ = offset / sector,
-                          .count_ = static_cast<std::uint32_t>(bytes / sector),
-                          .file_ = file,
-                          .operation_ = write ? PendingIo::Operation::kWrite
-                                              : PendingIo::Operation::kRead};
+  const PendingIo request{
+      .tag_ = tag,
+      .buffer_ = buffer,
+      .lba_ = offset >> sector_shift,
+      .count_ = static_cast<std::uint32_t>(bytes >> sector_shift),
+      .file_ = file,
+      .operation_ =
+          write ? PendingIo::Operation::kWrite : PendingIo::Operation::kRead};
   tag->success_result_ = static_cast<int>(bytes);
   // Reuse the lookup needed for validation on the ordinary submission path;
   // only a deferred retry needs to resolve the saved file index again.
