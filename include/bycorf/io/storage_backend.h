@@ -177,11 +177,11 @@ class StorageBackend {
 #if BYCORF_KERNEL_BYPASS
   // Resolve callback ownership through worker TLS without adding an owner
   // pointer to every I/O request.
-  friend class SpdkStorageBackend;
+  friend class SpdkBackend;
   // Default construction acquires no device resources. Successful Init marks
   // this backend active; reuse that state instead of a second selection flag.
   // Storage submissions require a successfully initialized, live worker.
-  SpdkStorageBackend spdk_;
+  SpdkBackend spdk_;
 #endif
 };
 }  // namespace bycorf

@@ -105,12 +105,12 @@ void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept;
 // capacity. The backend owns waiting request metadata; each tag represents one
 // unfinished request. Submit methods never dispatch completions inline. Poll
 // drives both device completions and deferred submissions.
-class SpdkStorageBackend {
+class SpdkBackend {
  public:
-  SpdkStorageBackend() = default;
-  SpdkStorageBackend(const SpdkStorageBackend&) = delete;
-  SpdkStorageBackend& operator=(const SpdkStorageBackend&) = delete;
-  ~SpdkStorageBackend();
+  SpdkBackend() = default;
+  SpdkBackend(const SpdkBackend&) = delete;
+  SpdkBackend& operator=(const SpdkBackend&) = delete;
+  ~SpdkBackend();
 
   // Initialize only the storage backend embedded in worker.
   absl::Status Init(Worker* worker);

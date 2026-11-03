@@ -48,7 +48,7 @@ class IoCompletion {
   std::coroutine_handle<> awaiting_{};
 
  private:
-  friend class SpdkStorageBackend;
+  friend class SpdkBackend;
 
   // Status-only storage completions need the expected successful byte count
   // (zero for flush). Keep it with the caller-owned tag so submitted commands

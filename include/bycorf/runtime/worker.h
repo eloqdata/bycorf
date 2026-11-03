@@ -380,7 +380,7 @@ class Worker {
 
 #if BYCORF_KERNEL_BYPASS
   // Completion callbacks locate the embedded SPDK instance through worker TLS.
-  friend class SpdkStorageBackend;
+  friend class SpdkBackend;
 #endif
 
   struct StorageFileIoStats {

@@ -406,28 +406,28 @@ void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept {
     ::operator delete[](buffer, std::align_val_t(alignment));
 }
 
-void SpdkStorageBackend::CompleteAsync(void* context,
-                                       const spdk_nvme_cpl* completion) {
+void SpdkBackend::CompleteAsync(void* context,
+                                const spdk_nvme_cpl* completion) {
   auto* tag = static_cast<IoCompletion*>(context);
   const int result =
       spdk_nvme_cpl_is_error(completion) ? -EIO : tag->success_result_;
   Worker* worker = ThisWorker().self_;
   assert(worker != nullptr);
-  SpdkStorageBackend* backend = &worker->storage_backend_.spdk_;
+  SpdkBackend* backend = &worker->storage_backend_.spdk_;
   // Complete may resubmit this tag or destroy it. Read its result first and
   // never access caller-owned state after dispatching the terminal completion.
   backend->CompleteRequest(tag, result);
 }
 
-SpdkStorageBackend::~SpdkStorageBackend() { Shutdown(); }
+SpdkBackend::~SpdkBackend() { Shutdown(); }
 
-void SpdkStorageBackend::CompleteRequest(IoCompletion* tag, int result) {
+void SpdkBackend::CompleteRequest(IoCompletion* tag, int result) {
   assert(outstanding_ != 0);
   --outstanding_;
   tag->Complete(*worker_, result, 0);
 }
 
-absl::Status SpdkStorageBackend::Init(Worker* worker) {
+absl::Status SpdkBackend::Init(Worker* worker) {
   if (worker == nullptr || &worker->storage_backend_.spdk_ != this) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "SPDK storage backend must be owned by its worker");
@@ -436,7 +436,7 @@ absl::Status SpdkStorageBackend::Init(Worker* worker) {
   return absl::OkStatus();
 }
 
-void SpdkStorageBackend::Shutdown() {
+void SpdkBackend::Shutdown() {
   if (worker_ == nullptr) {
     return;
   }
@@ -459,7 +459,7 @@ void SpdkStorageBackend::Shutdown() {
   worker_ = nullptr;
 }
 
-absl::Status SpdkStorageBackend::RegisterFixedFiles(unsigned count) {
+absl::Status SpdkBackend::RegisterFixedFiles(unsigned count) {
   if (worker_ == nullptr || count == 0 || !files_.empty()) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "invalid SPDK fixed-file table registration");
@@ -468,8 +468,7 @@ absl::Status SpdkStorageBackend::RegisterFixedFiles(unsigned count) {
   return absl::OkStatus();
 }
 
-absl::Status SpdkStorageBackend::RegisterBuffers(
-    std::span<const iovec> buffers) {
+absl::Status SpdkBackend::RegisterBuffers(std::span<const iovec> buffers) {
   if (worker_ == nullptr || buffers.empty()) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "invalid SPDK DMA-buffer registration");
@@ -484,16 +483,15 @@ absl::Status SpdkStorageBackend::RegisterBuffers(
   return absl::OkStatus();
 }
 
-SpdkStorageBackend::OpenFile* SpdkStorageBackend::Lookup(FixedFile file) {
+SpdkBackend::OpenFile* SpdkBackend::Lookup(FixedFile file) {
   return file.index_ < files_.size() && files_[file.index_].qpair_ != nullptr
              ? &files_[file.index_]
              : nullptr;
 }
 
-absl::Status SpdkStorageBackend::SubmitOpenDirect(std::string_view path,
-                                                  int flags, mode_t,
-                                                  FixedFile file,
-                                                  IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitOpenDirect(std::string_view path, int flags,
+                                           mode_t, FixedFile file,
+                                           IoCompletion* tag) {
   if ((flags & O_RDWR) == 0 || file.index_ >= files_.size() || tag == nullptr) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "invalid SPDK open request");
@@ -534,8 +532,7 @@ absl::Status SpdkStorageBackend::SubmitOpenDirect(std::string_view path,
   return absl::OkStatus();
 }
 
-absl::Status SpdkStorageBackend::SubmitCloseDirect(FixedFile file,
-                                                   IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
   OpenFile* opened = Lookup(file);
   if (opened == nullptr || tag == nullptr || outstanding_ != 0) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
@@ -566,10 +563,9 @@ absl::Status SpdkStorageBackend::SubmitCloseDirect(FixedFile file,
   return absl::OkStatus();
 }
 
-absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
-                                          std::size_t bytes,
-                                          std::uint64_t offset, bool write,
-                                          IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitIo(FixedFile file, void* buffer,
+                                   std::size_t bytes, std::uint64_t offset,
+                                   bool write, IoCompletion* tag) {
   OpenFile* opened = Lookup(file);
   if (opened == nullptr || buffer == nullptr || bytes == 0 || tag == nullptr) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
@@ -597,37 +593,32 @@ absl::Status SpdkStorageBackend::SubmitIo(FixedFile file, void* buffer,
   return SubmitOrDefer(request, device->ns_, opened->channel_index_);
 }
 
-absl::Status SpdkStorageBackend::SubmitReadFixed(FixedFile file,
-                                                 FixedBuffer buffer,
-                                                 std::uint64_t offset,
-                                                 IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+                                          std::uint64_t offset,
+                                          IoCompletion* tag) {
   return SubmitIo(file, buffer.data_, buffer.size_, offset, false, tag);
 }
 
-absl::Status SpdkStorageBackend::SubmitRead(FixedFile file,
-                                            std::span<std::byte> buffer,
-                                            std::uint64_t offset,
-                                            IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitRead(FixedFile file,
+                                     std::span<std::byte> buffer,
+                                     std::uint64_t offset, IoCompletion* tag) {
   return SubmitIo(file, buffer.data(), buffer.size(), offset, false, tag);
 }
 
-absl::Status SpdkStorageBackend::SubmitWrite(FixedFile file,
-                                             std::span<const std::byte> buffer,
-                                             std::uint64_t offset,
-                                             IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitWrite(FixedFile file,
+                                      std::span<const std::byte> buffer,
+                                      std::uint64_t offset, IoCompletion* tag) {
   return SubmitIo(file, const_cast<std::byte*>(buffer.data()), buffer.size(),
                   offset, true, tag);
 }
 
-absl::Status SpdkStorageBackend::SubmitWriteFixed(FixedFile file,
-                                                  FixedBuffer buffer,
-                                                  std::uint64_t offset,
-                                                  IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+                                           std::uint64_t offset,
+                                           IoCompletion* tag) {
   return SubmitIo(file, buffer.data_, buffer.size_, offset, true, tag);
 }
 
-absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
-                                                 IoCompletion* tag) {
+absl::Status SpdkBackend::SubmitFdatasync(FixedFile file, IoCompletion* tag) {
   OpenFile* opened = Lookup(file);
   if (opened == nullptr || tag == nullptr) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
@@ -651,8 +642,8 @@ absl::Status SpdkStorageBackend::SubmitFdatasync(FixedFile file,
   return SubmitOrDefer(request, device->ns_, opened->channel_index_);
 }
 
-int SpdkStorageBackend::TrySubmit(const PendingIo& request, spdk_nvme_ns* ns,
-                                  spdk_nvme_qpair* qpair) {
+int SpdkBackend::TrySubmit(const PendingIo& request, spdk_nvme_ns* ns,
+                           spdk_nvme_qpair* qpair) {
   switch (request.operation_) {
     case PendingIo::Operation::kRead:
       return spdk_nvme_ns_cmd_read(ns, qpair, request.buffer_, request.lba_,
@@ -668,9 +659,9 @@ int SpdkStorageBackend::TrySubmit(const PendingIo& request, spdk_nvme_ns* ns,
   return -EINVAL;
 }
 
-absl::Status SpdkStorageBackend::SubmitOrDefer(const PendingIo& request,
-                                               spdk_nvme_ns* ns,
-                                               std::size_t channel_index) {
+absl::Status SpdkBackend::SubmitOrDefer(const PendingIo& request,
+                                        spdk_nvme_ns* ns,
+                                        std::size_t channel_index) {
   const ControllerChannel& channel = channels_[channel_index];
   if (!channel.pending_.empty()) [[unlikely]] {
     // Preserve submission order even if device capacity has become available
@@ -689,7 +680,7 @@ absl::Status SpdkStorageBackend::SubmitOrDefer(const PendingIo& request,
   return SubmitError(rc);
 }
 
-ABSL_ATTRIBUTE_NOINLINE absl::Status SpdkStorageBackend::QueuePending(
+ABSL_ATTRIBUTE_NOINLINE absl::Status SpdkBackend::QueuePending(
     const PendingIo& request, std::size_t channel_index) {
   // SPDK retains nothing when submission fails. Store only unsubmitted
   // arguments here; issued requests use the caller's tag as callback context.
@@ -705,7 +696,7 @@ ABSL_ATTRIBUTE_NOINLINE absl::Status SpdkStorageBackend::QueuePending(
   return absl::OkStatus();
 }
 
-ABSL_ATTRIBUTE_NOINLINE void SpdkStorageBackend::RetryDeferred(
+ABSL_ATTRIBUTE_NOINLINE void SpdkBackend::RetryDeferred(
     std::size_t channel_index, unsigned limit, SpdkPollResult& result) {
   const std::size_t generation = channel_generation_;
   for (unsigned submitted = 0; !channels_[channel_index].pending_.empty() &&
@@ -737,7 +728,7 @@ ABSL_ATTRIBUTE_NOINLINE void SpdkStorageBackend::RetryDeferred(
   }
 }
 
-SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
+SpdkPollResult SpdkBackend::Poll(unsigned max_completions) {
   assert(worker_ == nullptr || ThisWorker().self_ == worker_);
   SpdkPollResult result;
   if (!pending_completions_.empty()) {
