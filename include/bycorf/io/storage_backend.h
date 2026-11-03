@@ -120,7 +120,9 @@ class StorageBackend {
 #endif
     return Kernel().SubmitCloseDirect(file, tag);
   }
-  absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+  // Forward the descriptor without copying it. Neither backend retains its
+  // address after submission, including when the request must be queued.
+  absl::Status SubmitReadFixed(FixedFile file, const FixedBuffer& buffer,
                                std::uint64_t offset, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
@@ -147,7 +149,7 @@ class StorageBackend {
 #endif
     return Kernel().SubmitWrite(file, buffer, offset, tag);
   }
-  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+  absl::Status SubmitWriteFixed(FixedFile file, const FixedBuffer& buffer,
                                 std::uint64_t offset, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {

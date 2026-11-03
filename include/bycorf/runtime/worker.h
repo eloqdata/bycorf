@@ -303,7 +303,10 @@ class Worker : private IoUringBackend,
   absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
     return Storage::SubmitCloseDirect(file, tag);
   }
-  absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+  // Borrow only the descriptor during submission to avoid copying it through
+  // each facade. Backends snapshot queued arguments before returning; the
+  // referenced data and registration must still survive until completion.
+  absl::Status SubmitReadFixed(FixedFile file, const FixedBuffer& buffer,
                                std::uint64_t offset, IoCompletion* tag) {
     return Storage::SubmitReadFixed(file, buffer, offset, tag);
   }
@@ -320,7 +323,7 @@ class Worker : private IoUringBackend,
     }
     return status;
   }
-  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+  absl::Status SubmitWriteFixed(FixedFile file, const FixedBuffer& buffer,
                                 std::uint64_t offset, IoCompletion* tag) {
     auto status = Storage::SubmitWriteFixed(file, buffer, offset, tag);
     if (status.ok() && file.index_ < storage_file_io_stats_.size()) {

@@ -307,6 +307,40 @@ void CheckQueues(bycorf::Worker& worker, std::span<std::byte> buffer) {
       << "PASS independent qpairs, FIFO retries, read/write/flush metadata\n";
 }
 
+void CheckFixedBufferDescriptorLifetime(bycorf::Worker& worker,
+                                        std::span<std::byte> buffer) {
+  auto& queue = *qpairs[0];
+  Completion first, write, read;
+  bycorf::FixedBuffer descriptor{.data_ = buffer.data(),
+                                 .size_ = buffer.size()};
+  CHECK(worker.SubmitReadFixed({0}, descriptor, 0, &first).ok());
+  descriptor = {.data_ = buffer.data() + 512, .size_ = 1024};
+  CHECK(worker.SubmitWriteFixed({1}, descriptor, 1024, &write).ok());
+  descriptor = {.data_ = buffer.data() + 2048, .size_ = 512};
+  CHECK(worker.SubmitReadFixed({0}, descriptor, 2048, &read).ok());
+  // The qpair admits only the first request. Deferred read/write arguments
+  // must be independent of the caller's reused descriptor before any poll.
+  descriptor = {};
+  CHECK(queue.accepted.size() == 1);
+  CHECK(first.calls + write.calls + read.calls == 0);
+  queue.completion_tokens = 3;
+  Drain(worker, [&] { return read.calls == 1; });
+  CHECK(first.calls == 1 && first.result == static_cast<int>(buffer.size()));
+  CHECK(write.calls == 1 && write.result == 1024);
+  CHECK(read.result == 512);
+  CHECK(queue.accepted.size() == 3);
+  const auto& saved_write = queue.accepted[1];
+  CHECK(saved_write.operation == Operation::kWrite);
+  CHECK(saved_write.context == &write);
+  CHECK(saved_write.buffer == buffer.data() + 512);
+  CHECK(saved_write.lba == 2 && saved_write.count == 2);
+  const auto& saved_read = queue.accepted[2];
+  CHECK(saved_read.operation == Operation::kRead);
+  CHECK(saved_read.context == &read);
+  CHECK(saved_read.buffer == buffer.data() + 2048);
+  CHECK(saved_read.lba == 4 && saved_read.count == 1);
+}
+
 void CheckErrors(bycorf::Worker& worker, std::span<std::byte> buffer) {
   auto& queue = *qpairs[0];
   Completion oversized;
@@ -675,6 +709,15 @@ TEST(SpdkBackpressureDeathTest, Queues) {
   ASSERT_EXIT(
       {
         RunCase(CheckQueues);
+        std::exit(0);
+      },
+      testing::ExitedWithCode(0), "");
+}
+
+TEST(SpdkBackpressureDeathTest, FixedBufferDescriptorLifetime) {
+  ASSERT_EXIT(
+      {
+        RunCase(CheckFixedBufferDescriptorLifetime);
         std::exit(0);
       },
       testing::ExitedWithCode(0), "");
