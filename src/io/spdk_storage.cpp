@@ -593,7 +593,8 @@ absl::Status SpdkBackend::SubmitIo(FixedFile file, void* buffer,
   return SubmitOrDefer(request, device->ns_, opened->channel_index_);
 }
 
-absl::Status SpdkBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+absl::Status SpdkBackend::SubmitReadFixed(FixedFile file,
+                                          const FixedBuffer& buffer,
                                           std::uint64_t offset,
                                           IoCompletion* tag) {
   return SubmitIo(file, buffer.data_, buffer.size_, offset, false, tag);
@@ -612,7 +613,8 @@ absl::Status SpdkBackend::SubmitWrite(FixedFile file,
                   offset, true, tag);
 }
 
-absl::Status SpdkBackend::SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+absl::Status SpdkBackend::SubmitWriteFixed(FixedFile file,
+                                           const FixedBuffer& buffer,
                                            std::uint64_t offset,
                                            IoCompletion* tag) {
   return SubmitIo(file, buffer.data_, buffer.size_, offset, true, tag);

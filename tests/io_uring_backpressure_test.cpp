@@ -400,6 +400,65 @@ TEST(IoUringBackpressure, StorageReads) {
   std::cout << "PASS queued fixed-file reads preserve buffers and offsets\n";
 }
 
+TEST(IoUringBackpressure, FixedBufferDescriptorLifetime) {
+  Fixture fixture;
+  ASSERT_NO_FATAL_FAILURE(fixture.Init());
+  char path[] = "/tmp/bycorf-fixed-buffer-XXXXXX";
+  const int fd = mkstemp(path);
+  ASSERT_GE(fd, 0);
+  ASSERT_TRUE(fixture.backend.RegisterFixedFiles(1).ok());
+  Completion opened;
+  ASSERT_TRUE(
+      fixture.backend.SubmitOpenDirect(path, O_RDWR, 0, {0}, &opened).ok());
+  Drain(fixture.backend, [&] { return opened.calls != 0; });
+  ASSERT_EQ(opened.result, 0);
+  ASSERT_EQ(unlink(path), 0);
+  ASSERT_EQ(close(fd), 0);
+
+  std::array<std::byte, 64> payload, received{};
+  for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = std::byte(i);
+  const std::array<iovec, 2> regions{
+      {{payload.data(), payload.size()}, {received.data(), received.size()}}};
+  ASSERT_TRUE(fixture.backend.RegisterBuffers(regions).ok());
+  std::array<Completion, 16> writes, reads;
+  bycorf::FixedBuffer descriptor;
+  for (std::size_t i = 0; i < writes.size(); ++i) {
+    descriptor = {.data_ = payload.data() + i * 4, .size_ = 4, .index_ = 0};
+    ASSERT_TRUE(
+        fixture.backend.SubmitWriteFixed({0}, descriptor, i * 4, &writes[i])
+            .ok());
+  }
+  // Most requests are queued behind the two-entry SQ. Reusing and clearing
+  // the descriptor must not change their saved buffer, length or index.
+  descriptor = {};
+  for (const auto& tag : writes) ASSERT_EQ(tag.calls, 0u);
+  Drain(fixture.backend, [&] {
+    for (const auto& tag : writes)
+      if (tag.calls == 0) return false;
+    return true;
+  });
+  for (const auto& tag : writes) ASSERT_EQ(tag.result, 4);
+  for (std::size_t i = 0; i < reads.size(); ++i) {
+    descriptor = {.data_ = received.data() + i * 4, .size_ = 4, .index_ = 1};
+    ASSERT_TRUE(
+        fixture.backend.SubmitReadFixed({0}, descriptor, i * 4, &reads[i])
+            .ok());
+  }
+  descriptor = {};
+  for (const auto& tag : reads) ASSERT_EQ(tag.calls, 0u);
+  Drain(fixture.backend, [&] {
+    for (const auto& tag : reads)
+      if (tag.calls == 0) return false;
+    return true;
+  });
+  for (const auto& tag : reads) ASSERT_EQ(tag.result, 4);
+  ASSERT_EQ(received, payload);
+  Completion closed;
+  ASSERT_TRUE(fixture.backend.SubmitCloseDirect({0}, &closed).ok());
+  Drain(fixture.backend, [&] { return closed.calls != 0; });
+  ASSERT_EQ(closed.result, 0);
+}
+
 // Both facades must submit to the same ring: the network event loop also
 // delivers storage completions, and stopping either facade must leave the
 // worker-owned ring available until the worker shuts it down.

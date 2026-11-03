@@ -301,7 +301,8 @@ absl::Status IoUringBackend::SubmitCloseDirect(FixedFile file,
   });
 }
 
-absl::Status IoUringBackend::SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+absl::Status IoUringBackend::SubmitReadFixed(FixedFile file,
+                                             const FixedBuffer& buffer,
                                              std::uint64_t offset,
                                              IoCompletion* tag) {
   return SubmitOrQueue([=](io_uring_sqe* sqe) {
@@ -338,7 +339,7 @@ absl::Status IoUringBackend::SubmitWrite(FixedFile file,
 }
 
 absl::Status IoUringBackend::SubmitWriteFixed(FixedFile file,
-                                              FixedBuffer buffer,
+                                              const FixedBuffer& buffer,
                                               std::uint64_t offset,
                                               IoCompletion* tag) {
   return SubmitOrQueue([=](io_uring_sqe* sqe) {

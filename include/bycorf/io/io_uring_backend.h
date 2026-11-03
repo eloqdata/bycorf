@@ -122,13 +122,15 @@ class IoUringBackend {
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                                 FixedFile file, IoCompletion* tag);
   absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag);
-  absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+  // Fixed-buffer submissions borrow the descriptor only for this call. Both
+  // the SQ and the pending FIFO retain prepared values, never its address.
+  absl::Status SubmitReadFixed(FixedFile file, const FixedBuffer& buffer,
                                std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                           std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                            std::uint64_t offset, IoCompletion* tag);
-  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+  absl::Status SubmitWriteFixed(FixedFile file, const FixedBuffer& buffer,
                                 std::uint64_t offset, IoCompletion* tag);
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
   absl::Status SubmitTimeout(const __kernel_timespec& timeout,
