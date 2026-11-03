@@ -23,7 +23,7 @@ and asynchronous I/O. Abseil supplies status types and spdlog supplies logging.
 | Module | Responsibility | Document |
 |---|---|---|
 | Runtime | Worker lifecycle, coroutine scheduling, cross-worker and foreign ingress | [Runtime](runtime.md) |
-| I/O | io_uring, optional SPDK storage, shared DPDK environment | [I/O backends](io.md) |
+| I/O | Worker-owned shared io_uring, network/storage adapters, optional SPDK storage, shared DPDK environment | [I/O backends](io.md) |
 | Networking | Listeners, streams, services, TLS, optional DPDK/FreeBSD IPv4 TCP | [Networking](networking.md) |
 | RPC | Framed request/reply protocol above streams | [RPC](rpc.md) |
 

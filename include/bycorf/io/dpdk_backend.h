@@ -50,7 +50,8 @@ class DpdkBackend {
   // Release peers waiting for worker 0 if any worker fails during startup.
   static void AbortStartup(const absl::Status& reason);
   static void StopRuntime();
-  absl::Status Init(const IoBackendOptions&, Worker*, int wake_fd);
+  // The worker initializes the borrowed ring before attaching networking.
+  absl::Status Init(const IoBackendOptions&, Worker*);
   void Shutdown();
   bool Poll();
   bool Wait(int timeout_ms);

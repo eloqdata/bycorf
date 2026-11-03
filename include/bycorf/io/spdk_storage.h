@@ -105,16 +105,19 @@ void FreeStorageBuffer(void* buffer, std::size_t alignment) noexcept;
 // capacity. The backend owns waiting request metadata; each tag represents one
 // unfinished request. Submit methods never dispatch completions inline. Poll
 // drives both device completions and deferred submissions.
-class SpdkStorageBackend {
+class SpdkBackend {
  public:
-  SpdkStorageBackend() = default;
-  SpdkStorageBackend(const SpdkStorageBackend&) = delete;
-  SpdkStorageBackend& operator=(const SpdkStorageBackend&) = delete;
-  ~SpdkStorageBackend();
+  SpdkBackend() = default;
+  SpdkBackend(const SpdkBackend&) = delete;
+  SpdkBackend& operator=(const SpdkBackend&) = delete;
+  ~SpdkBackend();
 
   // Initialize only the storage backend embedded in worker.
   absl::Status Init(Worker* worker);
   void Shutdown();
+  // Owner-thread state: true after successful Init until Shutdown finishes
+  // draining, including callbacks that submit more work during that drain.
+  bool IsInitialized() const noexcept { return worker_ != nullptr; }
 
   absl::Status RegisterFixedFiles(unsigned count);
   absl::Status RegisterBuffers(std::span<const iovec> buffers);
@@ -182,6 +185,7 @@ class SpdkStorageBackend {
   OpenFile* Lookup(FixedFile file);
   static void CompleteAsync(void* context, const spdk_nvme_cpl* completion);
 
+  // Binding is also the initialized state; retain it through shutdown drains.
   Worker* worker_ = nullptr;
   std::vector<OpenFile> files_;
   std::vector<ControllerChannel> channels_;
@@ -190,7 +194,6 @@ class SpdkStorageBackend {
   // Completion callbacks may open/close files and invalidate channel indices.
   std::size_t channel_generation_ = 0;
   std::size_t outstanding_ = 0;
-  bool initialized_ = false;
 };
 
 #endif  // BYCORF_KERNEL_BYPASS

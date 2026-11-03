@@ -25,21 +25,35 @@
 #endif
 
 namespace bycorf {
-// One kernel ring per worker, shared by kernel sockets, storage, timers and
-// wakeups. An optional DPDK adapter borrows that ring. Backend selection stays
-// fixed after Init, so calls use a predictable branch without virtual dispatch.
+// CRTP network facade. Owner derives non-virtually from this specialization and
+// grants it access to KernelBackend(), which returns the owner's shared ring.
+// Downcasting computes a fixed address adjustment; no owner/ring pointer is
+// stored here. Owner must keep the ring alive through adapter destruction.
+template <typename Owner>
 class NetBackend {
  public:
-  absl::Status Init(const IoBackendOptions& options, Worker* worker,
-                    int wake_fd) {
+  // Initialize networking after the owner initializes the shared ring. DPDK
+  // borrows that ring for its adapter lifetime.
+  absl::Status Init(const IoBackendOptions& options, Worker* worker) {
 #if BYCORF_KERNEL_BYPASS
     if (DpdkNetworkEnabled()) {
-      dpdk_.emplace(kernel_);
-      return dpdk_->Init(options, worker, wake_fd);
+      dpdk_.emplace(Kernel());
+      return dpdk_->Init(options, worker);
     }
 #endif
-    return kernel_.Init(options, worker, wake_fd);
+    (void)options;
+    (void)worker;
+    return absl::OkStatus();
   }
+  // Release DPDK peers waiting for startup if shared-ring initialization fails.
+  void AbortStartup(const absl::Status& status) {
+#if BYCORF_KERNEL_BYPASS
+    if (DpdkNetworkEnabled()) DpdkBackend::AbortStartup(status);
+#else
+    (void)status;
+#endif
+  }
+  // Stop networking while the borrowed ring is still alive.
   void Shutdown() {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) {
@@ -47,72 +61,70 @@ class NetBackend {
       return;
     }
 #endif
-    kernel_.Shutdown();
   }
-  int WakeHandle() const noexcept { return kernel_.WakeHandle(); }
   absl::Status SubmitSend(const RegisteredFile& file,
                           std::span<const std::byte> buffer,
                           IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->SubmitSend(file, buffer, tag);
 #endif
-    return kernel_.SubmitSend(file, buffer, tag);
+    return Kernel().SubmitSend(file, buffer, tag);
   }
   absl::Status SubmitSendMsg(const RegisteredFile& file, const msghdr* message,
                              IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->SubmitSendMsg(file, message, tag);
 #endif
-    return kernel_.SubmitSendMsg(file, message, tag);
+    return Kernel().SubmitSendMsg(file, message, tag);
   }
   absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->SubmitAcceptMultishot(listen_fd, tag);
 #endif
-    return kernel_.SubmitAcceptMultishot(listen_fd, tag);
+    return Kernel().SubmitAcceptMultishot(listen_fd, tag);
   }
   absl::Status SubmitConnect(int fd, const sockaddr* address,
                              socklen_t address_length, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->SubmitConnect(fd, address, address_length, tag);
 #endif
-    return kernel_.SubmitConnect(fd, address, address_length, tag);
+    return Kernel().SubmitConnect(fd, address, address_length, tag);
   }
   absl::Status SubmitCancel(IoCompletion* target) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->SubmitCancel(target);
 #endif
-    return kernel_.SubmitCancel(target);
+    return Kernel().SubmitCancel(target);
   }
   // Cancel kernel socket operations that have not acquired their fd reference
   // yet. Native DPDK handles must be excluded by the caller.
   void CancelUnsubmittedForFd(int fd) noexcept {
-    kernel_.CancelUnsubmittedForFd(fd);
+    Kernel().CancelUnsubmittedForFd(fd);
   }
   absl::Status StartRecvMultishot(Connection* connection) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->StartRecvMultishot(connection);
 #endif
-    return kernel_.StartRecvMultishot(connection);
+    return Kernel().StartRecvMultishot(connection);
   }
   // Null tag requests cancellation without a separate completion consumer.
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->SubmitCancelRecv(connection, tag);
 #endif
-    return kernel_.SubmitCancelRecv(connection, tag);
+    return Kernel().SubmitCancelRecv(connection, tag);
   }
   absl::Status StartPeerDisconnectPoll(Connection* connection) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->StartPeerDisconnectPoll(connection);
 #endif
-    return kernel_.StartPeerDisconnectPoll(connection);
+    return Kernel().StartPeerDisconnectPoll(connection);
   }
   absl::Status CancelPeerDisconnectPoll(Connection* connection) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->CancelPeerDisconnectPoll(connection);
 #endif
-    return kernel_.CancelPeerDisconnectPoll(connection);
+    return Kernel().CancelPeerDisconnectPoll(connection);
   }
   std::span<const std::byte> ViewRecvBuffer(const Connection* connection,
                                             std::uint16_t buffer_id,
@@ -122,84 +134,47 @@ class NetBackend {
     if (dpdk_)
       return dpdk_->ViewRecvBuffer(connection, buffer_id, offset, length);
 #endif
-    return kernel_.ViewRecvBuffer(connection, buffer_id, offset, length);
+    return Kernel().ViewRecvBuffer(connection, buffer_id, offset, length);
   }
   void ReleaseRecvBuffer(Connection* connection, std::uint16_t buffer_id) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->ReleaseRecvBuffer(connection, buffer_id);
 #endif
-    return kernel_.ReleaseRecvBuffer(connection, buffer_id);
-  }
-  absl::Status RegisterFixedFiles(unsigned count) {
-    return kernel_.RegisterFixedFiles(count);
-  }
-  absl::Status RegisterBuffers(std::span<const iovec> buffers) {
-    return kernel_.RegisterBuffers(buffers);
-  }
-  void UnregisterStorageResources() {
-    return kernel_.UnregisterStorageResources();
-  }
-  absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
-                                FixedFile file, IoCompletion* tag) {
-    return kernel_.SubmitOpenDirect(path, flags, mode, file, tag);
-  }
-  absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
-    return kernel_.SubmitCloseDirect(file, tag);
-  }
-  absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
-                               std::uint64_t offset, IoCompletion* tag) {
-    return kernel_.SubmitReadFixed(file, buffer, offset, tag);
-  }
-  absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
-                          std::uint64_t offset, IoCompletion* tag) {
-    return kernel_.SubmitRead(file, buffer, offset, tag);
-  }
-  absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
-                           std::uint64_t offset, IoCompletion* tag) {
-    return kernel_.SubmitWrite(file, buffer, offset, tag);
-  }
-  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
-                                std::uint64_t offset, IoCompletion* tag) {
-    return kernel_.SubmitWriteFixed(file, buffer, offset, tag);
-  }
-  absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
-    return kernel_.SubmitFdatasync(file, tag);
-  }
-  absl::Status SubmitTimeout(const __kernel_timespec& timeout,
-                             IoCompletion* tag) {
-    return kernel_.SubmitTimeout(timeout, tag);
-  }
-  absl::Status SubmitPoll(int fd, unsigned events, IoCompletion* tag) {
-    return kernel_.SubmitPoll(fd, events, tag);
+    return Kernel().ReleaseRecvBuffer(connection, buffer_id);
   }
   absl::Status Submit() {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->Submit();
 #endif
-    return kernel_.Submit();
+    return Kernel().Submit();
   }
   bool Poll() {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->Poll();
 #endif
-    return kernel_.Poll();
+    return Kernel().Poll();
   }
-  // The shared kernel ring can retain work even when DPDK serves networking.
-  bool HasPending() const noexcept { return kernel_.HasPending(); }
   bool Wait(int timeout_ms) {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->Wait(timeout_ms);
 #endif
-    return kernel_.Wait(timeout_ms);
+    return Kernel().Wait(timeout_ms);
   }
-  void WakeRemote(int peer_ring_fd) noexcept {
-    return kernel_.WakeRemote(peer_ring_fd);
-  }
-  void WakeSelf() noexcept { return kernel_.WakeSelf(); }
 
  private:
-  // Declaration order ensures the borrowing adapter dies before its ring.
-  IoUringBackend kernel_;
+  // Only the declared owner may construct the facade; a standalone base
+  // would make the CRTP downcast invalid. Never access Owner in base teardown.
+  friend Owner;
+  NetBackend() = default;
+  ~NetBackend() = default;
+
+  IoUringBackend& Kernel() noexcept {
+    return static_cast<Owner&>(*this).KernelBackend();
+  }
+  const IoUringBackend& Kernel() const noexcept {
+    return static_cast<const Owner&>(*this).KernelBackend();
+  }
+
 #if BYCORF_KERNEL_BYPASS
   // Inline the small adapter: packet/stream submissions already follow its
   // implementation pointer, so a separate heap adapter adds a dependent load

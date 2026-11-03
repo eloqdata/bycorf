@@ -56,8 +56,8 @@ struct Fixture {
   bycorf::IoUringBackend backend;
 };
 
-template <typename Predicate>
-void Drain(bycorf::IoUringBackend& backend, Predicate done) {
+template <typename Backend, typename Predicate>
+void Drain(Backend& backend, Predicate done) {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (!done()) {
@@ -398,6 +398,69 @@ TEST(IoUringBackpressure, StorageReads) {
   Drain(fixture.backend, [&] { return closed.calls != 0; });
   ASSERT_TRUE(closed.result == 0);
   std::cout << "PASS queued fixed-file reads preserve buffers and offsets\n";
+}
+
+// Both facades must submit to the same ring: the network event loop also
+// delivers storage completions, and stopping either facade must leave the
+// worker-owned ring available until the worker shuts it down.
+TEST(IoUringBackpressure, NetworkAndStorageShareRing) {
+  struct BackendOwner : bycorf::IoUringBackend,
+                        bycorf::NetBackend<BackendOwner>,
+                        bycorf::StorageBackend<BackendOwner> {
+    bycorf::IoUringBackend& KernelBackend() noexcept { return *this; }
+    const bycorf::IoUringBackend& KernelBackend() const noexcept {
+      return *this;
+    }
+  };
+  bycorf::Worker worker;
+  BackendOwner owner;
+  auto& kernel = owner.KernelBackend();
+  auto& network = static_cast<bycorf::NetBackend<BackendOwner>&>(owner);
+  auto& storage = static_cast<bycorf::StorageBackend<BackendOwner>&>(owner);
+  ASSERT_TRUE(
+      kernel.Init({.ring_entries_ = 2, .recv_buffer_count_ = 0}, &worker, -1)
+          .ok());
+  ASSERT_TRUE(network.Init({}, &worker).ok());
+  ASSERT_TRUE(storage.Init(&worker).ok());
+  ASSERT_FALSE(storage.NeedsPolling());
+  ASSERT_TRUE(storage.RegisterFixedFiles(1).ok());
+
+  Completion opened;
+  ASSERT_TRUE(
+      storage.SubmitOpenDirect("/dev/zero", O_RDONLY, 0, {0}, &opened).ok());
+  Drain(network, [&] { return opened.calls != 0; });
+  ASSERT_EQ(opened.result, 0);
+
+  int sockets[2];
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+                       sockets),
+            0);
+  std::array<std::byte, 16> bytes;
+  bytes.fill(std::byte{1});
+  const std::array<std::byte, 1> payload{std::byte{42}};
+  Completion read, sent;
+  ASSERT_TRUE(storage.SubmitRead({0}, bytes, 0, &read).ok());
+  ASSERT_TRUE(network.SubmitSend({.fd_ = sockets[0]}, payload, &sent).ok());
+  ASSERT_EQ(read.calls, 0u);
+  ASSERT_EQ(sent.calls, 0u);
+  // Kernel storage never requests a separate poll or keeps the worker spinning.
+  ASSERT_FALSE(storage.NeedsPolling());
+  Drain(network, [&] { return read.calls != 0 && sent.calls != 0; });
+  ASSERT_EQ(read.result, bytes.size());
+  ASSERT_EQ(sent.result, 1);
+  EXPECT_EQ(bytes, (std::array<std::byte, 16>{}));
+  std::byte received;
+  ASSERT_EQ(recv(sockets[1], &received, 1, 0), 1);
+  EXPECT_EQ(received, payload[0]);
+  ASSERT_EQ(close(sockets[0]), 0);
+  ASSERT_EQ(close(sockets[1]), 0);
+
+  storage.Shutdown();
+  network.Shutdown();
+  Completion closed;
+  ASSERT_TRUE(kernel.SubmitCloseDirect({0}, &closed).ok());
+  Drain(kernel, [&] { return closed.calls != 0; });
+  ASSERT_EQ(closed.result, 0);
 }
 
 }  // namespace
