@@ -404,27 +404,31 @@ TEST(IoUringBackpressure, StorageReads) {
 // delivers storage completions, and stopping either facade must leave the
 // worker-owned ring available until the worker shuts it down.
 TEST(IoUringBackpressure, NetworkAndStorageShareRing) {
-  Fixture fixture;
-  ASSERT_NO_FATAL_FAILURE(fixture.Init());
-  struct NetworkLoop {
-    bycorf::NetBackend network;
-    bycorf::IoUringBackend& kernel;
-    absl::Status Submit() { return network.Submit(kernel); }
-    bool Poll() { return network.Poll(kernel); }
-  } loop{{}, fixture.backend};
-  auto& network = loop.network;
-  bycorf::StorageBackend storage;
-  ASSERT_TRUE(network.Init(fixture.backend, {}, &fixture.worker).ok());
-  ASSERT_TRUE(storage.Init(&fixture.worker).ok());
+  struct BackendOwner : bycorf::IoUringBackend,
+                        bycorf::NetBackend<BackendOwner>,
+                        bycorf::StorageBackend<BackendOwner> {
+    bycorf::IoUringBackend& KernelBackend() noexcept { return *this; }
+    const bycorf::IoUringBackend& KernelBackend() const noexcept {
+      return *this;
+    }
+  };
+  bycorf::Worker worker;
+  BackendOwner owner;
+  auto& kernel = owner.KernelBackend();
+  auto& network = static_cast<bycorf::NetBackend<BackendOwner>&>(owner);
+  auto& storage = static_cast<bycorf::StorageBackend<BackendOwner>&>(owner);
+  ASSERT_TRUE(
+      kernel.Init({.ring_entries_ = 2, .recv_buffer_count_ = 0}, &worker, -1)
+          .ok());
+  ASSERT_TRUE(network.Init({}, &worker).ok());
+  ASSERT_TRUE(storage.Init(&worker).ok());
   ASSERT_FALSE(storage.NeedsPolling());
-  ASSERT_TRUE(storage.RegisterFixedFiles(fixture.backend, 1).ok());
+  ASSERT_TRUE(storage.RegisterFixedFiles(1).ok());
 
   Completion opened;
-  ASSERT_TRUE(storage
-                  .SubmitOpenDirect(fixture.backend, "/dev/zero", O_RDONLY, 0,
-                                    {0}, &opened)
-                  .ok());
-  Drain(loop, [&] { return opened.calls != 0; });
+  ASSERT_TRUE(
+      storage.SubmitOpenDirect("/dev/zero", O_RDONLY, 0, {0}, &opened).ok());
+  Drain(network, [&] { return opened.calls != 0; });
   ASSERT_EQ(opened.result, 0);
 
   int sockets[2];
@@ -435,15 +439,13 @@ TEST(IoUringBackpressure, NetworkAndStorageShareRing) {
   bytes.fill(std::byte{1});
   const std::array<std::byte, 1> payload{std::byte{42}};
   Completion read, sent;
-  ASSERT_TRUE(storage.SubmitRead(fixture.backend, {0}, bytes, 0, &read).ok());
-  ASSERT_TRUE(
-      network.SubmitSend(fixture.backend, {.fd_ = sockets[0]}, payload, &sent)
-          .ok());
+  ASSERT_TRUE(storage.SubmitRead({0}, bytes, 0, &read).ok());
+  ASSERT_TRUE(network.SubmitSend({.fd_ = sockets[0]}, payload, &sent).ok());
   ASSERT_EQ(read.calls, 0u);
   ASSERT_EQ(sent.calls, 0u);
   // Kernel storage never requests a separate poll or keeps the worker spinning.
   ASSERT_FALSE(storage.NeedsPolling());
-  Drain(loop, [&] { return read.calls != 0 && sent.calls != 0; });
+  Drain(network, [&] { return read.calls != 0 && sent.calls != 0; });
   ASSERT_EQ(read.result, bytes.size());
   ASSERT_EQ(sent.result, 1);
   EXPECT_EQ(bytes, (std::array<std::byte, 16>{}));
@@ -456,8 +458,8 @@ TEST(IoUringBackpressure, NetworkAndStorageShareRing) {
   storage.Shutdown();
   network.Shutdown();
   Completion closed;
-  ASSERT_TRUE(fixture.backend.SubmitCloseDirect({0}, &closed).ok());
-  Drain(fixture.backend, [&] { return closed.calls != 0; });
+  ASSERT_TRUE(kernel.SubmitCloseDirect({0}, &closed).ok());
+  Drain(kernel, [&] { return closed.calls != 0; });
   ASSERT_EQ(closed.result, 0);
 }
 

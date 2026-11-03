@@ -32,8 +32,10 @@ allocation or runtime startup fails. This preserves DMA allocator identity,
 registered-resource ownership and native TCP state. Unsupported capabilities
 fail explicitly rather than falling back.
 
-`Worker` owns one `IoUringBackend`, borrowed by `NetBackend` and
-`StorageBackend`. Kernel sockets, storage, timers and MSG_RING use the same
+`Worker` owns one `IoUringBackend`, shared by its private CRTP facades
+`NetBackend<Worker>` and `StorageBackend<Worker>`. The facades obtain the ring
+through the owner contract rather than receiving it on each submission or
+storing a separate pointer. Kernel sockets, storage, timers and MSG_RING use the same
 submission/completion queues. `NetBackend` selects kernel networking or its
 optional DPDK adapter; `StorageBackend` selects kernel storage or its embedded
 SPDK backend. SPDK default construction acquires no device resources; only the
@@ -47,8 +49,8 @@ parking, while kernel storage uses the shared ring's wake/completion path.
 
 The worker initializes the ring before either adapter and stops storage, then
 networking, before shutting down the ring. Kernel storage registrations live
-until ring shutdown quiesces kernel access. Both adapters are destroyed before
-the borrowed ring; neither creates a second ring or worker pool. SPDK callbacks
+until ring shutdown quiesces kernel access. The ring is the first base subobject, so both
+facades are destroyed before it; neither creates a second ring or worker pool. SPDK callbacks
 resolve their backend through the storage adapter using the owning worker's TLS,
 including shutdown drains.
 

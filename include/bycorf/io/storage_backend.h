@@ -27,11 +27,12 @@
 
 namespace bycorf {
 
-// Routes worker-owned storage operations using the frozen process selection.
-// Borrows the worker's kernel backend; neither initializes nor shuts down its
-// ring. The worker passes the ring directly to submissions, avoiding a stored
-// pointer load, and keeps it alive until both adapters have stopped.
-// Accepted operations retain caller-owned tags/buffers until completion.
+// CRTP storage facade. Owner derives non-virtually from this specialization and
+// grants it access to KernelBackend(). The shared ring is reached by a fixed
+// address adjustment, without a stored owner/ring pointer. Owner initializes
+// and shuts down the ring, which must outlive the facade. Accepted operations
+// retain caller-owned tags/buffers until completion.
+template <typename Owner>
 class StorageBackend {
  public:
   struct PollResult {
@@ -39,7 +40,6 @@ class StorageBackend {
     std::uint32_t completions_ = 0;
   };
 
-  StorageBackend() = default;
   StorageBackend(const StorageBackend&) = delete;
   StorageBackend& operator=(const StorageBackend&) = delete;
 
@@ -87,93 +87,98 @@ class StorageBackend {
     return {};
   }
 
-  absl::Status RegisterFixedFiles(IoUringBackend& kernel, unsigned count) {
+  absl::Status RegisterFixedFiles(unsigned count) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.RegisterFixedFiles(count);
     }
 #endif
-    return kernel.RegisterFixedFiles(count);
+    return Kernel().RegisterFixedFiles(count);
   }
-  absl::Status RegisterBuffers(IoUringBackend& kernel,
-                               std::span<const iovec> buffers) {
+  absl::Status RegisterBuffers(std::span<const iovec> buffers) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.RegisterBuffers(buffers);
     }
 #endif
-    return kernel.RegisterBuffers(buffers);
+    return Kernel().RegisterBuffers(buffers);
   }
-  absl::Status SubmitOpenDirect(IoUringBackend& kernel, std::string_view path,
-                                int flags, mode_t mode, FixedFile file,
-                                IoCompletion* tag) {
+  absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
+                                FixedFile file, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.SubmitOpenDirect(path, flags, mode, file, tag);
     }
 #endif
-    return kernel.SubmitOpenDirect(path, flags, mode, file, tag);
+    return Kernel().SubmitOpenDirect(path, flags, mode, file, tag);
   }
-  absl::Status SubmitCloseDirect(IoUringBackend& kernel, FixedFile file,
-                                 IoCompletion* tag) {
+  absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.SubmitCloseDirect(file, tag);
     }
 #endif
-    return kernel.SubmitCloseDirect(file, tag);
+    return Kernel().SubmitCloseDirect(file, tag);
   }
-  absl::Status SubmitReadFixed(IoUringBackend& kernel, FixedFile file,
-                               FixedBuffer buffer, std::uint64_t offset,
-                               IoCompletion* tag) {
+  absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
+                               std::uint64_t offset, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.SubmitReadFixed(file, buffer, offset, tag);
     }
 #endif
-    return kernel.SubmitReadFixed(file, buffer, offset, tag);
+    return Kernel().SubmitReadFixed(file, buffer, offset, tag);
   }
-  absl::Status SubmitRead(IoUringBackend& kernel, FixedFile file,
-                          std::span<std::byte> buffer, std::uint64_t offset,
-                          IoCompletion* tag) {
+  absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
+                          std::uint64_t offset, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.SubmitRead(file, buffer, offset, tag);
     }
 #endif
-    return kernel.SubmitRead(file, buffer, offset, tag);
+    return Kernel().SubmitRead(file, buffer, offset, tag);
   }
-  absl::Status SubmitWrite(IoUringBackend& kernel, FixedFile file,
-                           std::span<const std::byte> buffer,
+  absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                            std::uint64_t offset, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.SubmitWrite(file, buffer, offset, tag);
     }
 #endif
-    return kernel.SubmitWrite(file, buffer, offset, tag);
+    return Kernel().SubmitWrite(file, buffer, offset, tag);
   }
-  absl::Status SubmitWriteFixed(IoUringBackend& kernel, FixedFile file,
-                                FixedBuffer buffer, std::uint64_t offset,
-                                IoCompletion* tag) {
+  absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
+                                std::uint64_t offset, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.SubmitWriteFixed(file, buffer, offset, tag);
     }
 #endif
-    return kernel.SubmitWriteFixed(file, buffer, offset, tag);
+    return Kernel().SubmitWriteFixed(file, buffer, offset, tag);
   }
-  absl::Status SubmitFdatasync(IoUringBackend& kernel, FixedFile file,
-                               IoCompletion* tag) {
+  absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
 #if BYCORF_KERNEL_BYPASS
     if (spdk_.IsInitialized()) {
       return spdk_.SubmitFdatasync(file, tag);
     }
 #endif
-    return kernel.SubmitFdatasync(file, tag);
+    return Kernel().SubmitFdatasync(file, tag);
   }
 
  private:
+  // Only the declared owner may construct the facade; a standalone base
+  // would make the CRTP downcast invalid. Never access Owner in base teardown.
+  friend Owner;
+  StorageBackend() = default;
+  ~StorageBackend() = default;
+
+  IoUringBackend& Kernel() noexcept {
+    return static_cast<Owner&>(*this).KernelBackend();
+  }
+  const IoUringBackend& Kernel() const noexcept {
+    return static_cast<const Owner&>(*this).KernelBackend();
+  }
+
 #if BYCORF_KERNEL_BYPASS
   // Resolve callback ownership through worker TLS without adding an owner
   // pointer to every I/O request.

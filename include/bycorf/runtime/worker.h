@@ -67,7 +67,15 @@ struct WorkerOptions {
 // The per-core scheduler: ready queue, connection table, cross-core mailbox and
 // the run loop. All io_uring mechanism lives in the backend it owns; the Worker
 // only forwards typed submissions to it and reacts to completions.
-class Worker {
+// Base order is also lifetime order: the shared ring is constructed first and
+// destroyed last. Facade constructors/destructors must not downcast to Worker;
+// Shutdown drains them while the complete worker and its queues are alive.
+class Worker : private IoUringBackend,
+               private NetBackend<Worker>,
+               private StorageBackend<Worker> {
+  using Network = NetBackend<Worker>;
+  using Storage = StorageBackend<Worker>;
+
  public:
   struct WakeStats {
     std::uint64_t checks_ = 0;
@@ -229,95 +237,83 @@ class Worker {
   absl::Status SubmitSend(const RegisteredFile& file,
                           std::span<const std::byte> buffer,
                           IoCompletion* tag) {
-    return networking_backend_.SubmitSend(kernel_backend_, file, buffer, tag);
+    return Network::SubmitSend(file, buffer, tag);
   }
   absl::Status SubmitSendMsg(const RegisteredFile& file, const msghdr* message,
                              IoCompletion* tag) {
-    return networking_backend_.SubmitSendMsg(kernel_backend_, file, message,
-                                             tag);
+    return Network::SubmitSendMsg(file, message, tag);
   }
   absl::Status SubmitAcceptMultishot(int listen_fd, IoCompletion* tag) {
-    return networking_backend_.SubmitAcceptMultishot(kernel_backend_, listen_fd,
-                                                     tag);
+    return Network::SubmitAcceptMultishot(listen_fd, tag);
   }
   // Async connect on a raw fd (pre-registration); see ConnectTcp.
   absl::Status SubmitConnect(int fd, const sockaddr* address,
                              socklen_t address_length, IoCompletion* tag) {
-    return networking_backend_.SubmitConnect(kernel_backend_, fd, address,
-                                             address_length, tag);
+    return Network::SubmitConnect(fd, address, address_length, tag);
   }
   // Best-effort cancel of the in-flight SQE tagged `target`; owner-thread
   // only (the ring is single-issuer).
   absl::Status SubmitCancel(IoCompletion* target) {
-    return networking_backend_.SubmitCancel(kernel_backend_, target);
+    return Network::SubmitCancel(target);
   }
   // Before closing a kernel socket, retire accepted operations whose fd has
   // not yet been consumed by the kernel. Completions remain deferred.
   void CancelUnsubmittedForFd(int fd) noexcept {
-    networking_backend_.CancelUnsubmittedForFd(kernel_backend_, fd);
+    Network::CancelUnsubmittedForFd(fd);
   }
   absl::Status EnsureRecvArmed(Connection* connection) {
-    return networking_backend_.StartRecvMultishot(kernel_backend_, connection);
+    return Network::StartRecvMultishot(connection);
   }
   absl::Status SubmitCancelRecv(Connection* connection, IoCompletion* tag) {
-    return networking_backend_.SubmitCancelRecv(kernel_backend_, connection,
-                                                tag);
+    return Network::SubmitCancelRecv(connection, tag);
   }
   absl::Status EnsurePeerDisconnectPollArmed(Connection* connection) {
-    return networking_backend_.StartPeerDisconnectPoll(kernel_backend_,
-                                                       connection);
+    return Network::StartPeerDisconnectPoll(connection);
   }
   absl::Status CancelPeerDisconnectPoll(Connection* connection) {
-    return networking_backend_.CancelPeerDisconnectPoll(kernel_backend_,
-                                                        connection);
+    return Network::CancelPeerDisconnectPoll(connection);
   }
   std::span<const std::byte> ViewMultishotBuffer(const Connection* connection,
                                                  std::uint16_t buffer_id,
                                                  std::size_t offset,
                                                  std::size_t length) const {
-    return networking_backend_.ViewRecvBuffer(kernel_backend_, connection,
-                                              buffer_id, offset, length);
+    return Network::ViewRecvBuffer(connection, buffer_id, offset, length);
   }
   void ReleaseReceivedBuffer(Connection* connection, std::uint16_t buffer_id) {
-    networking_backend_.ReleaseRecvBuffer(kernel_backend_, connection,
-                                          buffer_id);
+    Network::ReleaseRecvBuffer(connection, buffer_id);
   }
 
   absl::Status RegisterFixedFiles(unsigned count) {
-    auto status = storage_backend_.RegisterFixedFiles(kernel_backend_, count);
+    auto status = Storage::RegisterFixedFiles(count);
     if (status.ok()) {
       storage_file_io_stats_.assign(count, StorageFileIoStats{});
     }
     return status;
   }
   absl::Status RegisterBuffers(std::span<const iovec> buffers) {
-    return storage_backend_.RegisterBuffers(kernel_backend_, buffers);
+    return Storage::RegisterBuffers(buffers);
   }
   // Storage submissions retain the tag and referenced caller-owned buffers
   // until completion, including while queued. Each tag may have only one
   // unfinished storage operation; its completion may submit the next one.
   absl::Status SubmitOpenDirect(std::string_view path, int flags, mode_t mode,
                                 FixedFile file, IoCompletion* tag) {
-    return storage_backend_.SubmitOpenDirect(kernel_backend_, path, flags, mode,
-                                             file, tag);
+    return Storage::SubmitOpenDirect(path, flags, mode, file, tag);
   }
   absl::Status SubmitCloseDirect(FixedFile file, IoCompletion* tag) {
-    return storage_backend_.SubmitCloseDirect(kernel_backend_, file, tag);
+    return Storage::SubmitCloseDirect(file, tag);
   }
   absl::Status SubmitReadFixed(FixedFile file, FixedBuffer buffer,
                                std::uint64_t offset, IoCompletion* tag) {
-    return storage_backend_.SubmitReadFixed(kernel_backend_, file, buffer,
-                                            offset, tag);
+    return Storage::SubmitReadFixed(file, buffer, offset, tag);
   }
   absl::Status SubmitRead(FixedFile file, std::span<std::byte> buffer,
                           std::uint64_t offset, IoCompletion* tag) {
-    return storage_backend_.SubmitRead(kernel_backend_, file, buffer, offset,
-                                       tag);
+    return Storage::SubmitRead(file, buffer, offset, tag);
   }
   absl::Status SubmitWrite(FixedFile file, std::span<const std::byte> buffer,
                            std::uint64_t offset, IoCompletion* tag) {
-    auto status = storage_backend_.SubmitWrite(kernel_backend_, file, buffer,
-                                               offset, tag);
+    auto status = Storage::SubmitWrite(file, buffer, offset, tag);
     if (status.ok() && file.index_ < storage_file_io_stats_.size()) {
       storage_file_io_stats_[file.index_].submitted_write_bytes_ +=
           buffer.size();
@@ -326,8 +322,7 @@ class Worker {
   }
   absl::Status SubmitWriteFixed(FixedFile file, FixedBuffer buffer,
                                 std::uint64_t offset, IoCompletion* tag) {
-    auto status = storage_backend_.SubmitWriteFixed(kernel_backend_, file,
-                                                    buffer, offset, tag);
+    auto status = Storage::SubmitWriteFixed(file, buffer, offset, tag);
     if (status.ok() && file.index_ < storage_file_io_stats_.size()) {
       storage_file_io_stats_[file.index_].submitted_write_bytes_ +=
           buffer.size_;
@@ -335,11 +330,11 @@ class Worker {
     return status;
   }
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag) {
-    return storage_backend_.SubmitFdatasync(kernel_backend_, file, tag);
+    return Storage::SubmitFdatasync(file, tag);
   }
   absl::Status SubmitTimeout(const __kernel_timespec& timeout,
                              IoCompletion* tag) {
-    return kernel_backend_.SubmitTimeout(timeout, tag);
+    return KernelBackend().SubmitTimeout(timeout, tag);
   }
 
   // Takes ownership of a connection with a valid socket; returns nullptr for
@@ -368,6 +363,13 @@ class Worker {
   void SpawnBackground(Task<absl::Status> task);
 
  private:
+  friend class NetBackend<Worker>;
+  friend class StorageBackend<Worker>;
+  // Shared-ring access for the CRTP facades; the base conversion is a fixed
+  // address adjustment rather than a load of a stored pointer.
+  IoUringBackend& KernelBackend() noexcept { return *this; }
+  const IoUringBackend& KernelBackend() const noexcept { return *this; }
+
   friend class WorkerCrossCoreTestPeer;
   friend class WorkerSchedulerTestPeer;
 
@@ -396,7 +398,7 @@ class Worker {
   bool ShouldRunBackground() const noexcept;
   void MaybeResetRuntimeWindow() noexcept;
   void RecordRound(std::int64_t start_cycles) noexcept;
-  void Flush();  // FlushWakes() + networking_backend_.Submit(kernel_backend_)
+  void Flush();       // FlushWakes() + Network::Submit()
   void FlushWakes();  // wake every marked, parked target once
   void CheckIdleConnections();
   bool BusyPoll();
@@ -409,10 +411,6 @@ class Worker {
   bool DrainCrossCoreOverflow();
   bool DrainCrossCore();
 
-  // Declare the shared ring first so both borrowing adapters die before it.
-  IoUringBackend kernel_backend_{};
-  NetBackend networking_backend_{};
-  StorageBackend storage_backend_{};
   bool initialized_ = false;
   // A fatal enter failure must leave RunOnce through the existing backend
   // failure path, rather than spinning forever on accepted pending work.

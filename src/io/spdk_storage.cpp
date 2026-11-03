@@ -413,7 +413,7 @@ void SpdkBackend::CompleteAsync(void* context,
       spdk_nvme_cpl_is_error(completion) ? -EIO : tag->success_result_;
   Worker* worker = ThisWorker().self_;
   assert(worker != nullptr);
-  SpdkBackend* backend = &worker->storage_backend_.spdk_;
+  SpdkBackend* backend = &worker->StorageBackend<Worker>::spdk_;
   // Complete may resubmit this tag or destroy it. Read its result first and
   // never access caller-owned state after dispatching the terminal completion.
   backend->CompleteRequest(tag, result);
@@ -428,7 +428,7 @@ void SpdkBackend::CompleteRequest(IoCompletion* tag, int result) {
 }
 
 absl::Status SpdkBackend::Init(Worker* worker) {
-  if (worker == nullptr || &worker->storage_backend_.spdk_ != this) {
+  if (worker == nullptr || &worker->StorageBackend<Worker>::spdk_ != this) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "SPDK storage backend must be owned by its worker");
   }
