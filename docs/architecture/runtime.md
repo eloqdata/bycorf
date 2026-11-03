@@ -24,8 +24,9 @@ inherited mask. Every thread completes affinity setup before any
 worker main function runs. An affinity or thread-launch failure prevents the
 worker main functions from entering partial service initialization.
 
-A `Worker` owns its coroutine queues, connections, I/O backend, completion
-handling, and optional storage poller. The scheduler bounds foreground and
+A `Worker` owns its coroutine queues, connections, shared kernel I/O backend,
+network and storage adapters, and completion handling. Both adapters borrow the
+kernel backend; storage-specific polling is encapsulated by `StorageBackend`. The scheduler bounds foreground and
 background coroutine work and polls external completions between rounds.
 Workers submit queued foreground I/O and peer wakes before a maintenance slice,
 then submit any work queued by that slice before advancing to the next round.

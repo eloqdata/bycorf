@@ -205,22 +205,30 @@ absl::Status Worker::Init(const WorkerOptions& options) {
   IoBackendOptions backend_options;
   backend_options.ring_entries_ = options.ring_entries_;
   backend_options.recv_buffer_count_ = options.recv_buffer_count_;
-  // Runtime pre-created the eventfd; the backend reuses it (does not own it).
-  auto status =
-      backend_.Init(backend_options, this, cross_core_->mailbox(id_).wake_fd_);
+  // DPDK receives use adapter-owned buffers instead of a kernel receive ring.
+  auto kernel_options = backend_options;
+  if (DpdkNetworkEnabled()) kernel_options.recv_buffer_count_ = 0;
+  // Runtime pre-created the eventfd; the kernel backend borrows it.
+  auto status = kernel_backend_.Init(kernel_options, this,
+                                     cross_core_->mailbox(id_).wake_fd_);
   if (!status.ok()) {
+    networking_backend_.AbortStartup(status);
     return status;
   }
-#if BYCORF_KERNEL_BYPASS
-  if (SpdkStorageEnabled()) status = storage_backend_.Init(this);
+  status = networking_backend_.Init(kernel_backend_, backend_options, this);
   if (!status.ok()) {
-    backend_.Shutdown();
+    kernel_backend_.Shutdown();
     return status;
   }
-#endif
+  status = storage_backend_.Init(this);
+  if (!status.ok()) {
+    networking_backend_.Shutdown();
+    kernel_backend_.Shutdown();
+    return status;
+  }
 
   // Advertise our ring so other workers can wake us via MSG_RING.
-  cross_core_->mailbox(id_).ring_fd_ = backend_.WakeHandle();
+  cross_core_->mailbox(id_).ring_fd_ = kernel_backend_.WakeHandle();
   submit_failed_ = false;
   initialized_ = true;
   return absl::OkStatus();
@@ -230,10 +238,9 @@ void Worker::Shutdown() {
   if (!initialized_) {
     return;
   }
-#if BYCORF_KERNEL_BYPASS
   storage_backend_.Shutdown();
-#endif
-  backend_.Shutdown();
+  networking_backend_.Shutdown();
+  kernel_backend_.Shutdown();
   initialized_ = false;
 }
 
@@ -361,7 +368,8 @@ void Worker::BeginClose(Connection* connection, absl::Status reason,
   // Stop the independent peer-disconnect observer before retiring the
   // Connection storage. Its completion owns one inflight operation and will
   // make the connection reclaimable.
-  (void)backend_.CancelPeerDisconnectPoll(connection);
+  (void)networking_backend_.CancelPeerDisconnectPoll(kernel_backend_,
+                                                     connection);
 
   // close(fd) alone does not release a socket held by an io_uring receive.
   // Cancel by operation identity before retiring it so the peer observes the
@@ -369,7 +377,8 @@ void Worker::BeginClose(Connection* connection, absl::Status reason,
   // Unlike shutdown(), this preserves a duplicated socket after PauseRead()
   // hands it to another worker. DPDK drains its corresponding receive here.
   if (connection->recv_armed_) {
-    (void)backend_.SubmitCancelRecv(connection, nullptr);
+    (void)networking_backend_.SubmitCancelRecv(kernel_backend_, connection,
+                                               nullptr);
   }
 
   if (connection->file_.fd_ >= 0) {
@@ -377,7 +386,7 @@ void Worker::BeginClose(Connection* connection, absl::Status reason,
     if (!detail::IsDpdkSocket(fd)) {
       // An accepted operation may still live in the software queue or SQ.
       // Retire it before close lets another socket reuse this descriptor.
-      backend_.CancelUnsubmittedForFd(fd);
+      networking_backend_.CancelUnsubmittedForFd(kernel_backend_, fd);
     }
     connection->file_.fd_ = -1;
     connection->closed_ = true;
@@ -795,7 +804,8 @@ void Worker::DiscardReceivedBuffers(Connection* connection) {
   // ReleaseRecvBuffer only recycles backend storage; it does not mutate this
   // queue or resume readers. Clear once to avoid shrinking while discarding.
   for (std::uint32_t i = 0; i < count; ++i) {
-    backend_.ReleaseRecvBuffer(connection, received[i].buffer_id_);
+    networking_backend_.ReleaseRecvBuffer(kernel_backend_, connection,
+                                          received[i].buffer_id_);
   }
   received.clear();
 }
@@ -1044,7 +1054,7 @@ void Worker::FlushWakes() {
 #endif
     if (parked) {
       ++wake_sent_;
-      backend_.WakeRemote(mb.ring_fd_);
+      kernel_backend_.WakeRemote(mb.ring_fd_);
     }
   }
   w.wake_list_.clear();
@@ -1058,10 +1068,8 @@ bool Worker::BusyPoll() {
       CycleNow() + static_cast<std::int64_t>(busy_poll_cycles_);
   do {
     bool did_work = DrainCrossCore();
-    did_work |= backend_.Poll();
-#if BYCORF_KERNEL_BYPASS
+    did_work |= networking_backend_.Poll(kernel_backend_);
     did_work |= PollStorage();
-#endif
     if (did_work) {
       const std::int64_t round_start = CycleNow();
       MergeDeferred();
@@ -1095,15 +1103,14 @@ bool Worker::BusyPoll() {
   return false;
 }
 
-#if BYCORF_KERNEL_BYPASS
 bool Worker::PollStorage() {
   // Submissions and completions are worker-owned. With neither device I/O
   // nor deferred open/close completions pending, polling cannot make progress.
   // Use the same predicate as the idle/park decision so queued completions
   // still run even when the hardware outstanding count is zero.
-  if (!SpdkStorageEnabled() || !storage_backend_.HasOutstanding()) return false;
+  if (!storage_backend_.NeedsPolling()) return false;
   const std::int64_t start = CycleNow();
-  const SpdkPollResult result =
+  const auto result =
       storage_backend_.Poll(options_.spdk_max_completions_per_poll_);
   const std::uint64_t elapsed = static_cast<std::uint64_t>(CycleNow() - start);
   ++scheduler_stats_.storage_poll_calls_;
@@ -1116,11 +1123,10 @@ bool Worker::PollStorage() {
       std::max(scheduler_stats_.storage_max_poll_cycles_, elapsed);
   return result.did_work_;
 }
-#endif
 
 void Worker::Flush() {
   FlushWakes();
-  const auto status = backend_.Submit();
+  const auto status = networking_backend_.Submit(kernel_backend_);
   if (!status.ok()) [[unlikely]] {
     // CQ backpressure and interrupted enters are retried by the next round.
     // A permanent error cannot make progress by waiting for queue capacity.
@@ -1145,12 +1151,11 @@ bool Worker::RunOnce(bool wait_for_completion) {
       !foreground_remote_work_.empty() || !background_ready_.empty() ||
       !next_background_ready_.empty() || !background_remote_work_.empty();
   did_work |= DrainCrossCore();
-  did_work |= backend_.Poll();
-#if BYCORF_KERNEL_BYPASS
+  did_work |= networking_backend_.Poll(kernel_backend_);
   // This extra foreground slice exists to get ahead of storage completions.
   // Without pending storage work, the normal slice below already serves the
   // same queues; splitting it adds a second deadline and accounting pass.
-  if (SpdkStorageEnabled() && storage_backend_.HasOutstanding() &&
+  if (storage_backend_.NeedsPolling() &&
       options_.spdk_foreground_pre_poll_us_ != 0 &&
       (!ready_.empty() || !next_ready_.empty() ||
        !foreground_remote_work_.empty())) {
@@ -1173,7 +1178,6 @@ bool Worker::RunOnce(bool wait_for_completion) {
     }
   }
   did_work |= PollStorage();
-#endif
   MergeDeferred();
 
   const std::int64_t foreground_start = CycleNow();
@@ -1227,7 +1231,7 @@ bool Worker::RunOnce(bool wait_for_completion) {
   if (submit_failed_) return false;
   // Submission can free SQ slots without producing a completion. Keep both
   // normal rounds and shutdown drains running until deferred work advances.
-  did_work |= backend_.HasPending();
+  did_work |= kernel_backend_.HasPending();
   ReclaimConnections();
   MaybeResetRuntimeWindow();
   RecordRound(round_start);
@@ -1243,13 +1247,10 @@ bool Worker::RunOnce(bool wait_for_completion) {
     return !submit_failed_;
   }
 
-#if BYCORF_KERNEL_BYPASS
-  // SPDK is a polled-mode driver and has no fd that can wake io_uring. Keep
-  // driving its completion queues while device I/O is outstanding.
-  if (storage_backend_.HasOutstanding()) {
+  // A polled storage backend has no kernel wake source for its completions.
+  if (storage_backend_.NeedsPolling()) {
     return true;
   }
-#endif
 
   // 4. Idle — park. Check idle timeouts only here, off the hot path. The
   // wake_seq
@@ -1272,7 +1273,8 @@ bool Worker::RunOnce(bool wait_for_completion) {
   }
 
   const int timeout_ms = options_.idle_timeout_ms_ > 0 ? 100 : -1;
-  const bool ok = backend_.Wait(timeout_ms);  // blocks; dispatches on wake
+  const bool ok = networking_backend_.Wait(
+      kernel_backend_, timeout_ms);  // blocks; dispatches on wake
   mb.wake_seq_.store(0, std::memory_order_release);  // leave the parked state
   return ok;  // next iteration drains what Wait dispatched
 }

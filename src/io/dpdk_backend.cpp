@@ -859,19 +859,12 @@ void DpdkBackend::AbortStartup(const absl::Status& reason) {
   if (fabric.failure.ok()) fabric.failure = reason;
   fabric.attached.notify_all();
 }
-absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
-                               int wake_fd) {
+absl::Status DpdkBackend::Init(const IoBackendOptions& options,
+                               Worker* worker) {
   if (impl_->initialized) return absl::OkStatus();
   if (!fabric.prepared || fabric.stopped)
     return absl::FailedPreconditionError(
         "DPDK Runtime must prepare before worker initialization");
-  auto kernel_options = options;
-  kernel_options.recv_buffer_count_ = 0;
-  auto status = kernel_.Init(kernel_options, worker, wake_fd);
-  if (!status.ok()) {
-    AbortStartup(status);
-    return status;
-  }
   impl_->worker = worker;
   impl_->id = worker->id();
   impl_->buffer_size = options.recv_buffer_size_;
@@ -880,9 +873,8 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
   impl_->next_handle = kFirstHandle | (impl_->id << kHandleBits);
   current_ = impl_.get();
   if (rte_thread_register()) {
-    status = DeviceError("register worker with EAL", rte_errno);
+    auto status = DeviceError("register worker with EAL", rte_errno);
     AbortStartup(status);
-    kernel_.Shutdown();
     current_ = nullptr;
     return status;
   }
@@ -912,7 +904,6 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options, Worker* worker,
     fabric.attached.notify_all();
     rte_thread_unregister();
     current_ = nullptr;
-    kernel_.Shutdown();
     return fabric.failure;
   }
   fabric.lanes[id].ring_fd = kernel_.WakeHandle();
@@ -943,7 +934,6 @@ void DpdkBackend::Shutdown() {
       (unsigned long long)impl_->forwarded_tx, (unsigned long long)impl_->drops,
       (unsigned long long)impl_->waits, (unsigned long long)impl_->arms,
       (unsigned long long)impl_->notifications);
-  kernel_.Shutdown();
   rte_thread_unregister();
   current_ = nullptr;
   impl_->initialized = false;

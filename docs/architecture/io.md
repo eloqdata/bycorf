@@ -32,11 +32,25 @@ allocation or runtime startup fails. This preserves DMA allocator identity,
 registered-resource ownership and native TCP state. Unsupported capabilities
 fail explicitly rather than falling back.
 
-`NetBackend` owns the worker's single `IoUringBackend`. Its optional DPDK adapter
-borrows this object; kernel sockets, storage, timers and MSG_RING use the same
-submission/completion queues. Network-specific operations dispatch to the
-selected backend. The worker drives completion polling and batching, and does
-not create a second ring or worker pool for either accelerator.
+`Worker` owns one `IoUringBackend`, borrowed by `NetBackend` and
+`StorageBackend`. Kernel sockets, storage, timers and MSG_RING use the same
+submission/completion queues. `NetBackend` selects kernel networking or its
+optional DPDK adapter; `StorageBackend` selects kernel storage or its embedded
+SPDK backend. SPDK default construction acquires no device resources; only the
+selected backend is initialized. Storage dispatch uses its worker-local
+initialized state, which remains active through shutdown completion draining.
+Storage operations require a successfully initialized worker and stop before
+its backend shutdown completes. The worker forwards storage operations without
+selecting SPDK itself. Network event-loop polling and submission advance the
+shared ring; separate storage polling advances only SPDK. Pending polled storage prevents
+parking, while kernel storage uses the shared ring's wake/completion path.
+
+The worker initializes the ring before either adapter and stops storage, then
+networking, before shutting down the ring. Kernel storage registrations live
+until ring shutdown quiesces kernel access. Both adapters are destroyed before
+the borrowed ring; neither creates a second ring or worker pool. SPDK callbacks
+resolve their backend through the storage adapter using the owning worker's TLS,
+including shutdown drains.
 
 Each io_uring backend owns a FIFO for accepted operations awaiting submission
 space. Successful admission does not mean the kernel has received the request.
@@ -117,6 +131,6 @@ supports one runtime per process. Network I/O and descriptors stop on worker
 shutdown, but the complete BSD kernel subsystem teardown is not implemented.
 
 Sources: `include/bycorf/io/backend_options.h`, `src/io/backend_options.cpp`,
-`include/bycorf/io/net_backend.h`, `src/io/io_uring_backend.cpp`,
+`include/bycorf/io/net_backend.h`, `include/bycorf/io/storage_backend.h`, `src/io/io_uring_backend.cpp`,
 `src/io/storage.cpp`, `src/io/spdk_storage.cpp`, `src/io/dpdk_environment.cpp`,
 `cmake/Dpdk.cmake`, `cmake/Freebsd.cmake`, `cmake/build_freebsd.py`.

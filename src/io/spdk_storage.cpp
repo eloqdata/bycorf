@@ -413,7 +413,7 @@ void SpdkStorageBackend::CompleteAsync(void* context,
       spdk_nvme_cpl_is_error(completion) ? -EIO : tag->success_result_;
   Worker* worker = ThisWorker().self_;
   assert(worker != nullptr);
-  SpdkStorageBackend* backend = &worker->storage_backend_;
+  SpdkStorageBackend* backend = &worker->storage_backend_.spdk_;
   // Complete may resubmit this tag or destroy it. Read its result first and
   // never access caller-owned state after dispatching the terminal completion.
   backend->CompleteRequest(tag, result);
@@ -428,17 +428,16 @@ void SpdkStorageBackend::CompleteRequest(IoCompletion* tag, int result) {
 }
 
 absl::Status SpdkStorageBackend::Init(Worker* worker) {
-  if (worker == nullptr || &worker->storage_backend_ != this) {
+  if (worker == nullptr || &worker->storage_backend_.spdk_ != this) {
     return absl::Status(absl::StatusCode::kInvalidArgument,
                         "SPDK storage backend must be owned by its worker");
   }
   worker_ = worker;
-  initialized_ = true;
   return absl::OkStatus();
 }
 
 void SpdkStorageBackend::Shutdown() {
-  if (!initialized_) {
+  if (worker_ == nullptr) {
     return;
   }
   while (HasOutstanding()) {
@@ -455,12 +454,13 @@ void SpdkStorageBackend::Shutdown() {
   pending_completions_.clear();
   next_poll_channel_ = 0;
   channel_generation_ = 0;
+  // Keep dispatch on SPDK until every completion and any resubmission from
+  // its callback has drained; only then retire this backend.
   worker_ = nullptr;
-  initialized_ = false;
 }
 
 absl::Status SpdkStorageBackend::RegisterFixedFiles(unsigned count) {
-  if (!initialized_ || count == 0 || !files_.empty()) {
+  if (worker_ == nullptr || count == 0 || !files_.empty()) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "invalid SPDK fixed-file table registration");
   }
@@ -470,7 +470,7 @@ absl::Status SpdkStorageBackend::RegisterFixedFiles(unsigned count) {
 
 absl::Status SpdkStorageBackend::RegisterBuffers(
     std::span<const iovec> buffers) {
-  if (!initialized_ || buffers.empty()) {
+  if (worker_ == nullptr || buffers.empty()) {
     return absl::Status(absl::StatusCode::kFailedPrecondition,
                         "invalid SPDK DMA-buffer registration");
   }
@@ -738,7 +738,7 @@ ABSL_ATTRIBUTE_NOINLINE void SpdkStorageBackend::RetryDeferred(
 }
 
 SpdkPollResult SpdkStorageBackend::Poll(unsigned max_completions) {
-  assert(!initialized_ || ThisWorker().self_ == worker_);
+  assert(worker_ == nullptr || ThisWorker().self_ == worker_);
   SpdkPollResult result;
   if (!pending_completions_.empty()) {
     std::vector<std::pair<IoCompletion*, int>> completions;
