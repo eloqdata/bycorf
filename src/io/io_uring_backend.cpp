@@ -247,20 +247,22 @@ void IoUringBackend::UnregisterStorageResources() {
 
 template <typename Prepare>
 absl::Status IoUringBackend::SubmitOrQueue(Prepare prepare) {
-  // Share one return object with the slow path. Returning its Status by value
-  // would otherwise introduce a protected stack temporary in the common path
-  // with GCC, even though the SQE itself is no longer stack-allocated here.
-  absl::Status status;
+  bool prepared = false;
   // Older accepted work retains priority. Preparation runs synchronously and
   // is never retained; only the prepared descriptor can enter the queue.
   // Never submit/reap here: callers install their continuation afterwards.
   if (initialized_ && pending_io_.empty()) [[likely]] {
     if (auto* sqe = AcquireSqe()) [[likely]] {
       prepare(sqe);
-      return status;
+      prepared = true;
     }
   }
-  QueuePrepared(prepare, &status);
+  // Construct the shared return object after SQE writes so GCC LTO can fold
+  // the successful result in callers. Keep one named return object: returning
+  // a separate Status from the slow path adds a protected stack temporary
+  // without LTO.
+  absl::Status status;
+  if (!prepared) QueuePrepared(prepare, &status);
   return status;
 }
 
