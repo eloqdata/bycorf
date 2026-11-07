@@ -137,8 +137,13 @@ bounds checks remain active; `tests/freebsd_tcp_sequence_check.cpp` covers this
 invariant through the real stack and an in-process Ethernet peer.
 
 BSD sockets use private worker-encoded handles rather than Linux file
-descriptors. Bycorf's close and peer-address helpers dispatch these handles to
-the stack. Applications that directly pass stream handles to Linux syscalls or
+descriptors. Handle slots are reusable within their owning worker. Closing a
+socket immediately invalidates its transport; pending operations and queued
+completions retain the old slot through callback delivery before it can be
+assigned to another socket. Thus handle capacity bounds simultaneously live
+or draining sockets, not cumulative connection churn. Bycorf's close and
+peer-address helpers dispatch these handles to the stack. Applications that
+directly pass stream handles to Linux syscalls or
 transfer a live socket to another worker need explicit adaptation. Accepted
 and outgoing IPv4 TCP use BSD; Unix sockets retain the kernel path. IPv6 DPDK
 listeners and clients are unsupported.
@@ -179,4 +184,5 @@ both modes; this is separate from Bycorf's worker sleep protocol.
 
 Sources: `include/bycorf/net/connection.h`, `src/net/tcp_service.cpp`, `src/net/tcp_listener.cpp`,
 `src/net/tcp_stream.cpp`, `src/net/socket_ops.cpp`, `src/io/dpdk_backend.cpp`,
+`src/io/dpdk_socket_table.h`,
 `src/io/dpdk_memory_budget.cpp`, `src/io/freebsd/abi.h`, `src/io/freebsd/`.

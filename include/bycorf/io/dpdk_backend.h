@@ -74,6 +74,8 @@ class DpdkBackend {
   // Socket helpers require the owning worker thread. Return host errno values.
   static int Listen(const sockaddr* address, socklen_t length, int backlog);
   static int OpenClient(int family);
+  // Closes transport immediately. Pending operations retain the handle slot
+  // until their completions retire, after which another socket may reuse it.
   static int Close(int handle) noexcept;
   static int PeerName(int handle, sockaddr*, socklen_t*) noexcept;
 

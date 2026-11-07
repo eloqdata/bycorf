@@ -472,6 +472,11 @@ if (BYCORF_BUILD_TESTS)
   target_include_directories(bycorf_dpdk_memory_budget_tests PRIVATE src/io)
   bycorf_discover_tests(bycorf_dpdk_memory_budget_tests 30 "runtime;net;unit")
 
+  add_executable(bycorf_dpdk_socket_table_tests tests/dpdk_socket_table_test.cpp)
+  target_link_libraries(bycorf_dpdk_socket_table_tests PRIVATE GTest::gtest_main)
+  target_include_directories(bycorf_dpdk_socket_table_tests PRIVATE src/io)
+  bycorf_discover_tests(bycorf_dpdk_socket_table_tests 30 "runtime;net;unit")
+
   add_executable(bycorf_task_tests tests/task_transfer_test.cpp)
   target_link_libraries(bycorf_task_tests PRIVATE GTest::gtest)
   target_include_directories(bycorf_task_tests PRIVATE include)
@@ -491,6 +496,14 @@ if (BYCORF_BUILD_TESTS)
   bycorf_discover_tests(bycorf_runtime_tests 90 "runtime;net;io_uring")
 
   if (BYCORF_KERNEL_BYPASS)
+    add_executable(bycorf_dpdk_handle_reuse_tests tests/dpdk_handle_reuse_test.cpp)
+    target_link_libraries(bycorf_dpdk_handle_reuse_tests PRIVATE
+      bycorf::core GTest::gtest_main)
+    target_include_directories(bycorf_dpdk_handle_reuse_tests PRIVATE src/io)
+    target_link_options(bycorf_dpdk_handle_reuse_tests PRIVATE
+      "LINKER:--wrap=bycorf_bsd_send" "LINKER:--wrap=bycorf_bsd_connect")
+    bycorf_discover_tests(bycorf_dpdk_handle_reuse_tests 30 "runtime;net;dpdk;stub")
+
     add_executable(bycorf_dpdk_memory_startup_tests
       tests/dpdk_memory_startup_test.cpp)
     target_link_libraries(bycorf_dpdk_memory_startup_tests PRIVATE
