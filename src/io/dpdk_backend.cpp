@@ -42,6 +42,7 @@
 #include <deque>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -52,6 +53,7 @@
 #include "bycorf/net/socket_ops.h"
 #include "bycorf/runtime/worker.h"
 #include "dpdk_memory_budget.h"
+#include "dpdk_socket_table.h"
 #include "freebsd/abi.h"
 #include "freebsd_errno.h"
 
@@ -65,7 +67,7 @@ static_assert(kMaxWorkers > 0 && kMaxWorkers < RTE_MAX_LCORE);
 constexpr int kFirstHandle = 0x40000000;
 // Bit 30 distinguishes BSD handles from kernel fds; the remaining positive
 // bits partition the namespace by owner. Fixed 24-bit slots overflowed signed
-// handles at worker 64. Leave the last slot unused so increment never wraps.
+// handles at worker 64. Keep allocation inside each worker's slot range.
 constexpr unsigned kHandleBits = 30 - std::bit_width(kMaxWorkers - 1);
 constexpr unsigned kHandleMask = (1U << kHandleBits) - 1;
 constexpr std::size_t kMaxFrame = 1518;
@@ -224,11 +226,11 @@ class DpdkBackend::Impl {
   unsigned id = 0;
   bool initialized = false, polling = false;
   std::size_t buffer_size = 4096;
-  int next_handle = kFirstHandle;
   unsigned next_client_port = 0;
-  std::unordered_map<int, BsdSocket*> sockets;
+  detail::DpdkSocketTable sockets;
+  using SocketPin = detail::DpdkSocketTable::Pin;
   struct Request {
-    int fd;
+    SocketPin socket;
     IoCompletion* tag;
     std::span<const std::byte> bytes;
     const msghdr* message = nullptr;
@@ -237,9 +239,14 @@ class DpdkBackend::Impl {
     IoCompletion* tag;
     int result;
     unsigned flags;
+    SocketPin socket;
+  };
+  struct ConnectionRequest {
+    Connection* connection;
+    SocketPin socket;
   };
   std::vector<Request> accepts, sends, connects;
-  std::vector<Connection*> reads, disconnects;
+  std::vector<ConnectionRequest> reads, disconnects;
   std::vector<Completion> completions;
   std::uint64_t rx = 0, tx = 0, forwarded_rx = 0, forwarded_tx = 0, drops = 0;
   std::uint64_t waits = 0, arms = 0, notifications = 0;
@@ -275,23 +282,28 @@ class DpdkBackend::Impl {
     }
   } notification;
 
-  BsdSocket* Find(int handle) {
-    const auto found = sockets.find(handle);
-    return found == sockets.end() ? nullptr : found->second;
-  }
+  BsdSocket* Find(int handle) { return sockets.Find(handle); }
   int Own(BsdSocket* so) {
-    if ((next_handle & kHandleMask) == kHandleMask) {
+    int handle;
+    try {
+      handle = sockets.Insert(so);
+    } catch (const std::bad_alloc&) {
       bycorf_bsd_close(so);
-      errno = EMFILE;
+      errno = ENOMEM;
       return -1;
     }
-    const int handle = next_handle++;
-    sockets.emplace(handle, so);
+    if (handle < 0) {
+      bycorf_bsd_close(so);
+      errno = EMFILE;
+    }
     return handle;
   }
   void QueueCompletion(IoCompletion* tag, int result,
-                       unsigned flags = kCompletionNone) {
-    completions.push_back({tag, result, flags});
+                       unsigned flags = kCompletionNone,
+                       SocketPin socket = {}) {
+    // A callback may close a socket and create another one. Retain its old
+    // number through callback delivery, not merely removal from a pending list.
+    completions.push_back({tag, result, flags, std::move(socket)});
   }
   void Wake(unsigned target) {
     Lane& lane = fabric.lanes[target];
@@ -466,8 +478,8 @@ class DpdkBackend::Impl {
   bool SocketCompletions() {
     bool work = false;
     for (std::size_t i = 0; i < connects.size();) {
-      const auto request = connects[i];
-      BsdSocket* so = Find(request.fd);
+      auto request = connects[i];
+      BsdSocket* so = request.socket.get();
       const int error =
           so ? BsdError(bycorf_bsd_connect_status(so)) : ECANCELED;
       if (error == EAGAIN) {
@@ -475,12 +487,13 @@ class DpdkBackend::Impl {
         continue;
       }
       connects.erase(connects.begin() + i);
-      QueueCompletion(request.tag, -error);
+      QueueCompletion(request.tag, -error, kCompletionNone,
+                      std::move(request.socket));
       work = true;
     }
     for (std::size_t i = 0; i < accepts.size();) {
-      const auto request = accepts[i];
-      BsdSocket* listener = Find(request.fd);
+      auto request = accepts[i];
+      BsdSocket* listener = request.socket.get();
       BsdSocket* accepted = nullptr;
       const int error =
           listener ? BsdError(bycorf_bsd_accept(listener, &accepted)) : EBADF;
@@ -491,17 +504,18 @@ class DpdkBackend::Impl {
       if (!error) {
         const int handle = Own(accepted);
         QueueCompletion(request.tag, handle < 0 ? -errno : handle,
-                        kCompletionMore);
+                        kCompletionMore, std::move(request.socket));
         ++i;
       } else {
         accepts.erase(accepts.begin() + i);
-        QueueCompletion(request.tag, -error);
+        QueueCompletion(request.tag, -error, kCompletionNone,
+                        std::move(request.socket));
       }
       work = true;
     }
     for (std::size_t i = 0; i < sends.size();) {
-      const auto request = sends[i];
-      BsdSocket* so = Find(request.fd);
+      auto request = sends[i];
+      BsdSocket* so = request.socket.get();
       std::size_t sent = 0;
       int error = so ? 0 : EBADF;
       if (so && request.message) {
@@ -525,12 +539,14 @@ class DpdkBackend::Impl {
         continue;
       }
       sends.erase(sends.begin() + i);
-      QueueCompletion(request.tag, sent ? static_cast<int>(sent) : -error);
+      QueueCompletion(request.tag, sent ? static_cast<int>(sent) : -error,
+                      kCompletionNone, std::move(request.socket));
       work = true;
     }
     for (std::size_t i = 0; i < reads.size();) {
-      Connection* c = reads[i];
-      BsdSocket* so = Find(c->file_.fd_);
+      const auto request = reads[i];
+      Connection* c = request.connection;
+      BsdSocket* so = request.socket.get();
       std::size_t got = 0;
       const int error =
           so && !c->closing_
@@ -554,8 +570,9 @@ class DpdkBackend::Impl {
       work = true;
     }
     for (std::size_t i = 0; i < disconnects.size();) {
-      Connection* c = disconnects[i];
-      BsdSocket* so = Find(c->file_.fd_);
+      const auto request = disconnects[i];
+      Connection* c = request.connection;
+      BsdSocket* so = request.socket.get();
       const bool cancel =
           c->peer_disconnect_poll_cancel_requested_ || c->closing_ || !so;
       if (!cancel && !bycorf_bsd_disconnected(so)) {
@@ -870,7 +887,8 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options,
   impl_->buffer_size = options.recv_buffer_size_;
   // Embed the owner in the handle so an accidental transfer cannot alias an
   // unrelated socket that happens to occupy the same slot on another worker.
-  impl_->next_handle = kFirstHandle | (impl_->id << kHandleBits);
+  impl_->sockets.Configure(kFirstHandle | (impl_->id << kHandleBits),
+                           kHandleMask);
   current_ = impl_.get();
   if (rte_thread_register()) {
     auto status = DeviceError("register worker with EAL", rte_errno);
@@ -921,8 +939,7 @@ void DpdkBackend::Shutdown() {
   if (current_ != impl_.get())
     std::abort();  // Runtime tears down on the owning thread.
   fabric.lanes[impl_->id].parked.store(false, std::memory_order_release);
-  for (auto [handle, so] : impl_->sockets) bycorf_bsd_close(so);
-  impl_->sockets.clear();
+  impl_->sockets.CloseAll([](BsdSocket* so) { bycorf_bsd_close(so); });
   impl_->SocketCompletions();
   impl_->FlushTx();
   std::fprintf(
@@ -1036,14 +1053,18 @@ absl::Status DpdkBackend::SubmitSend(const RegisteredFile& file,
   if (!detail::IsDpdkSocket(file.fd_))
     return kernel_.SubmitSend(file, bytes, tag);
   if (!tag) return absl::InvalidArgumentError("send completion is null");
-  impl_->sends.push_back({file.fd_, tag, bytes});
+  auto socket = impl_->sockets.Acquire(file.fd_);
+  if (!socket)
+    return absl::FailedPreconditionError("send on closed DPDK socket");
+  impl_->sends.push_back({std::move(socket), tag, bytes});
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::SubmitConnect(int fd, const sockaddr* address,
                                         socklen_t length, IoCompletion* tag) {
   if (!detail::IsDpdkSocket(fd))
     return kernel_.SubmitConnect(fd, address, length, tag);
-  auto* so = impl_->Find(fd);
+  auto socket = impl_->sockets.Acquire(fd);
+  auto* so = socket.get();
   if (!so || !tag || !address || address->sa_family != AF_INET ||
       length < sizeof(sockaddr_in)) {
     return absl::InvalidArgumentError("invalid DPDK connect request");
@@ -1052,9 +1073,9 @@ absl::Status DpdkBackend::SubmitConnect(int fd, const sockaddr* address,
   const int error = BsdError(
       bycorf_bsd_connect(so, ipv4->sin_addr.s_addr, ntohs(ipv4->sin_port)));
   if (error && error != EINPROGRESS) {
-    impl_->QueueCompletion(tag, -error);
+    impl_->QueueCompletion(tag, -error, kCompletionNone, std::move(socket));
   } else {
-    impl_->connects.push_back({fd, tag, {}});
+    impl_->connects.push_back({std::move(socket), tag, {}});
   }
   return absl::OkStatus();
 }
@@ -1065,22 +1086,28 @@ absl::Status DpdkBackend::SubmitSendMsg(const RegisteredFile& file,
     return kernel_.SubmitSendMsg(file, message, tag);
   if (!tag || !message || message->msg_control || message->msg_name)
     return absl::InvalidArgumentError("unsupported DPDK sendmsg request");
-  impl_->sends.push_back({file.fd_, tag, {}, message});
+  auto socket = impl_->sockets.Acquire(file.fd_);
+  if (!socket)
+    return absl::FailedPreconditionError("sendmsg on closed DPDK socket");
+  impl_->sends.push_back({std::move(socket), tag, {}, message});
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::SubmitAcceptMultishot(int fd, IoCompletion* tag) {
   if (!detail::IsDpdkSocket(fd)) return kernel_.SubmitAcceptMultishot(fd, tag);
-  if (!tag || !impl_->Find(fd))
+  auto socket = impl_->sockets.Acquire(fd);
+  if (!tag || !socket)
     return absl::InvalidArgumentError("invalid DPDK accept request");
-  impl_->accepts.push_back({fd, tag, {}});
+  impl_->accepts.push_back({std::move(socket), tag, {}});
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::SubmitCancel(IoCompletion* target) {
   for (auto* requests : {&impl_->accepts, &impl_->sends, &impl_->connects}) {
     for (auto at = requests->begin(); at != requests->end(); ++at) {
       if (at->tag != target) continue;
+      auto socket = std::move(at->socket);
       requests->erase(at);
-      impl_->QueueCompletion(target, -ECANCELED);
+      impl_->QueueCompletion(target, -ECANCELED, kCompletionNone,
+                             std::move(socket));
       return absl::OkStatus();
     }
   }
@@ -1092,19 +1119,26 @@ absl::Status DpdkBackend::StartRecvMultishot(Connection* c) {
   if (c->recv_armed_ || c->closed_ || c->closing_ || c->recv_paused_ ||
       !c->received_buffers_.empty())
     return absl::OkStatus();
+  auto socket = impl_->sockets.Acquire(c->file_.fd_);
+  if (!socket)
+    return absl::FailedPreconditionError("recv on closed DPDK socket");
   c->recv_mode_ = RecvMode::kOneShot;
   if (c->read_buffer_.empty()) c->read_buffer_.resize(impl_->buffer_size);
   c->recv_armed_ = true;
   ++c->inflight_ops_;
-  impl_->reads.push_back(c);
+  impl_->reads.push_back({c, std::move(socket)});
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::SubmitCancelRecv(Connection* c, IoCompletion* tag) {
-  const auto at = std::find(impl_->reads.begin(), impl_->reads.end(), c);
+  const auto at =
+      std::find_if(impl_->reads.begin(), impl_->reads.end(),
+                   [c](const auto& r) { return r.connection == c; });
   if (at == impl_->reads.end()) return kernel_.SubmitCancelRecv(c, tag);
+  auto socket = std::move(at->socket);
   impl_->reads.erase(at);
   impl_->FinishRead(c);
-  if (tag != nullptr) impl_->QueueCompletion(tag, 0);
+  if (tag != nullptr)
+    impl_->QueueCompletion(tag, 0, kCompletionNone, std::move(socket));
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::StartPeerDisconnectPoll(Connection* c) {
@@ -1112,14 +1146,17 @@ absl::Status DpdkBackend::StartPeerDisconnectPoll(Connection* c) {
     return kernel_.StartPeerDisconnectPoll(c);
   if (c->peer_disconnect_poll_armed_ || c->closed_ || c->closing_)
     return absl::OkStatus();
+  auto socket = impl_->sockets.Acquire(c->file_.fd_);
+  if (!socket)
+    return absl::FailedPreconditionError("poll on closed DPDK socket");
   c->peer_disconnect_poll_armed_ = true;
   ++c->inflight_ops_;
-  impl_->disconnects.push_back(c);
+  impl_->disconnects.push_back({c, std::move(socket)});
   return absl::OkStatus();
 }
 absl::Status DpdkBackend::CancelPeerDisconnectPoll(Connection* c) {
-  if (std::find(impl_->disconnects.begin(), impl_->disconnects.end(), c) ==
-      impl_->disconnects.end())
+  if (std::none_of(impl_->disconnects.begin(), impl_->disconnects.end(),
+                   [c](const auto& r) { return r.connection == c; }))
     return kernel_.CancelPeerDisconnectPoll(c);
   c->peer_disconnect_poll_cancel_requested_ = true;
   return absl::OkStatus();
@@ -1192,12 +1229,11 @@ int DpdkBackend::Close(int handle) noexcept {
     errno = EBADF;
     return -1;
   }
-  BsdSocket* so = current_->Find(handle);
+  BsdSocket* so = current_->sockets.Close(handle);
   if (!so) {
     errno = EBADF;
     return -1;
   }
-  current_->sockets.erase(handle);
   const int error = BsdError(bycorf_bsd_close(so));
   if (error) {
     errno = error;
