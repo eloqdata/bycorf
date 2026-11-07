@@ -42,7 +42,6 @@
 #include <deque>
 #include <limits>
 #include <mutex>
-#include <new>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -284,14 +283,7 @@ class DpdkBackend::Impl {
 
   BsdSocket* Find(int handle) { return sockets.Find(handle); }
   int Own(BsdSocket* so) {
-    int handle;
-    try {
-      handle = sockets.Insert(so);
-    } catch (const std::bad_alloc&) {
-      bycorf_bsd_close(so);
-      errno = ENOMEM;
-      return -1;
-    }
+    const int handle = sockets.Insert(so);
     if (handle < 0) {
       bycorf_bsd_close(so);
       errno = EMFILE;
