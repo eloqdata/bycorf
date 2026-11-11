@@ -186,7 +186,8 @@ if (BYCORF_ENABLE_RDMA)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(BYCORF_IBVERBS REQUIRED IMPORTED_TARGET libibverbs)
   pkg_check_modules(BYCORF_RDMACM REQUIRED IMPORTED_TARGET librdmacm)
-  target_sources(bycorf PRIVATE src/io/rdma_memory.cpp)
+  target_sources(bycorf PRIVATE src/io/rdma_memory.cpp src/rdma/rc.cpp
+    src/rdma/rc_engine.cpp)
   target_link_libraries(bycorf PUBLIC
     PkgConfig::BYCORF_IBVERBS PkgConfig::BYCORF_RDMACM)
 endif()
@@ -486,6 +487,25 @@ if (BYCORF_BUILD_TESTS)
       target_link_options(bycorf_rdma_memory_tests PRIVATE "LINKER:--wrap=${symbol}")
     endforeach()
     bycorf_discover_tests(bycorf_rdma_memory_tests 30 "runtime;rdma;unit")
+
+    add_executable(bycorf_rdma_rc_fake_tests tests/rdma_rc_test.cpp tests/rdma_fake.cpp)
+    target_compile_definitions(bycorf_rdma_rc_fake_tests PRIVATE BYCORF_RDMA_FAKE=1)
+    target_link_libraries(bycorf_rdma_rc_fake_tests PRIVATE bycorf::core GTest::gtest_main)
+    foreach(symbol IN ITEMS rdma_create_event_channel rdma_destroy_event_channel
+        rdma_create_id rdma_destroy_id rdma_bind_addr rdma_listen rdma_resolve_addr
+        rdma_resolve_route rdma_connect rdma_accept rdma_establish rdma_disconnect
+        rdma_reject rdma_get_cm_event rdma_ack_cm_event rdma_init_qp_attr
+        ibv_get_device_name ibv_open_device ibv_close_device ibv_query_device
+        ibv_alloc_pd ibv_dealloc_pd ibv_create_comp_channel ibv_destroy_comp_channel
+        ibv_create_cq ibv_destroy_cq ibv_create_qp ibv_modify_qp ibv_destroy_qp
+        ibv_get_cq_event ibv_ack_cq_events ibv_get_async_event ibv_ack_async_event)
+      target_link_options(bycorf_rdma_rc_fake_tests PRIVATE "LINKER:--wrap=${symbol}")
+    endforeach()
+    bycorf_discover_tests(bycorf_rdma_rc_fake_tests 30 "runtime;rdma;stub")
+
+    add_executable(bycorf_rdma_rc_tests tests/rdma_rc_test.cpp)
+    target_link_libraries(bycorf_rdma_rc_tests PRIVATE bycorf::core GTest::gtest_main)
+    bycorf_discover_tests(bycorf_rdma_rc_tests 30 "runtime;rdma;integration")
 
     add_executable(bycorf_rdma_registration_tests tests/rdma_registration_test.cpp)
     target_link_libraries(bycorf_rdma_registration_tests PRIVATE bycorf::core GTest::gtest_main)

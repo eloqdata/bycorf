@@ -19,8 +19,10 @@
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -66,6 +68,25 @@ void Drain(Backend& backend, Predicate done) {
     ASSERT_TRUE(status.ok() || absl::IsUnavailable(status));
     backend.Poll();
   }
+}
+
+TEST(IoUringBackpressure, AbsoluteDeadlinesSurviveDeferredSubmission) {
+  // These objects outlive the backend, including on an assertion failure.
+  std::array<Completion, 16> tags;
+  timespec now{};
+  ASSERT_EQ(clock_gettime(CLOCK_MONOTONIC, &now), 0);
+  const __kernel_timespec expired{.tv_sec = now.tv_sec, .tv_nsec = now.tv_nsec};
+  Fixture f;
+  ASSERT_NO_FATAL_FAILURE(f.Init());
+  for (auto& tag : tags)
+    ASSERT_TRUE(f.backend.SubmitDeadline(expired, &tag).ok());
+  // Sixteen requests exceed this fixture's two-entry SQ. Every request must
+  // expire after submission rather than restarting a relative timeout.
+  Drain(f.backend, [&] {
+    return std::all_of(tags.begin(), tags.end(),
+                       [](const auto& tag) { return tag.calls == 1; });
+  });
+  for (const auto& tag : tags) EXPECT_EQ(tag.result, -ETIME);
 }
 
 TEST(IoUringBackpressure, SendsAndWake) {

@@ -374,6 +374,15 @@ absl::Status IoUringBackend::SubmitTimeout(const __kernel_timespec& timeout,
   });
 }
 
+absl::Status IoUringBackend::SubmitDeadline(const __kernel_timespec& deadline,
+                                            IoCompletion* tag) {
+  auto* deadline_ptr = const_cast<__kernel_timespec*>(&deadline);
+  return SubmitOrQueue([deadline_ptr, tag](io_uring_sqe* sqe) {
+    io_uring_prep_timeout(sqe, deadline_ptr, 0, IORING_TIMEOUT_ABS);
+    io_uring_sqe_set_data(sqe, tag);
+  });
+}
+
 io_uring_sqe* IoUringBackend::AcquireSqe() {
   if (!initialized_) {
     return nullptr;
