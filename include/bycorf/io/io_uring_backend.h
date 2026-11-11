@@ -141,8 +141,12 @@ class IoUringBackend {
 
   // Event loop.
   absl::Status Submit();
-  bool Poll();                // reap completions, dispatch, then re-arm recvs
-  bool Wait(int timeout_ms);  // block for a completion, dispatch, drain
+  bool Poll();  // reap completions, dispatch, then re-arm recvs
+  // The worker coordinates source notification arming and idle rechecks before
+  // calling this sole blocking primitive. Pending submissions veto blocking;
+  // an existing CQE returns immediately. Dispatch can enqueue runnable work
+  // or consume a stop notification, so the caller must re-enter scheduling.
+  bool Wait(int timeout_ms);
   // Software work or SQEs still requiring an enter must prevent worker sleep.
   bool HasPending() const noexcept;
 

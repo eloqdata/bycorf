@@ -250,6 +250,7 @@ class DpdkBackend::Impl {
   std::uint64_t rx = 0, tx = 0, forwarded_rx = 0, forwarded_tx = 0, drops = 0;
   std::uint64_t waits = 0, arms = 0, notifications = 0;
   bool rx_can_wait = false;
+  bool wait_prepared = false, rx_interrupt_enabled = false;
 
   struct Notification : IoCompletion {
     Impl* owner = nullptr;
@@ -299,9 +300,9 @@ class DpdkBackend::Impl {
   }
   void Wake(unsigned target) {
     Lane& lane = fabric.lanes[target];
-    // Publication precedes this exchange. Wait marks parked before rechecking
-    // its rings, so work either prevents the wait or has a MSG_RING wake
-    // queued.
+    // Publication precedes this exchange. PrepareWait marks parked before
+    // rechecking its rings, so work either prevents the wait or has a MSG_RING
+    // wake queued.
     if (target != id && lane.parked.exchange(false, std::memory_order_acq_rel))
       backend.kernel_.WakeRemote(lane.ring_fd);
   }
@@ -950,93 +951,83 @@ void DpdkBackend::Shutdown() {
 bool DpdkBackend::Poll() {
   if (!impl_->initialized || impl_->polling) return false;
   impl_->polling = true;
-  const bool kernel = kernel_.Poll();
   const bool packets = impl_->Packets();
   const bool sockets = impl_->SocketCompletions();
   impl_->polling = false;
-  return kernel || packets || sockets;
+  return packets || sockets;
 }
-absl::Status DpdkBackend::Submit() {
+void DpdkBackend::Flush() {
   if (impl_->initialized) impl_->FlushTx();
-  return kernel_.Submit();
 }
-bool DpdkBackend::Wait(int timeout_ms) {
+absl::StatusOr<bool> DpdkBackend::PrepareWait() {
   if (!fabric.adaptive ||
       fabric.ready.load(std::memory_order_acquire) != fabric.workers)
-    return true;
-  if (!impl_->rx_can_wait) return false;
+    return false;
+  if (!impl_->rx_can_wait)
+    return absl::InternalError("DPDK RX notification is unavailable");
   const unsigned id = impl_->id;
-  Lane& lane = fabric.lanes[id];
-  lane.parked.store(true, std::memory_order_release);
-  bool enabled = false;
+  // RMW pairs with the producer's post-publication exchange. If the producer
+  // ran first, acquire observes its queue publication; otherwise it observes
+  // parked and sends MSG_RING. A release store alone does not order the
+  // following queue loads against the producer on every supported CPU.
+  fabric.lanes[id].parked.exchange(true, std::memory_order_acq_rel);
+  impl_->wait_prepared = true;
   if (id < fabric.queues) {
     if (!fabric.tap) {
       const int rc = rte_eth_dev_rx_intr_enable(fabric.port, id);
-      enabled = rc == 0;
-      if (!enabled) {
-        lane.parked.store(false);
-        std::fprintf(
-            stderr, "DPDK worker %u: %s\n", id,
-            AdaptiveError("enable RX interrupt", rc).ToString().c_str());
-        return false;
-      }
+      if (rc) return AdaptiveError("enable RX interrupt", rc);
+      impl_->rx_interrupt_enabled = true;
     }
     ++impl_->arms;
     if (!impl_->notification.armed) {
-      const auto submitted = kernel_.SubmitPoll(impl_->notification.fd, POLLIN,
-                                                &impl_->notification);
-      if (!submitted.ok()) {
-        lane.parked.store(false);
-        if (enabled) DisableRxInterrupt(id);
-        std::fprintf(stderr,
-                     "DPDK worker %u: RX notification registration: %s; "
-                     "set BYCORF_DPDK_MODE=poll explicitly to use polling\n",
-                     id, submitted.ToString().c_str());
-        return false;
-      }
+      const auto status = kernel_.SubmitPoll(impl_->notification.fd, POLLIN,
+                                             &impl_->notification);
+      if (!status.ok())
+        return absl::Status(
+            status.code(),
+            "DPDK RX notification registration: " +
+                std::string(status.message()) +
+                "; set BYCORF_DPDK_MODE=poll explicitly to use polling");
       impl_->notification.armed = true;
     }
   }
-  // Arm first, then recheck packet/software queues and submit the poll. A
-  // packet arriving in either gap leaves a readable fd or a MSG_RING CQE.
-  bool ok = true;
-  if (!Poll() && rte_ring_empty(lane.rx) && rte_ring_empty(lane.tx) &&
-      impl_->completions.empty()) {
-    const auto submitted = kernel_.Submit();
-    if (!submitted.ok()) {
-      // Temporary enter backpressure needs another owner-worker round. Leave
-      // the interrupt cleanup below intact and avoid parking on deferred work.
-      ok = absl::IsUnavailable(submitted);
-    } else {
-      const auto now = NowNs(), deadline = bycorf_bsd_deadline_ns();
-      if (deadline != UINT64_MAX) {
-        const auto delay = deadline <= now
-                               ? 0
-                               : std::min<std::uint64_t>(
-                                     (deadline - now) / 1'000'000, INT_MAX);
-        timeout_ms = timeout_ms < 0
-                         ? delay
-                         : std::min(timeout_ms, static_cast<int>(delay));
-      }
-      // A sub-millisecond timer is already due for the millisecond wait API.
-      // Let the next worker round service it without a zero-timeout syscall.
-      if (timeout_ms != 0) {
-        ++impl_->waits;
-        ok = kernel_.Wait(timeout_ms);
-      }
-    }
+  return true;
+}
+
+bool DpdkBackend::CanWait() const {
+  const Lane& lane = fabric.lanes[impl_->id];
+  return impl_->wait_prepared && impl_->rx_can_wait &&
+         rte_ring_empty(lane.rx) && rte_ring_empty(lane.tx) &&
+         impl_->completions.empty();
+}
+
+int DpdkBackend::WaitTimeout(int timeout_ms) const {
+  const auto now = NowNs(), deadline = bycorf_bsd_deadline_ns();
+  if (deadline != UINT64_MAX) {
+    const auto delay =
+        deadline <= now
+            ? 0
+            : std::min<std::uint64_t>((deadline - now) / 1'000'000, INT_MAX);
+    timeout_ms = timeout_ms < 0 ? static_cast<int>(delay)
+                                : std::min(timeout_ms, static_cast<int>(delay));
   }
-  lane.parked.store(false, std::memory_order_release);
-  if (enabled) {
-    const int rc = DisableRxInterrupt(id);
-    if (rc) {
-      std::fprintf(
-          stderr, "DPDK worker %u: %s\n", id,
-          AdaptiveError("disable RX interrupt", rc).ToString().c_str());
-      return false;
-    }
+  return timeout_ms;
+}
+
+absl::Status DpdkBackend::FinishWait(bool waited) {
+  if (waited) ++impl_->waits;
+  if (impl_->wait_prepared) {
+    fabric.lanes[impl_->id].parked.store(false, std::memory_order_release);
+    impl_->wait_prepared = false;
   }
-  return ok && impl_->rx_can_wait;
+  if (impl_->rx_interrupt_enabled) {
+    impl_->rx_interrupt_enabled = false;
+    const int rc = DisableRxInterrupt(impl_->id);
+    if (rc) return AdaptiveError("disable RX interrupt", rc);
+  }
+  if (!impl_->rx_can_wait)
+    return absl::InternalError("DPDK RX notification is unavailable");
+  return absl::OkStatus();
 }
 
 absl::Status DpdkBackend::SubmitSend(const RegisteredFile& file,

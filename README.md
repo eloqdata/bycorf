@@ -102,6 +102,7 @@ results.
 |---|---|
 | `InlineRingQueue`, `ReceivedBufferQueue` | Queue types and inline capacities, moves, FIFO order, wrapping, growth, and shrinking |
 | `CrossCoreDrain`, `CrossCoreDrainState` | Shared sender quotas across message kinds, overflow fairness, bitmap wrapping, and concurrent publication without lost work |
+| `WorkerWait` | Publication between idle rechecks and blocking, MSG_RING/eventfd wakes, stop races, and runnable work preventing sleep |
 | `WorkerScheduler` | Foreground/background FIFO admission, deferred turns, and reentrant local/remote work across queue relocation |
 | `TaskTransfer` | Bounded native stack for sequential and nested awaits, asynchronous completion, cancellation ownership and reentrant callbacks |
 | `RuntimeStartup`, `TcpServiceStop`, `Timer`, `Connect` | Early shutdown, timers and cancellation, loopback TCP, refused connections, deadlines, address validation, and retirement of losing deadlines |

@@ -16,11 +16,11 @@ limitations under the License.
 
 # I/O backends
 
-Every worker retains one io_uring instance for ordinary file I/O, kernel
-sockets, completion delivery, timers, and cross-worker MSG_RING wakeups.
-Registered storage buffers and network receive buffers have separate
-lifecycles. The default network backend uses Linux TCP and provided-buffer
-multishot receives, with a per-connection one-shot fallback.
+`Worker` owns one `IoUringBackend` for kernel sockets, file I/O, completion
+delivery, timers, and MSG_RING/eventfd wakeups. Its `NetBackend<Worker>` and
+`StorageBackend<Worker>` facades share that ring. Network receive buffers and
+registered storage buffers have separate lifecycles. Linux TCP uses
+provided-buffer multishot receives with a per-connection one-shot fallback.
 
 `BYCORF_KERNEL_BYPASS` is the single build option for DPDK networking and SPDK
 storage. It defaults to off; enabling it compiles and links both capabilities.
@@ -32,27 +32,21 @@ allocation or runtime startup fails. This preserves DMA allocator identity,
 registered-resource ownership and native TCP state. Unsupported capabilities
 fail explicitly rather than falling back.
 
-`Worker` owns one `IoUringBackend`, shared by its private CRTP facades
-`NetBackend<Worker>` and `StorageBackend<Worker>`. The facades obtain the ring
-through the owner contract rather than receiving it on each submission or
-storing a separate pointer. Kernel sockets, storage, timers and MSG_RING use the same
-submission/completion queues. `NetBackend` selects kernel networking or its
-optional DPDK adapter; `StorageBackend` selects kernel storage or its embedded
-SPDK backend. SPDK default construction acquires no device resources; only the
-selected backend is initialized. Storage dispatch uses its worker-local
-initialized state, which remains active through shutdown completion draining.
-Storage operations require a successfully initialized worker and stop before
-its backend shutdown completes. The worker forwards storage operations without
-selecting SPDK itself. Network event-loop polling and submission advance the
-shared ring; separate storage polling advances only SPDK. Pending polled storage prevents
-parking, while kernel storage uses the shared ring's wake/completion path.
+`NetBackend` selects kernel networking or the DPDK adapter; `StorageBackend`
+selects kernel storage or SPDK. Only selected adapters acquire resources.
+The worker explicitly polls the shared ring, native network work, and polled
+storage. It flushes native network output before submitting the shared ring.
+Network polling and flushing advance only DPDK work; storage polling advances
+only SPDK. Kernel TCP and storage progress through the worker's ring calls.
+Network adapters supply notification preparation, idle checks,
+deadlines, and cleanup to the [worker sleep protocol](runtime.md#sleep-and-wakeups).
+The worker enters the ring's blocking wait; adapters never block independently.
 
-The worker initializes the ring before either adapter and stops storage, then
-networking, before shutting down the ring. Kernel storage registrations live
-until ring shutdown quiesces kernel access. The ring is the first base subobject, so both
-facades are destroyed before it; neither creates a second ring or worker pool. SPDK callbacks
-resolve their backend through the storage adapter using the owning worker's TLS,
-including shutdown drains.
+The ring outlives both adapters. The worker initializes it first, stops storage
+and networking in that order, then shuts it down. Storage dispatch remains
+valid through shutdown completion draining; SPDK callbacks use the owning
+worker's TLS to reach its storage adapter. Kernel registrations remain live
+until ring shutdown quiesces kernel access.
 
 Each io_uring backend owns a FIFO for accepted operations awaiting submission
 space. Successful admission does not mean the kernel has received the request.
@@ -60,8 +54,8 @@ The backend retains its prepared descriptor; the caller retains the completion
 tag, referenced buffers and parameter storage, and any registered resources
 until the operation's terminal completion. Submission and completion polling
 advance the queue on its owner worker, without dispatching completions inside
-an operation's submission call. The event loop advances queued work before
-parking, including when no earlier request can produce a completion.
+an operation's submission call. Unsubmitted operations veto worker sleep even
+when no earlier request can produce a completion.
 
 Cancellation preserves this ownership boundary: a queued operation retires
 through deferred completion, while an issued operation remains live until its
@@ -82,14 +76,14 @@ unfinished storage operation has a distinct tag, which retains its expected
 successful result; the caller keeps the tag and buffers alive until completion.
 The completion callback may reuse or destroy the tag. Polling and shutdown
 drains retain the owning worker's thread-local context for completion dispatch.
-Deferred commands participate in outstanding-I/O accounting, preventing
-premature sleep, close or shutdown. Submission errors that cannot make progress
-through a completion are reported to the caller.
-The io_uring selection uses ordinary aligned buffers and kernel file/block I/O.
-SPDK completion polling is inactive when storage uses io_uring; in-flight SPDK
-storage prevents sleeping before its completions can be polled. As with the
-NVMe FLUSH command, SPDK durability barriers cover previously completed writes;
-callers await data writes before requesting a barrier. Controllers that report
+Accepted and deferred SPDK commands require polling and veto worker sleep
+until they retire; they also participate in close and shutdown accounting.
+Submission errors that cannot make progress through a completion are reported
+to the caller. Kernel storage uses ordinary aligned buffers and the shared
+ring's completion path without SPDK polling.
+
+As with the NVMe FLUSH command, SPDK durability barriers cover previously
+completed writes; callers await data writes before requesting a barrier. Controllers that report
 no volatile write cache already make completed writes durable, so their no-op
 FLUSH completes through the worker's deferred completion queue.
 

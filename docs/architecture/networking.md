@@ -157,15 +157,16 @@ are bounded: overflow and partial device TX free unaccepted packets, leaving
 native TCP responsible for retransmission. This is a functional integration
 boundary, not a zero-copy or tuned packet allocator.
 
-## Polling and sleep
+## DPDK notifications
 
-Poll mode keeps workers running without arming RX interrupts. Adaptive mode
-can wait on the same io_uring used for worker messages. A queue owner enables
-its RX interrupt, registers the notification descriptor with io_uring, and
-rechecks packet and software queues before sleeping. Packet publication either
-prevents sleep or sends a MSG_RING wake to the parked destination. The next
-BSD timer deadline bounds the wait; an arriving packet does not need to wait
-for a timer tick. RX interrupts are disabled on returning to polling.
+DPDK participates in the [worker sleep protocol](runtime.md#sleep-and-wakeups).
+Explicit poll mode vetoes sleep without arming interrupts. Adaptive preparation
+marks the software lane parked and, for a queue owner, enables RX interrupts
+and registers the notification descriptor with the shared io_uring. Packet
+publication either appears in the RX/TX queue recheck or sends MSG_RING to the
+parked destination. The FreeBSD timer deadline bounds the worker's wait.
+Cleanup clears the lane's parked state and disables any interrupt enabled by
+that attempt, including on early exit or partial preparation failure.
 
 A TAP virtual device provides a readable packet descriptor instead of a
 physical interrupt eventfd. The notification code preserves that distinction:
@@ -175,12 +176,11 @@ after a timer or mailbox wake does not indicate lost interrupt support. If the
 PMD cannot provide the required notification capability on every RX queue,
 adaptive startup fails before services start. Configuration, notification
 registration, and interrupt-arm failures never silently select polling; the
-error identifies an explicit `BYCORF_DPDK_MODE=poll` override. A notification
-failure during a wait terminates the worker loop and stops peer workers before
-teardown barriers, producing a nonzero server exit. Virtual-device tests cover
-this wake protocol but do not validate physical NIC interrupt behavior or predict kernel-bypass throughput. The TAP
-PMD additionally uses Linux realtime signals for its internal RX trigger in
-both modes; this is separate from Bycorf's worker sleep protocol.
+error identifies an explicit `BYCORF_DPDK_MODE=poll` override. Notification
+completion and interrupt-cleanup failures use the runtime's worker-failure
+shutdown path. The TAP PMD uses Linux realtime signals for its internal RX
+trigger in both modes. Virtual-device tests cover the notification protocol, but do not
+validate physical NIC interrupt behavior or predict kernel-bypass throughput.
 
 Sources: `include/bycorf/net/connection.h`, `src/net/tcp_service.cpp`, `src/net/tcp_listener.cpp`,
 `src/net/tcp_stream.cpp`, `src/net/socket_ops.cpp`, `src/io/dpdk_backend.cpp`,

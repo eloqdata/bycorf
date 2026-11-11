@@ -16,6 +16,8 @@
 
 #include <gtest/gtest.h>
 #include <rte_ethdev.h>
+#include <rte_mbuf.h>
+#include <rte_ring.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -29,6 +31,8 @@
 #include <thread>
 
 #include "bycorf/net/server.h"
+#include "bycorf/runtime/foreign_executor.h"
+#include "worker_wait_test_peer.h"
 
 namespace {
 std::string_view scenario;
@@ -37,12 +41,103 @@ std::atomic<unsigned> enables{0};
 std::atomic<unsigned> disables{0};
 std::atomic<unsigned> configured{0};
 std::atomic<bool> injected{false};
+std::atomic<bool> race_done{false};
+std::atomic<unsigned> deadlines{0};
+
+void CheckWaitRace(bycorf::Worker& worker) {
+  using Peer = bycorf::WorkerWaitTestPeer;
+  using Phase = Peer::Phase;
+  if (scenario == "race-facade") {
+    bycorf::CheckNetworkRingIsolation(worker);
+    injected = true;
+    race_done.store(true, std::memory_order_release);
+    return;
+  }
+  bool reached = false, waiting = false;
+  unsigned delivered = 0;
+  const auto boundary =
+      scenario == "race-notification" ? Phase::kWaiting
+      : scenario == "race-stop"       ? Phase::kPrepared
+      : (scenario == "race-submit-queue" || scenario == "race-deadline")
+          ? Phase::kSubmitted
+          : Phase::kRechecked;
+  const char* queue_name =
+      scenario == "race-tx-queue" ? "bycorf_tx_0" : "bycorf_rx_0";
+  // Other workers may still be attaching their VNET. Retry only until this
+  // worker can actually prepare notifications; no timeout rescues its wait.
+  const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!reached && std::chrono::steady_clock::now() < limit) {
+    const auto before = enables.load();
+    EXPECT_TRUE(Peer::Wait(worker, [&](Phase phase) {
+      waiting |= phase == Phase::kWaiting;
+      if (phase != boundary) return;
+      reached = true;
+      if (scenario == "race-notification") {
+        const std::uint64_t one = 1;
+        EXPECT_EQ(write(notification_fd, &one, sizeof(one)), sizeof(one));
+      } else if (scenario == "race-stop") {
+        worker.RequestStop();
+      } else if (scenario == "race-mailbox") {
+        bycorf::detail::ForeignExecutorState ingress{
+            .cross_core_ = bycorf::ThisWorker().cross_core_, .worker_id_ = 0};
+        std::thread producer([&] {
+          EXPECT_TRUE(bycorf::detail::PostForeignNotification(
+              &ingress, {.context_ = &delivered,
+                         .value_ = 0,
+                         .run_fn_ = +[](void* p, std::uint64_t) noexcept {
+                           ++*static_cast<unsigned*>(p);
+                         }}));
+        });
+        producer.join();
+      } else if (scenario != "race-deadline") {
+        // Zero-length input is deliberately dropped by Input, but still
+        // exercises the real software RX queue and mbuf ownership.
+        auto* packet = rte_pktmbuf_alloc(rte_mempool_lookup("bycorf_packets"));
+        EXPECT_NE(packet, nullptr);
+        if (packet) {
+          auto address = reinterpret_cast<std::uintptr_t>(packet);
+          const int rc = rte_ring_enqueue_elem(rte_ring_lookup(queue_name),
+                                               &address, sizeof(address));
+          EXPECT_EQ(rc, 0);
+          if (rc) rte_pktmbuf_free(packet);
+        }
+      }
+    }));
+    if (reached) {
+      EXPECT_GT(enables.load(), before);
+      EXPECT_EQ(enables.load(), disables.load());
+      EXPECT_FALSE(Peer::CanWait(worker));
+    }
+  }
+  EXPECT_TRUE(reached);
+  EXPECT_EQ(waiting, scenario == "race-notification");
+  if (scenario == "race-mailbox") {
+    EXPECT_TRUE(Peer::Drain(worker));
+    EXPECT_EQ(delivered, 1U);
+  }
+  if (scenario == "race-notification") {
+    std::uint64_t counter;
+    EXPECT_EQ(read(notification_fd, &counter, sizeof(counter)), -1);
+    EXPECT_EQ(errno, EAGAIN);  // The actual notification CQE was dispatched.
+  }
+  if (scenario == "race-deadline") EXPECT_GT(deadlines.load(), 0U);
+  if (scenario == "race-queue" || scenario == "race-submit-queue" ||
+      scenario == "race-tx-queue") {
+    EXPECT_FALSE(rte_ring_empty(rte_ring_lookup(queue_name)));
+    EXPECT_TRUE(Peer::Poll(worker));
+    EXPECT_TRUE(rte_ring_empty(rte_ring_lookup(queue_name)));
+  }
+  injected = reached;
+  race_done.store(true, std::memory_order_release);
+}
 
 class IdleService final : public bycorf::Service {
  public:
   void Prepare(unsigned) override {}
-  bycorf::Task<absl::Status> Run(bycorf::Worker&,
+  bycorf::Task<absl::Status> Run(bycorf::Worker& worker,
                                  bycorf::ServiceContext) override {
+    if (scenario.starts_with("race-") && worker.id() == 0)
+      CheckWaitRace(worker);
     co_return absl::OkStatus();
   }
   void Stop() noexcept override {}
@@ -100,10 +195,17 @@ extern "C" int __wrap_rte_eth_dev_rx_intr_disable(uint16_t, uint16_t) {
   return 0;
 }
 
+extern "C" std::uint64_t __real_bycorf_bsd_deadline_ns();
+extern "C" std::uint64_t __wrap_bycorf_bsd_deadline_ns() {
+  ++deadlines;
+  return scenario == "race-deadline" ? 0 : __real_bycorf_bsd_deadline_ns();
+}
+
 namespace {
 int RunScenario(std::string_view selected) {
   scenario = selected;
   const bool poll = scenario == "poll";
+  const bool race = scenario.starts_with("race-");
   const bool mlx5 = scenario == "mlx5-empty";
   const bool runtime = scenario.starts_with("runtime-");
   // Ignore inherited hardware configuration; each process gets its own EAL.
@@ -123,7 +225,7 @@ int RunScenario(std::string_view selected) {
   bycorf::Server server;
   server.AddService(&service);
   const auto status = server.Start({.thread_count_ = 2, .pin_workers_ = false});
-  if (!poll && !runtime && !mlx5) {
+  if (!poll && !runtime && !mlx5 && !race) {
     if (status.ok() || !injected || configured != 1 ||
         status.message().find("BYCORF_DPDK_MODE=poll") ==
             std::string_view::npos) {
@@ -137,11 +239,21 @@ int RunScenario(std::string_view selected) {
       return 1;
     }
     if (mlx5) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    if (poll || mlx5) server.RequestStop();
+    if (race) {
+      const auto limit =
+          std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while (!race_done.load(std::memory_order_acquire) &&
+             std::chrono::steady_clock::now() < limit)
+        std::this_thread::yield();
+    }
+    if (poll || mlx5 || race) server.RequestStop();
     // A CTest timeout catches peers stranded at the all-worker barriers.
     server.WaitUntilStopped();
     if (poll && (server.exit_code() != 0 || enables != 0)) return 1;
     if (mlx5 && (server.exit_code() != 0 || enables < 2 || !injected)) return 1;
+    if (race &&
+        (server.exit_code() != 0 || !injected || testing::Test::HasFailure()))
+      return 1;
     if (runtime && (server.exit_code() == 0 || !injected)) return 1;
   }
   close(notification_fd);
@@ -161,7 +273,11 @@ TEST_P(DpdkAdaptiveDeathTest, HandlesInterruptFailure) {
 INSTANTIATE_TEST_SUITE_P(Scenarios, DpdkAdaptiveDeathTest,
                          testing::Values("configure", "descriptor", "enable",
                                          "disable", "poll", "runtime-enable",
-                                         "runtime-disable", "mlx5-empty"),
+                                         "runtime-disable", "mlx5-empty",
+                                         "race-queue", "race-tx-queue",
+                                         "race-submit-queue", "race-mailbox",
+                                         "race-notification", "race-stop",
+                                         "race-deadline", "race-facade"),
                          [](const testing::TestParamInfo<const char*>& info) {
                            std::string name = info.param;
                            for (auto& character : name)

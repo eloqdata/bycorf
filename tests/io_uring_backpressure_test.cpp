@@ -459,9 +459,9 @@ TEST(IoUringBackpressure, FixedBufferDescriptorLifetime) {
   ASSERT_EQ(closed.result, 0);
 }
 
-// Both facades must submit to the same ring: the network event loop also
-// delivers storage completions, and stopping either facade must leave the
-// worker-owned ring available until the worker shuts it down.
+// Both facades enqueue operations on the same ring. Only the owner advances
+// kernel submissions/completions; stopping either facade leaves the ring
+// available until the worker shuts it down.
 TEST(IoUringBackpressure, NetworkAndStorageShareRing) {
   struct BackendOwner : bycorf::IoUringBackend,
                         bycorf::NetBackend<BackendOwner>,
@@ -487,7 +487,7 @@ TEST(IoUringBackpressure, NetworkAndStorageShareRing) {
   Completion opened;
   ASSERT_TRUE(
       storage.SubmitOpenDirect("/dev/zero", O_RDONLY, 0, {0}, &opened).ok());
-  Drain(network, [&] { return opened.calls != 0; });
+  Drain(kernel, [&] { return opened.calls != 0; });
   ASSERT_EQ(opened.result, 0);
 
   int sockets[2];
@@ -504,7 +504,7 @@ TEST(IoUringBackpressure, NetworkAndStorageShareRing) {
   ASSERT_EQ(sent.calls, 0u);
   // Kernel storage never requests a separate poll or keeps the worker spinning.
   ASSERT_FALSE(storage.NeedsPolling());
-  Drain(network, [&] { return read.calls != 0 && sent.calls != 0; });
+  Drain(kernel, [&] { return read.calls != 0 && sent.calls != 0; });
   ASSERT_EQ(read.result, bytes.size());
   ASSERT_EQ(sent.result, 1);
   EXPECT_EQ(bytes, (std::array<std::byte, 16>{}));
