@@ -236,6 +236,11 @@ absl::Status Worker::Init(const WorkerOptions& options) {
 }
 
 void Worker::Shutdown() {
+#if BYCORF_ENABLE_RDMA
+  // Registration can be used before Init; its handles retain verbs resources
+  // independently of the ring. Never invalidate a live MR during shutdown.
+  Rdma::Shutdown();
+#endif
   if (!initialized_) {
     return;
   }

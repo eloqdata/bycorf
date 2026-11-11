@@ -26,6 +26,7 @@ connections, and asynchronous I/O; applications provide services above
 
 - [Name](#name)
 - [Build and test](#build-and-test)
+- [Optional RDMA registration](#optional-rdma-registration)
 - [Run the examples](#run-the-examples)
 - [Use Bycorf in a CMake project](#use-bycorf-in-a-cmake-project)
 - [Development](#development)
@@ -177,6 +178,46 @@ and `SpdkStorageEnabled()` to check the independent runtime selections.
 Follow the [DPDK/SPDK build and test guide](docs/dpdk-prototype.md) for its
 additional dependencies, virtual-device checks, physical-device configuration,
 and experimental compatibility limits.
+
+## Optional RDMA registration
+
+`BYCORF_ENABLE_RDMA` enables the private worker facade and explicit memory
+registration API. It defaults to off and is independent of
+`BYCORF_KERNEL_BYPASS`; enabling it requires libibverbs and librdmacm development
+packages, without DPDK/SPDK. On Ubuntu:
+
+```bash
+sudo apt-get install --no-install-recommends libibverbs-dev librdmacm-dev
+cmake -S . -B build-rdma -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBYCORF_ENABLE_RDMA=ON
+cmake --build build-rdma --parallel
+ctest --test-dir build-rdma -R '^bycorf_RdmaMemory\.' --output-on-failure
+```
+
+The device-free `RdmaMemory` suite injects verbs failures and verifies lazy
+initialization, cleanup order, range/permission checks, worker/context identity,
+and retained registration lifetimes. The `RdmaRegistration` test skips unless
+an explicit device is supplied. With an existing Soft-RoCE device (substitute
+its name from `rdma link show`):
+
+```bash
+BYCORF_RDMA_TEST_DEVICE=rxe0 ctest --test-dir build-rdma \
+  -R '^bycorf_RdmaRegistration\.' --output-on-failure
+```
+
+This opens the selected device, registers and deregisters memory, creates real
+QPs sharing a PD, and checks permissions, bounds, and mismatched PD rejection.
+It requires access to the device's uverbs node and sufficient memlock. It does
+not test a connected data-transfer or immediate-data protocol. No device is
+opened by unused workers or test discovery.
+
+Use `Worker::OpenRdmaDevice(name)` or `AcquireRdmaDomain(owning_context)` on the
+owner worker, then `RegisterRdmaMemory(domain, backing_span, explicit_access)`.
+Keep the returned domain through QP destruction. `RegisteredMemory::Slice`
+retains registration; `slice.Acquire(qp, local_access)` validates context/PD and
+returns an SGE lease to retain through terminal completion. The caller owns
+backing memory and must stop remote access before releasing registrations and
+freeing it. See [RDMA ownership](docs/architecture/rdma.md) for remote descriptors,
+permissions, CM context ownership, and the independent storage-buffer contract.
 
 ## Run the examples
 
