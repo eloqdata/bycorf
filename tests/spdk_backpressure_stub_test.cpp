@@ -37,6 +37,7 @@
 
 #include "bycorf/io/spdk_storage.h"
 #include "bycorf/runtime/worker.h"
+#include "worker_wait_test_peer.h"
 
 namespace {
 // Stub C callbacks cannot return GoogleTest fatal assertions or unwind.
@@ -265,6 +266,13 @@ void CheckQueues(bycorf::Worker& worker, std::span<std::byte> buffer) {
   CHECK(first.accepted.size() == 1 && second.accepted.size() == 1);
   CHECK(first.accepted[0].context == &read);
   CHECK(second.accepted[0].context == &other);
+  // Outstanding device I/O has no kernel wake source. Even the final idle
+  // recheck must veto waiting while accepted and deferred commands remain.
+  bool waited = false;
+  CHECK(bycorf::WorkerWaitTestPeer::Wait(worker, [&](auto phase) {
+    waited |= phase == bycorf::WorkerWaitTestPeer::Phase::kWaiting;
+  }));
+  CHECK(!waited);
   unsigned attempts = first.attempts;
   for (unsigned i = 0; i < 3; ++i) worker.RunOnce(false);
   CHECK(first.attempts > attempts);

@@ -36,6 +36,7 @@
 #include "absl/base/internal/sysinfo.h"
 #endif
 #include "spdlog/spdlog.h"
+#include "worker_wait.h"
 
 namespace bycorf {
 
@@ -1065,6 +1066,7 @@ bool Worker::BusyPoll() {
       CycleNow() + static_cast<std::int64_t>(busy_poll_cycles_);
   do {
     bool did_work = DrainCrossCore();
+    did_work |= KernelBackend().Poll();
     did_work |= Network::Poll();
     did_work |= PollStorage();
     if (did_work) {
@@ -1122,7 +1124,8 @@ bool Worker::PollStorage() {
 
 void Worker::Flush() {
   FlushWakes();
-  const auto status = Network::Submit();
+  Network::Flush();
+  const auto status = KernelBackend().Submit();
   if (!status.ok()) [[unlikely]] {
     // CQ backpressure and interrupted enters are retried by the next round.
     // A permanent error cannot make progress by waiting for queue capacity.
@@ -1130,6 +1133,12 @@ void Worker::Flush() {
     spdlog::error("worker submit failed: {}", status.message());
     submit_failed_ = true;
   }
+}
+
+bool Worker::HasRunnableWork() const noexcept {
+  return !ready_.empty() || !next_ready_.empty() ||
+         !foreground_remote_work_.empty() || !background_ready_.empty() ||
+         !next_background_ready_.empty() || !background_remote_work_.empty();
 }
 
 bool Worker::RunOnce(bool wait_for_completion) {
@@ -1142,11 +1151,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
   // 1. Poll external work once, then run online coroutines within their normal
   //    budget. Deferred Yield continuations are appended after fresh I/O and
   //    cross-core work so yielding really returns control to the event loop.
-  bool did_work =
-      !ready_.empty() || !next_ready_.empty() ||
-      !foreground_remote_work_.empty() || !background_ready_.empty() ||
-      !next_background_ready_.empty() || !background_remote_work_.empty();
+  bool did_work = HasRunnableWork();
   did_work |= DrainCrossCore();
+  did_work |= KernelBackend().Poll();
   did_work |= Network::Poll();
   // This extra foreground slice exists to get ahead of storage completions.
   // Without pending storage work, the normal slice below already serves the
@@ -1247,30 +1254,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
     return true;
   }
 
-  // 4. Idle — park. Check idle timeouts only here, off the hot path. The
-  // wake_seq
-  //    handshake closes the lost-wakeup race: snapshot it, recheck the mailbox
-  //    once, then CAS to the parked sentinel. The recheck catches work already
-  //    enqueued; the CAS catches work published after the snapshot (a
-  //    producer's fetch_add changes wake_seq, so the CAS fails and we loop
-  //    instead of park).
-  CheckIdleConnections();
-  WorkerMailbox& mb = cross_core_->mailbox(id_);
-  const std::uint32_t seq = mb.wake_seq_.load(std::memory_order_acquire);
-  if (DrainCrossCore()) {
-    return true;  // raced: work arrived; next iteration drains + submits it
-  }
-  std::uint32_t expected = seq;
-  if (!mb.wake_seq_.compare_exchange_strong(expected, kWakeSeqParked,
-                                            std::memory_order_acq_rel,
-                                            std::memory_order_relaxed)) {
-    return true;  // a producer published work; loop again instead of parking
-  }
-
-  const int timeout_ms = options_.idle_timeout_ms_ > 0 ? 100 : -1;
-  const bool ok = Network::Wait(timeout_ms);  // blocks; dispatches on wake
-  mb.wake_seq_.store(0, std::memory_order_release);  // leave the parked state
-  return ok;  // next iteration drains what Wait dispatched
+  // Tests inject races through the observer; optimized builds eliminate this
+  // empty production callback and its calls in the templated wait protocol.
+  return WaitForWork([](WaitPhase) {});
 }
 
 void Worker::Run() {

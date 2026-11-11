@@ -375,6 +375,7 @@ class Worker : private IoUringBackend,
 
   friend class WorkerCrossCoreTestPeer;
   friend class WorkerSchedulerTestPeer;
+  friend class WorkerWaitTestPeer;
 
   // All message kinds share one sender visit and a combined consumption quota.
   // Retain its position across polls until it empties or exhausts that quota.
@@ -401,10 +402,16 @@ class Worker : private IoUringBackend,
   bool ShouldRunBackground() const noexcept;
   void MaybeResetRuntimeWindow() noexcept;
   void RecordRound(std::int64_t start_cycles) noexcept;
-  void Flush();       // FlushWakes() + Network::Submit()
+  void Flush();       // Peer wakes + native network output + shared ring submit
   void FlushWakes();  // wake every marked, parked target once
   void CheckIdleConnections();
   bool BusyPoll();
+  bool HasRunnableWork() const noexcept;
+  // Observer is a compile-time no-op in production. Tests instantiate this
+  // same protocol with deterministic publication at its race boundaries.
+  enum class WaitPhase { kPrepared, kRechecked, kParked, kSubmitted, kWaiting };
+  template <typename Observer>
+  bool WaitForWork(Observer&& observe);
   bool PollStorage();
   bool CanReclaim(const Connection& connection) const noexcept;
   void ReclaimConnections();

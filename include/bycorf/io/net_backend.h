@@ -142,23 +142,46 @@ class NetBackend {
 #endif
     return Kernel().ReleaseRecvBuffer(connection, buffer_id);
   }
-  absl::Status Submit() {
+  // Advance only native network work. The owner drives the shared kernel
+  // ring separately, including when kernel TCP is selected.
+  void Flush() {
 #if BYCORF_KERNEL_BYPASS
-    if (dpdk_) return dpdk_->Submit();
+    if (dpdk_) dpdk_->Flush();
 #endif
-    return Kernel().Submit();
   }
   bool Poll() {
 #if BYCORF_KERNEL_BYPASS
     if (dpdk_) return dpdk_->Poll();
 #endif
-    return Kernel().Poll();
+    return false;
   }
-  bool Wait(int timeout_ms) {
+  // Owner-thread preparation is always paired with FinishWait, including
+  // errors/vetoes. Kernel sockets already have persistent completion sources.
+  absl::StatusOr<bool> PrepareWait() {
 #if BYCORF_KERNEL_BYPASS
-    if (dpdk_) return dpdk_->Wait(timeout_ms);
+    if (dpdk_) return dpdk_->PrepareWait();
 #endif
-    return Kernel().Wait(timeout_ms);
+    return true;
+  }
+  // Recheck after Poll and submission; this does not consume completions.
+  bool CanWait() const {
+#if BYCORF_KERNEL_BYPASS
+    if (dpdk_) return dpdk_->CanWait();
+#endif
+    return true;
+  }
+  int WaitTimeout(int timeout_ms) const {
+#if BYCORF_KERNEL_BYPASS
+    if (dpdk_) return dpdk_->WaitTimeout(timeout_ms);
+#endif
+    return timeout_ms;
+  }
+  absl::Status FinishWait(bool waited) {
+#if BYCORF_KERNEL_BYPASS
+    if (dpdk_) return dpdk_->FinishWait(waited);
+#endif
+    (void)waited;
+    return absl::OkStatus();
   }
 
  private:

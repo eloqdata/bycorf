@@ -19,6 +19,7 @@
 
 #include <memory>
 
+#include "absl/status/statusor.h"
 #include "bycorf/io/io_uring_backend.h"
 
 namespace bycorf {
@@ -53,9 +54,22 @@ class DpdkBackend {
   // The worker initializes the borrowed ring before attaching networking.
   absl::Status Init(const IoBackendOptions&, Worker*);
   void Shutdown();
+  // Drive native packet/TCP work only; the worker separately polls io_uring.
   bool Poll();
-  bool Wait(int timeout_ms);
-  absl::Status Submit();
+  // Owner-thread sleep protocol. Every PrepareWait call, including a partial
+  // failure or a polling veto, must be paired with FinishWait before retrying.
+  // True allows the worker to recheck all sources; false requires polling.
+  absl::StatusOr<bool> PrepareWait();
+  // Call after Poll: checks residual software work and notification health.
+  bool CanWait() const;
+  // Bound the caller's timeout by the current BSD deadline (-1 is infinite).
+  int WaitTimeout(int timeout_ms) const;
+  // Release this attempt's parked state and RX interrupt, even if no wait ran.
+  // Outstanding notification polls retain their tag/fd until completion.
+  // waited records entry to the shared ring wait for diagnostic accounting.
+  absl::Status FinishWait(bool waited);
+  // Flush native TX work without submitting the borrowed kernel ring.
+  void Flush();
   absl::Status SubmitSend(const RegisteredFile&, std::span<const std::byte>,
                           IoCompletion*);
   absl::Status SubmitConnect(int fd, const sockaddr*, socklen_t, IoCompletion*);

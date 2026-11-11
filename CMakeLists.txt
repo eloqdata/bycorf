@@ -491,7 +491,8 @@ if (BYCORF_BUILD_TESTS)
     tests/connection_storage_test.cpp
     tests/http_service_test.cpp
     tests/tcp_buffered_read_test.cpp
-    tests/io_uring_backpressure_test.cpp)
+    tests/io_uring_backpressure_test.cpp
+    tests/worker_wait_test.cpp)
   target_link_libraries(bycorf_runtime_tests PRIVATE bycorf::core GTest::gtest_main)
   bycorf_discover_tests(bycorf_runtime_tests 90 "runtime;net;io_uring")
 
@@ -525,7 +526,7 @@ if (BYCORF_BUILD_TESTS)
       ${BYCORF_DPDK_COMPILE_FLAGS})
     foreach(symbol IN ITEMS rte_eth_dev_configure rte_eth_dev_info_get
         rte_eth_dev_rx_intr_ctl_q_get_fd rte_eth_dev_rx_intr_enable
-        rte_eth_dev_rx_intr_disable)
+        rte_eth_dev_rx_intr_disable bycorf_bsd_deadline_ns)
       target_link_options(bycorf_dpdk_adaptive_tests PRIVATE
         "LINKER:--wrap=${symbol}")
     endforeach()
