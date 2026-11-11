@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
+#include <poll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -85,6 +86,44 @@ TEST_F(WorkerWait, BusyPollAdvancesSharedRing) {
 TEST_F(WorkerWait, NetworkFacadeDoesNotAdvanceSharedRing) {
   CheckNetworkRingIsolation(workers[0]);
 }
+
+#if BYCORF_ENABLE_RDMA
+TEST_F(WorkerWait, RdmaFacadeUsesSharedRingForReadinessAndCancellation) {
+  struct Completion : IoCompletion {
+    unsigned calls = 0;
+    int result = 0;
+    void Complete(Worker&, int value, unsigned) override {
+      ++calls;
+      result = value;
+    }
+  } ready, cancelled;
+  int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  ASSERT_GE(fd, 0);
+  auto& kernel = WorkerWaitTestPeer::Kernel(workers[0]);
+  ASSERT_TRUE(workers[0].SubmitRdmaEventPoll(fd, POLLIN, &ready).ok());
+  const std::uint64_t one = 1;
+  ASSERT_EQ(write(fd, &one, sizeof(one)), sizeof(one));
+  // Only the existing kernel ring is driven. A separate RDMA ring would leave
+  // this tag pending until the fixture's lost-wakeup alarm fired.
+  while (!ready.calls) {
+    ASSERT_TRUE(kernel.Submit().ok());
+    kernel.Poll();
+  }
+  EXPECT_EQ(ready.calls, 1U);
+  EXPECT_EQ(ready.result, POLLIN);
+  std::uint64_t count;
+  ASSERT_EQ(read(fd, &count, sizeof(count)), sizeof(count));
+  ASSERT_TRUE(workers[0].SubmitRdmaEventPoll(fd, POLLIN, &cancelled).ok());
+  ASSERT_TRUE(workers[0].CancelRdmaEventPoll(&cancelled).ok());
+  while (!cancelled.calls) {
+    ASSERT_TRUE(kernel.Submit().ok());
+    kernel.Poll();
+  }
+  EXPECT_EQ(cancelled.calls, 1U);
+  EXPECT_EQ(cancelled.result, -ECANCELED);
+  close(fd);
+}
+#endif
 
 TEST_F(WorkerWait, MailboxPublicationAfterEmptyCheckDefeatsPark) {
   for (bool foreign : {false, true}) {

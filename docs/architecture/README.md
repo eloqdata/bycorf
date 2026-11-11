@@ -23,7 +23,7 @@ and asynchronous I/O. Abseil supplies status types and spdlog supplies logging.
 | Module | Responsibility | Document |
 |---|---|---|
 | Runtime | Worker lifecycle, coroutine scheduling, sleep coordination, cross-worker and foreign ingress | [Runtime](runtime.md) |
-| I/O | Worker-owned shared io_uring, network/storage adapters, optional SPDK storage, shared DPDK environment | [I/O backends](io.md) |
+| I/O | Worker-owned shared io_uring, network/storage adapters, optional RDMA registration and SPDK storage, shared DPDK environment | [I/O backends](io.md), [RDMA ownership](rdma.md) |
 | Networking | Listeners, streams, services, TLS, optional DPDK/FreeBSD IPv4 TCP | [Networking](networking.md) |
 | RPC | Framed request/reply protocol above streams | [RPC](rpc.md) |
 
@@ -38,6 +38,8 @@ worker before that coroutine uses its stream again.
 Startup selection independently activates network and storage backends and
 remains fixed for the process lifetime. Both default to io_uring even in a
 bypass-capable build.
+`BYCORF_ENABLE_RDMA` independently enables the RDMA facade and registration
+layer; resources are acquired only on explicit use.
 The [prototype runbook](../dpdk-prototype.md) describes the DPDK configuration.
 
 Architecture documents describe the current core model and stable tradeoffs.

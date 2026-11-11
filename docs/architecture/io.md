@@ -18,8 +18,10 @@ limitations under the License.
 
 `Worker` owns one `IoUringBackend` for kernel sockets, file I/O, completion
 delivery, timers, and MSG_RING/eventfd wakeups. Its `NetBackend<Worker>` and
-`StorageBackend<Worker>` facades share that ring. Network receive buffers and
-registered storage buffers have separate lifecycles. Linux TCP uses
+`StorageBackend<Worker>` facades share that ring. The independently optional
+`RdmaBackend<Worker>` also uses this ring for channel readiness. Network receive
+buffers, registered storage buffers and RDMA registrations have separate
+lifecycles; see [RDMA ownership](rdma.md). Linux TCP uses
 provided-buffer multishot receives with a per-connection one-shot fallback.
 
 `BYCORF_KERNEL_BYPASS` is the single build option for DPDK networking and SPDK
@@ -42,8 +44,10 @@ Network adapters supply notification preparation, idle checks,
 deadlines, and cleanup to the [worker sleep protocol](runtime.md#sleep-and-wakeups).
 The worker enters the ring's blocking wait; adapters never block independently.
 
-The ring outlives both adapters. The worker initializes it first, stops storage
-and networking in that order, then shuts it down. Storage dispatch remains
+The ring outlives all facades. RDMA drops its weak resource cache on shutdown;
+registration and operation handles retain their PD/context independently. The
+worker initializes the ring first, stops storage and networking in that order,
+then shuts the ring down. Storage dispatch remains
 valid through shutdown completion draining; SPDK callbacks use the owning
 worker's TLS to reach its storage adapter. Kernel registrations remain live
 until ring shutdown quiesces kernel access.

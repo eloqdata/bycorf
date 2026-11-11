@@ -39,6 +39,7 @@ option(BYCORF_ENABLE_WERROR "Treat warnings as errors" OFF)
 option(BYCORF_KERNEL_BYPASS
   "Include DPDK networking and SPDK storage (selected independently at startup)"
   OFF)
+option(BYCORF_ENABLE_RDMA "Include RDMA facade and memory registration" OFF)
 option(BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE
   "Enable detailed cross-core queue and wake latency tracing" OFF)
 
@@ -174,10 +175,21 @@ add_library(bycorf
 
 target_compile_definitions(bycorf PUBLIC
   # Public headers and consumers must agree on the backend-dependent layouts.
-  # Export one numeric switch for both capabilities, including zero when off.
+  # Export numeric capability switches, including zero when disabled.
   BYCORF_KERNEL_BYPASS=$<BOOL:${BYCORF_KERNEL_BYPASS}>
+  BYCORF_ENABLE_RDMA=$<BOOL:${BYCORF_ENABLE_RDMA}>
   BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE=$<BOOL:${BYCORF_ENABLE_CROSS_CORE_LATENCY_TRACE}>
 )
+
+# RDMA is an independent capability: do not discover its libraries when off.
+if (BYCORF_ENABLE_RDMA)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(BYCORF_IBVERBS REQUIRED IMPORTED_TARGET libibverbs)
+  pkg_check_modules(BYCORF_RDMACM REQUIRED IMPORTED_TARGET librdmacm)
+  target_sources(bycorf PRIVATE src/io/rdma_memory.cpp)
+  target_link_libraries(bycorf PUBLIC
+    PkgConfig::BYCORF_IBVERBS PkgConfig::BYCORF_RDMACM)
+endif()
 
 if (BYCORF_KERNEL_BYPASS)
   include(cmake/Dpdk.cmake)
@@ -464,6 +476,21 @@ if (BYCORF_BUILD_TESTS)
     tests/backend_selection_test.cpp)
   target_link_libraries(bycorf_unit_tests PRIVATE bycorf::core GTest::gtest_main)
   bycorf_discover_tests(bycorf_unit_tests 30 "runtime;unit")
+
+  if (BYCORF_ENABLE_RDMA)
+    add_executable(bycorf_rdma_memory_tests tests/rdma_memory_test.cpp)
+    target_link_libraries(bycorf_rdma_memory_tests PRIVATE bycorf::core GTest::gtest_main)
+    foreach(symbol IN ITEMS ibv_get_device_list ibv_free_device_list
+        ibv_get_device_name ibv_open_device ibv_close_device ibv_alloc_pd
+        ibv_dealloc_pd ibv_reg_mr ibv_reg_mr_iova2 ibv_dereg_mr)
+      target_link_options(bycorf_rdma_memory_tests PRIVATE "LINKER:--wrap=${symbol}")
+    endforeach()
+    bycorf_discover_tests(bycorf_rdma_memory_tests 30 "runtime;rdma;unit")
+
+    add_executable(bycorf_rdma_registration_tests tests/rdma_registration_test.cpp)
+    target_link_libraries(bycorf_rdma_registration_tests PRIVATE bycorf::core GTest::gtest_main)
+    bycorf_discover_tests(bycorf_rdma_registration_tests 30 "runtime;rdma;integration")
+  endif()
 
   add_executable(bycorf_dpdk_memory_budget_tests
     tests/dpdk_memory_budget_test.cpp src/io/dpdk_memory_budget.cpp)

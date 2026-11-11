@@ -34,6 +34,7 @@
 #include "bycorf/base/inline_ring_queue.h"
 #include "bycorf/io/completion.h"
 #include "bycorf/io/net_backend.h"
+#include "bycorf/io/rdma_backend.h"
 #include "bycorf/io/storage.h"
 #include "bycorf/io/storage_backend.h"
 #include "bycorf/net/connection.h"
@@ -72,11 +73,26 @@ struct WorkerOptions {
 // Shutdown drains them while the complete worker and its queues are alive.
 class Worker : private IoUringBackend,
                private NetBackend<Worker>,
+#if BYCORF_ENABLE_RDMA
+               private RdmaBackend<Worker>,
+#endif
                private StorageBackend<Worker> {
+#if BYCORF_ENABLE_RDMA
+  using Rdma = RdmaBackend<Worker>;
+#endif
   using Network = NetBackend<Worker>;
   using Storage = StorageBackend<Worker>;
 
  public:
+#if BYCORF_ENABLE_RDMA
+  // RDMA resources are acquired explicitly on this worker, independently of
+  // network/storage backend selection. See rdma_memory.h for buffer lifetimes.
+  using Rdma::AcquireRdmaDomain;
+  using Rdma::CancelRdmaEventPoll;
+  using Rdma::OpenRdmaDevice;
+  using Rdma::RegisterRdmaMemory;
+  using Rdma::SubmitRdmaEventPoll;
+#endif
   struct WakeStats {
     std::uint64_t checks_ = 0;
     std::uint64_t sent_ = 0;
@@ -368,6 +384,9 @@ class Worker : private IoUringBackend,
  private:
   friend class NetBackend<Worker>;
   friend class StorageBackend<Worker>;
+#if BYCORF_ENABLE_RDMA
+  friend class RdmaBackend<Worker>;
+#endif
   // Shared-ring access for the CRTP facades; the base conversion is a fixed
   // address adjustment rather than a load of a stored pointer.
   IoUringBackend& KernelBackend() noexcept { return *this; }
