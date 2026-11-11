@@ -53,7 +53,11 @@ notifications, rechecks I/O, mailbox and scheduler work, completes the mailbox
 wake-sequence handshake, and submits operations and peer wakes. After a final
 idle check it waits on the shared io_uring. Runnable work, a stop request,
 unsubmitted operations, or storage requiring polling prevent sleep. Network
-deadlines and enabled connection-idle checks bound the wait.
+deadlines and enabled connection-idle checks bound the wait. Optional RDMA CM,
+CQ-notification and device-async polls are persistent wake sources on this same
+ring; RDMA connection deadlines are absolute ring timeouts. CQ notifications
+are always armed and rechecked, so RDMA needs no busy polling or additional
+sleep-preparation phase.
 
 Cross-worker submissions enter destination mailboxes and resume coroutines on
 their original workers. The mailbox handshake makes racing publication either
@@ -78,8 +82,11 @@ an empty selection means every worker. Prepare sees the full runtime count,
 while Run and FinalizeWorker execute only on selected workers. During shutdown,
 workers first leave their loops, then quiesce I/O and reclaim coroutine frames
 on their owning native threads. Service finalizers run after all worker frames
-are reclaimed. A worker that fails initialization contributes to both teardown
-barriers so initialized peers can finish. Temporary I/O submission shortages
+are reclaimed. RDMA uses a two-phase shutdown: stop admission before the ring
+is quiesced, then release retained polls/events and connection resources after
+kernel access has ended. This also covers accepted operations whose callbacks
+are suppressed by ring shutdown. A worker that fails initialization contributes
+to both teardown barriers so initialized peers can finish. Temporary I/O submission shortages
 are retried by the worker loop. A permanent submission error, notification
 preparation or cleanup failure, or shared-ring wait failure stops peer workers
 before entering those barriers and yields a nonzero exit. Services outlive

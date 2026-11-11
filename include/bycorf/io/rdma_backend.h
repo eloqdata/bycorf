@@ -20,6 +20,7 @@
 #if BYCORF_ENABLE_RDMA
 #include "bycorf/io/io_uring_backend.h"
 #include "bycorf/io/rdma_memory.h"
+#include "bycorf/io/rdma_reactor.h"
 
 namespace bycorf {
 // Private CRTP facade: the owner supplies its existing KernelBackend(). Neither
@@ -55,9 +56,28 @@ class RdmaBackend {
   absl::Status CancelRdmaEventPoll(IoCompletion* tag) {
     return Kernel().SubmitCancel(tag);
   }
-  // Drops only cache entries. Outstanding handles continue to own resources;
-  // callers must quiesce QPs/remote access before releasing those handles.
-  void Shutdown() noexcept { resources_.Shutdown(); }
+  // Absolute CLOCK_MONOTONIC deadline; caller retains deadline/tag until its
+  // terminal completion, including deferred submission and cancellation.
+  absl::Status SubmitRdmaDeadline(const __kernel_timespec& deadline,
+                                  IoCompletion* tag) {
+    return Kernel().SubmitDeadline(deadline, tag);
+  }
+  // Stop admission before the ring shuts down. Tags/resources remain retained
+  // until terminal completions or AfterRingShutdown confirms kernel quiescence.
+  void Shutdown() { rdma::detail::BeginShutdown(engine_); }
+  void AfterRingShutdown() {
+    rdma::detail::AfterRingShutdown(engine_);
+    engine_.reset();
+    resources_.Shutdown();
+  }
+  absl::StatusOr<std::shared_ptr<rdma::detail::Engine>> GetRdmaEngine() {
+    if (!engine_) {
+      auto created = rdma::detail::CreateEngine(static_cast<Owner&>(*this));
+      if (!created.ok()) return created.status();
+      engine_ = *created;
+    }
+    return engine_;
+  }
 
  private:
   friend Owner;
@@ -69,6 +89,7 @@ class RdmaBackend {
     return static_cast<Owner&>(*this).KernelBackend();
   }
   detail::RdmaResources resources_;
+  std::shared_ptr<rdma::detail::Engine> engine_;
 };
 }  // namespace bycorf
 #endif  // BYCORF_ENABLE_RDMA
