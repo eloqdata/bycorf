@@ -250,6 +250,71 @@ TEST_F(RcLoop, InvalidOptionsAndPrivateDataAreRejected) {
 }
 
 #ifdef BYCORF_RDMA_FAKE
+TEST_F(RcLoop, QueuedAcceptPreservesOrderAndRetainsFailedResults) {
+  RcOptions options;
+  options.send_wr = options.recv_wr = 4;
+  auto listener = RcListener::Listen(worker, ip, 0, options);
+  ASSERT_TRUE(listener.ok());
+  auto state = Peer::State(*listener);
+  auto engine = state->engine.lock();
+  std::vector<RcConnection> clients;
+  std::vector<std::weak_ptr<bycorf::rdma::detail::Connection>> queued;
+  // Queue a burst before Accept so both the child table and FIFO must grow.
+  for (unsigned i = 0; i < 12; ++i) {
+    const std::array data{static_cast<std::byte>(i)};
+    auto client =
+        Run(RcConnection::Connect(worker, ip, listener->port(), options, data));
+    ASSERT_TRUE(client.ok()) << client.status();
+    clients.push_back(std::move(*client));
+    Until([&] { return state->ready.size() == i + 1; });
+    queued.push_back(state->children.at(state->ready[i]));
+  }
+  {
+    auto failed = queued[3].lock();
+    ASSERT_TRUE(failed);
+    const auto id = failed->id;
+    rdma_fake::Cm(id, RDMA_CM_EVENT_DISCONNECTED);
+    Until([&] { return failed->closed; });
+    EXPECT_FALSE(engine->connections.contains(id));
+  }
+  // Only the listener retains this retired state until Accept reads its error.
+  EXPECT_FALSE(queued[3].expired());
+  std::vector<RcConnection> accepted;
+  for (unsigned i = 0; i < queued.size(); ++i) {
+    auto connection = Run(listener->Accept());
+    if (i == 3) {
+      EXPECT_TRUE(absl::IsUnavailable(connection.status()));
+      EXPECT_TRUE(queued[i].expired());
+    } else {
+      ASSERT_TRUE(connection.ok()) << connection.status();
+      ASSERT_FALSE(connection->peer_private_data().empty());
+      EXPECT_EQ(connection->peer_private_data().front(),
+                static_cast<std::byte>(i));
+      accepted.push_back(std::move(*connection));
+    }
+  }
+  EXPECT_TRUE(state->ready.empty());
+  EXPECT_TRUE(state->children.empty());
+  EXPECT_TRUE(Run(listener->Close()).ok());
+  for (const auto& connection : accepted) EXPECT_TRUE(connection.IsOpen());
+}
+
+TEST_F(RcLoop, ListenerCloseReleasesUnacceptedReadyStates) {
+  auto listener = RcListener::Listen(worker, ip, 0);
+  ASSERT_TRUE(listener.ok());
+  auto state = Peer::State(*listener);
+  auto client = Run(RcConnection::Connect(worker, ip, listener->port()));
+  ASSERT_TRUE(client.ok()) << client.status();
+  Until([&] { return !state->ready.empty(); });
+  std::weak_ptr<bycorf::rdma::detail::Connection> queued =
+      state->children.at(state->ready.front());
+  EXPECT_TRUE(Run(listener->Close()).ok());
+  EXPECT_TRUE(state->ready.empty());
+  EXPECT_TRUE(state->children.empty());
+  EXPECT_TRUE(queued.expired());
+  EXPECT_TRUE(absl::IsCancelled(Run(listener->Accept()).status()));
+}
+
 TEST_F(RcLoop, NotifyRecheckRaceAndRepeatedIdleNotifications) {
   auto pair = Pair();
   ASSERT_TRUE(pair.ok()) << pair.status();

@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 
+#include <cassert>
 #include <limits>
 #include <string>
 #include <utility>
@@ -185,9 +186,13 @@ Task<absl::StatusOr<RcConnection>> RcListener::AcceptImpl(
     if (!status.ok()) co_return status;
   }
   if (state->closing) co_return state->error;
-  auto c = std::move(state->ready.front());
+  auto child = state->children.find(state->ready.front());
+  assert(child != state->children.end());
+  // A failed connection may already be absent from the engine registry. Take
+  // the listener's ownership before removing either index, without suspending.
+  auto c = std::move(child->second);
   state->ready.pop_front();
-  state->children.erase(c.get());
+  state->children.erase(child);
   c->listener.reset();
   if (!c->error.ok()) co_return c->error;
   co_return RcConnection(std::move(c));

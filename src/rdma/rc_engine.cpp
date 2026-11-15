@@ -685,7 +685,7 @@ void Engine::Progress(std::shared_ptr<Connection> c) {
     if (auto listener = c->listener.lock()) {
       if (!c->queued && !listener->closing) {
         c->queued = true;
-        listener->ready.push_back(c);
+        listener->ready.push_back(c.get());
         listener->accepted.Publish(wake_worker());
       }
       Progress(listener);

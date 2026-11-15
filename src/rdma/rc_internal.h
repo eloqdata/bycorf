@@ -7,11 +7,12 @@
 #include <rdma/rdma_cma.h>
 
 #include <coroutine>
-#include <deque>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "bycorf/base/inline_ring_queue.h"
 #include "bycorf/io/completion.h"
 #include "bycorf/rdma/rc.h"
 
@@ -89,8 +90,11 @@ struct Listener {
   bool closing = false;
   bool closed = false;
   absl::Status error;
-  std::unordered_map<Connection*, std::shared_ptr<Connection>> children;
-  std::deque<std::shared_ptr<Connection>> ready;
+  // Own unaccepted children even after failure removes them from the engine.
+  // ready only borrows these states: Accept transfers ownership before erasing
+  // a child, and listener retirement clears ready before releasing children.
+  absl::flat_hash_map<Connection*, std::shared_ptr<Connection>> children;
+  InlineRingQueue<Connection*, 1> ready;
   Signal accepted, retired;
 };
 
