@@ -6,13 +6,17 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <optional>
+#include <thread>
+#include <vector>
 
 #include "../src/rdma/rc_internal.h"
 #include "bycorf/rdma/rc.h"
 #include "bycorf/runtime/worker.h"
 #ifdef BYCORF_RDMA_FAKE
+#include "bycorf/net/server.h"
 #include "rdma_fake.h"
 #define RcLoop RcLoopFake
 #endif
@@ -20,8 +24,8 @@
 namespace bycorf::rdma::detail {
 class RcTestPeer {
  public:
-  static std::shared_ptr<Connection> State(RcConnection& c) { return c.state_; }
-  static std::shared_ptr<Listener> State(RcListener& l) { return l.state_; }
+  static LocalSharedPtr<Connection> State(RcConnection& c) { return c.state_; }
+  static LocalSharedPtr<Listener> State(RcListener& l) { return l.state_; }
 };
 }  // namespace bycorf::rdma::detail
 namespace {
@@ -250,6 +254,44 @@ TEST_F(RcLoop, InvalidOptionsAndPrivateDataAreRejected) {
 }
 
 #ifdef BYCORF_RDMA_FAKE
+TEST(RcThreadOwnership, ServerShutdownReclaimsSuspendedAcceptOnOwnerThread) {
+  rdma_fake::Reset();
+  class ListeningService final : public Service {
+   public:
+    std::atomic<bool> entered{false};
+    void Prepare(unsigned) override {}
+    void Stop() noexcept override {}
+    Task<absl::Status> Run(Worker& worker, ServiceContext) override {
+      auto listener = RcListener::Listen(worker, "192.0.2.1", 0);
+      if (!listener.ok()) co_return listener.status();
+      entered.store(true, std::memory_order_release);
+      // Shutdown destroys this suspended frame and its local listener on the
+      // worker, before the control thread destroys Server and Worker objects.
+      auto accepted = co_await listener->Accept();
+      co_return accepted.status();
+    }
+  } service;
+  {
+    Server server;
+    server.AddService(&service);
+    ASSERT_TRUE(server
+                    .Start({.thread_count_ = 1,
+                            .pin_workers_ = false,
+                            .recv_buffer_count_ = 0})
+                    .ok());
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!service.entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    EXPECT_TRUE(service.entered.load(std::memory_order_acquire));
+    server.RequestStop();
+    server.WaitUntilStopped();
+    EXPECT_EQ(server.exit_code(), 0);
+  }
+  rdma_fake::CheckEmpty();
+}
+
 TEST_F(RcLoop, QueuedAcceptPreservesOrderAndRetainsFailedResults) {
   RcOptions options;
   options.send_wr = options.recv_wr = 4;
@@ -258,7 +300,7 @@ TEST_F(RcLoop, QueuedAcceptPreservesOrderAndRetainsFailedResults) {
   auto state = Peer::State(*listener);
   auto engine = state->engine.lock();
   std::vector<RcConnection> clients;
-  std::vector<std::weak_ptr<bycorf::rdma::detail::Connection>> queued;
+  std::vector<LocalWeakPtr<bycorf::rdma::detail::Connection>> queued;
   // Queue a burst before Accept so both the child table and FIFO must grow.
   for (unsigned i = 0; i < 12; ++i) {
     const std::array data{static_cast<std::byte>(i)};
@@ -299,6 +341,17 @@ TEST_F(RcLoop, QueuedAcceptPreservesOrderAndRetainsFailedResults) {
   for (const auto& connection : accepted) EXPECT_TRUE(connection.IsOpen());
 }
 
+TEST_F(RcLoop, LazyAcceptRetainsStateAfterListenerHandleDestruction) {
+  auto listener = RcListener::Listen(worker, ip, 0);
+  ASSERT_TRUE(listener.ok());
+  LocalWeakPtr<bycorf::rdma::detail::Listener> state = Peer::State(*listener);
+  auto accepting = listener->Accept();
+  *listener = RcListener{};
+  EXPECT_FALSE(state.expired());
+  EXPECT_TRUE(absl::IsCancelled(Run(std::move(accepting)).status()));
+  EXPECT_TRUE(state.expired());
+}
+
 TEST_F(RcLoop, ListenerCloseReleasesUnacceptedReadyStates) {
   auto listener = RcListener::Listen(worker, ip, 0);
   ASSERT_TRUE(listener.ok());
@@ -306,7 +359,7 @@ TEST_F(RcLoop, ListenerCloseReleasesUnacceptedReadyStates) {
   auto client = Run(RcConnection::Connect(worker, ip, listener->port()));
   ASSERT_TRUE(client.ok()) << client.status();
   Until([&] { return !state->ready.empty(); });
-  std::weak_ptr<bycorf::rdma::detail::Connection> queued =
+  LocalWeakPtr<bycorf::rdma::detail::Connection> queued =
       state->children.at(state->ready.front());
   EXPECT_TRUE(Run(listener->Close()).ok());
   EXPECT_TRUE(state->ready.empty());

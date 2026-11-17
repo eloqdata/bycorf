@@ -474,6 +474,7 @@ if (BYCORF_BUILD_TESTS)
     tests/cross_core_drain_test.cpp
     tests/worker_scheduler_test.cpp
     tests/received_buffer_queue_test.cpp
+    tests/local_shared_ptr_test.cpp
     tests/backend_selection_test.cpp)
   target_link_libraries(bycorf_unit_tests PRIVATE bycorf::core GTest::gtest_main)
   bycorf_discover_tests(bycorf_unit_tests 30 "runtime;unit")

@@ -51,7 +51,7 @@ Task<absl::StatusOr<RcConnection>> FailedConnect(absl::Status error) {
 }
 
 template <typename State>
-void Drop(const std::shared_ptr<State>& state) {
+void Drop(const LocalSharedPtr<State>& state) {
   if (!state || state->closed) return;
   if (auto engine = state->engine.lock()) {
     // Destruction can request asynchronous close but cannot migrate ownership.
@@ -61,7 +61,7 @@ void Drop(const std::shared_ptr<State>& state) {
   }
 }
 template <typename State>
-Task<absl::Status> CloseImpl(std::shared_ptr<State> state) {
+Task<absl::Status> CloseImpl(LocalSharedPtr<State> state) {
   if (!state || state->closed) co_return absl::OkStatus();
   auto engine = state->engine.lock();
   if (!engine) co_return absl::CancelledError("RDMA owner is gone");
@@ -71,7 +71,7 @@ Task<absl::Status> CloseImpl(std::shared_ptr<State> state) {
   co_return co_await detail::Wait{state->retired};
 }
 struct ConnectGuard {
-  std::shared_ptr<detail::Connection> state;
+  LocalSharedPtr<detail::Connection> state;
   bool delivered = false;
   ~ConnectGuard() {
     if (!delivered) Drop(state);
@@ -79,7 +79,7 @@ struct ConnectGuard {
 };
 }  // namespace
 
-RcConnection::RcConnection(std::shared_ptr<detail::Connection> state)
+RcConnection::RcConnection(LocalSharedPtr<detail::Connection> state)
     : state_(std::move(state)) {}
 RcConnection::RcConnection(RcConnection&&) noexcept = default;
 RcConnection& RcConnection::operator=(RcConnection&& other) noexcept {
@@ -106,7 +106,7 @@ Task<absl::StatusOr<RcConnection>> RcConnection::Connect(
                      {private_data.begin(), private_data.end()});
 }
 Task<absl::StatusOr<RcConnection>> RcConnection::ConnectImpl(
-    std::shared_ptr<detail::Engine> engine, sockaddr_storage address,
+    LocalSharedPtr<detail::Engine> engine, sockaddr_storage address,
     RcOptions options, std::vector<std::byte> data) {
   if (!engine->OnOwner())
     co_return absl::FailedPreconditionError(
@@ -169,7 +169,7 @@ Task<absl::StatusOr<RcConnection>> RcListener::Accept() {
   return AcceptImpl(state_);
 }
 Task<absl::StatusOr<RcConnection>> RcListener::AcceptImpl(
-    std::shared_ptr<detail::Listener> state) {
+    LocalSharedPtr<detail::Listener> state) {
   if (!state) co_return absl::FailedPreconditionError("empty RDMA listener");
   auto engine = state->engine.lock();
   if (!engine || state->closing)

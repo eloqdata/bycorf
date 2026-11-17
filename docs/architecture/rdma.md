@@ -95,8 +95,13 @@ failed CM channel stops all endpoints on its worker and rejects new admission.
 
 ## Close and worker shutdown
 
-Public handles are move-only and used on their owner worker. Destruction
-requests close; awaiting Close joins retirement. Closing stops admission,
+Public handles are move-only and used on their owner worker. Engine, device,
+listener and connection states use non-atomic strong/weak ownership. Every
+handle and associated coroutine frame is accessed, moved and destroyed on its
+creating thread, including any handles retained after worker shutdown; they
+cannot be handed to another thread for cleanup. Exported PD/MR/context handles
+retain their separate shared ownership contract. Destruction requests close;
+awaiting Close joins retirement. Closing stops admission,
 disconnects the CM association and puts the external QP into ERR. The
 connection retains its timer tag until the timer's terminal completion, even
 when cancellation has already been accepted. It leaves the ID registry before
@@ -117,7 +122,11 @@ Only after ring shutdown confirms that no kernel operation can refer to those
 tags does RDMA retire requests that did not receive callbacks, acknowledge
 remaining events, destroy QPs/CM IDs, and release channels/CQs. Coroutine frames
 are reclaimed afterward. Exported registration/PD handles retain their own
-context independently. Unexpected destruction failures fail closed rather than
+context independently. `Server` quiesces the ring and reclaims coroutine frames
+on the worker thread. Direct `Runtime` integrations must likewise call worker
+`Shutdown()` and `DestroyDetachedTasks()` on that thread before it exits, and
+release any application-owned RC handles and Tasks there. Unexpected destruction
+failures fail closed rather than
 release resources that may still be referenced by the provider.
 
 ## Registered memory

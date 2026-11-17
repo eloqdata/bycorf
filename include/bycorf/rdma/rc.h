@@ -8,11 +8,11 @@
 
 #include <chrono>
 #include <cstdint>
-#include <memory>
 #include <span>
 #include <string_view>
 #include <vector>
 
+#include "bycorf/base/local_shared_ptr.h"
 #include "bycorf/io/rdma_memory.h"
 #include "bycorf/runtime/task.h"
 
@@ -39,7 +39,8 @@ struct RcOptions {
 // Owner-worker-only RC connection. Move-only; destruction requests asynchronous
 // close. Await Close() to join resource retirement while the worker is running.
 // Worker shutdown also closes all connections before reclaiming coroutine
-// frames.
+// frames. Handles and returned Tasks use non-atomic ownership: access, moves
+// and destruction stay on the creating thread, including after shutdown.
 class RcConnection {
  public:
   RcConnection() = default;
@@ -69,16 +70,17 @@ class RcConnection {
  private:
   friend class RcListener;
   friend class detail::RcTestPeer;
-  explicit RcConnection(std::shared_ptr<detail::Connection> state);
+  explicit RcConnection(LocalSharedPtr<detail::Connection> state);
   static Task<absl::StatusOr<RcConnection>> ConnectImpl(
-      std::shared_ptr<detail::Engine> engine, sockaddr_storage address,
+      LocalSharedPtr<detail::Engine> engine, sockaddr_storage address,
       RcOptions options, std::vector<std::byte> data);
-  std::shared_ptr<detail::Connection> state_;
+  LocalSharedPtr<detail::Connection> state_;
 };
 
 // A listener and every accepted connection stay on the listening worker.
 // Accepted connections already returned to the application outlive the
-// listener.
+// listener. Handles and returned Tasks follow the same creating-thread lifetime
+// contract as RcConnection, including destruction after worker shutdown.
 class RcListener {
  public:
   RcListener() = default;
@@ -103,8 +105,8 @@ class RcListener {
  private:
   friend class detail::RcTestPeer;
   static Task<absl::StatusOr<RcConnection>> AcceptImpl(
-      std::shared_ptr<detail::Listener> state);
-  std::shared_ptr<detail::Listener> state_;
+      LocalSharedPtr<detail::Listener> state);
+  LocalSharedPtr<detail::Listener> state_;
 };
 }  // namespace rdma
 }  // namespace bycorf

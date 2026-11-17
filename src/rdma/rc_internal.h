@@ -58,11 +58,11 @@ struct Deadline final : IoCompletion {
 };
 
 struct Connection {
-  std::weak_ptr<Engine> engine;
-  std::weak_ptr<Listener> listener;
+  LocalWeakPtr<Engine> engine;
+  LocalWeakPtr<Listener> listener;
   rdma_cm_id* id = nullptr;
   ibv_qp* qp = nullptr;
-  std::shared_ptr<Device> device;
+  LocalSharedPtr<Device> device;
   std::uint64_t budget = 0;
   RcOptions options;
   std::vector<std::byte> local_data, peer_data;
@@ -81,7 +81,7 @@ struct Connection {
 };
 
 struct Listener {
-  std::weak_ptr<Engine> engine;
+  LocalWeakPtr<Engine> engine;
   rdma_cm_id* id = nullptr;
   RcOptions options;
   std::vector<std::byte> private_data;
@@ -93,12 +93,13 @@ struct Listener {
   // Own unaccepted children even after failure removes them from the engine.
   // ready only borrows these states: Accept transfers ownership before erasing
   // a child, and listener retirement clears ready before releasing children.
-  absl::flat_hash_map<Connection*, std::shared_ptr<Connection>> children;
+  absl::flat_hash_map<Connection*, LocalSharedPtr<Connection>> children;
   InlineRingQueue<Connection*, 1> ready;
   Signal accepted, retired;
 };
 
-struct Device : std::enable_shared_from_this<Device> {
+struct Device {
+  LocalWeakPtr<Device> self;
   std::shared_ptr<ibv_context> context;
   RdmaProtectionDomain domain;
   ibv_comp_channel* channel = nullptr;
@@ -112,21 +113,22 @@ struct Device : std::enable_shared_from_this<Device> {
   ~Device();
 };
 
-class Engine : public std::enable_shared_from_this<Engine> {
+class Engine {
  public:
+  LocalWeakPtr<Engine> self;
   explicit Engine(Worker& owner) : worker(&owner) {}
   ~Engine();
   absl::Status Init();
-  absl::StatusOr<std::shared_ptr<Listener>> Listen(
+  absl::StatusOr<LocalSharedPtr<Listener>> Listen(
       const sockaddr_storage& address, RcOptions options,
       std::vector<std::byte> data, int backlog);
-  absl::StatusOr<std::shared_ptr<Connection>> Connect(
+  absl::StatusOr<LocalSharedPtr<Connection>> Connect(
       const sockaddr_storage& address, RcOptions options,
       std::vector<std::byte> data);
-  void Close(std::shared_ptr<Connection> connection, absl::Status reason);
-  void Close(std::shared_ptr<Listener> listener, absl::Status reason);
-  void Progress(std::shared_ptr<Connection> connection);
-  void Progress(std::shared_ptr<Listener> listener);
+  void Close(LocalSharedPtr<Connection> connection, absl::Status reason);
+  void Close(LocalSharedPtr<Listener> listener, absl::Status reason);
+  void Progress(LocalSharedPtr<Connection> connection);
+  void Progress(LocalSharedPtr<Listener> listener);
   void OnPoll(Poll& poll, int result);
   void DrainCm();
   void DrainCq(Device& device);
@@ -143,18 +145,18 @@ class Engine : public std::enable_shared_from_this<Engine> {
   absl::Status error;
   rdma_event_channel* cm = nullptr;
   Poll cm_poll;
-  std::unordered_map<rdma_cm_id*, std::shared_ptr<Connection>> connections;
-  std::unordered_map<rdma_cm_id*, std::shared_ptr<Listener>> listeners;
-  std::unordered_map<std::string, std::shared_ptr<Device>> devices;
+  std::unordered_map<rdma_cm_id*, LocalSharedPtr<Connection>> connections;
+  std::unordered_map<rdma_cm_id*, LocalSharedPtr<Listener>> listeners;
+  std::unordered_map<std::string, LocalSharedPtr<Device>> devices;
 
  private:
-  absl::Status StartTimer(const std::shared_ptr<Connection>& connection);
-  absl::Status CreateQp(const std::shared_ptr<Connection>& connection);
+  absl::Status StartTimer(const LocalSharedPtr<Connection>& connection);
+  absl::Status CreateQp(const LocalSharedPtr<Connection>& connection);
   absl::Status Transition(Connection& connection, ibv_qp_state state);
-  absl::StatusOr<std::shared_ptr<Device>> GetDevice(Connection& connection);
+  absl::StatusOr<LocalSharedPtr<Device>> GetDevice(Connection& connection);
   void HandleCm(rdma_cm_id* id, rdma_cm_id* listen_id, rdma_cm_event_type event,
                 int status, std::vector<std::byte> data, rdma_conn_param peer);
-  void Established(const std::shared_ptr<Connection>& connection);
+  void Established(const LocalSharedPtr<Connection>& connection);
   void FailAll(const absl::Status& error);
   void DrainNotifications(Device& device, bool rearm);
 };

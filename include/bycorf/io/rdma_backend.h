@@ -70,7 +70,7 @@ class RdmaBackend {
     engine_.reset();
     resources_.Shutdown();
   }
-  absl::StatusOr<std::shared_ptr<rdma::detail::Engine>> GetRdmaEngine() {
+  absl::StatusOr<LocalSharedPtr<rdma::detail::Engine>> GetRdmaEngine() {
     if (!engine_) {
       auto created = rdma::detail::CreateEngine(static_cast<Owner&>(*this));
       if (!created.ok()) return created.status();
@@ -89,7 +89,7 @@ class RdmaBackend {
     return static_cast<Owner&>(*this).KernelBackend();
   }
   detail::RdmaResources resources_;
-  std::shared_ptr<rdma::detail::Engine> engine_;
+  LocalSharedPtr<rdma::detail::Engine> engine_;
 };
 }  // namespace bycorf
 #endif  // BYCORF_ENABLE_RDMA

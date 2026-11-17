@@ -107,7 +107,7 @@ void Poll::Stop() {
 void Poll::Complete(Worker&, int result, unsigned) {
   // Failure fanout may remove the device cache entry. This event reference
   // keeps the containing poll alive until the callback has fully returned.
-  auto retained = device ? device->shared_from_this() : nullptr;
+  auto retained = device ? device->self.lock() : nullptr;
   armed = false;
   if (!stopping) engine->OnPoll(*this, result);
   // A cancellation CQE is the retirement boundary; cancellation admission
@@ -149,30 +149,31 @@ absl::Status Engine::Init() {
   cm_poll.fd = cm->fd;
   return cm_poll.Arm();
 }
-absl::StatusOr<std::shared_ptr<Engine>> CreateEngine(Worker& worker) {
+absl::StatusOr<LocalSharedPtr<Engine>> CreateEngine(Worker& worker) {
   if (ThisWorker().self_ != &worker)
     return absl::FailedPreconditionError("RDMA must run on its owner worker");
-  auto engine = std::make_shared<Engine>(worker);
+  auto engine = MakeLocalShared<Engine>(worker);
+  engine->self = engine;
   auto status = engine->Init();
   if (!status.ok()) return status;
   return engine;
 }
-void BeginShutdown(const std::shared_ptr<Engine>& engine) {
+void BeginShutdown(const LocalSharedPtr<Engine>& engine) {
   if (engine) engine->BeginShutdown();
 }
-void AfterRingShutdown(const std::shared_ptr<Engine>& engine) {
+void AfterRingShutdown(const LocalSharedPtr<Engine>& engine) {
   if (engine) engine->AfterRingShutdown();
 }
 
-absl::StatusOr<std::shared_ptr<Listener>> Engine::Listen(
+absl::StatusOr<LocalSharedPtr<Listener>> Engine::Listen(
     const sockaddr_storage& address, RcOptions options,
     std::vector<std::byte> data, int backlog) {
   if (stopping) return absl::CancelledError("RDMA worker is shutting down");
   if (!OnOwner())
     return absl::FailedPreconditionError("RDMA call on a different worker");
   if (!error.ok()) return error;
-  auto listener = std::make_shared<Listener>();
-  listener->engine = shared_from_this();
+  auto listener = MakeLocalShared<Listener>();
+  listener->engine = self;
   listener->options = options;
   listener->private_data = std::move(data);
   listener->backlog = backlog;
@@ -190,7 +191,7 @@ absl::StatusOr<std::shared_ptr<Listener>> Engine::Listen(
   listeners.emplace(listener->id, listener);
   return listener;
 }
-absl::Status Engine::StartTimer(const std::shared_ptr<Connection>& c) {
+absl::Status Engine::StartTimer(const LocalSharedPtr<Connection>& c) {
   c->expires = std::chrono::steady_clock::now() + c->options.connect_timeout;
   c->timer.engine = this;
   c->timer.connection = c.get();
@@ -204,15 +205,15 @@ absl::Status Engine::StartTimer(const std::shared_ptr<Connection>& c) {
   if (status.ok()) c->timer.armed = true;
   return status;
 }
-absl::StatusOr<std::shared_ptr<Connection>> Engine::Connect(
+absl::StatusOr<LocalSharedPtr<Connection>> Engine::Connect(
     const sockaddr_storage& address, RcOptions options,
     std::vector<std::byte> data) {
   if (stopping) return absl::CancelledError("RDMA worker is shutting down");
   if (!OnOwner())
     return absl::FailedPreconditionError("RDMA call on a different worker");
   if (!error.ok()) return error;
-  auto c = std::make_shared<Connection>();
-  c->engine = shared_from_this();
+  auto c = MakeLocalShared<Connection>();
+  c->engine = self;
   c->options = options;
   c->local_data = std::move(data);
   if (rdma_create_id(cm, &c->id, nullptr, RDMA_PS_TCP))
@@ -228,7 +229,7 @@ absl::StatusOr<std::shared_ptr<Connection>> Engine::Connect(
   return c;
 }
 
-absl::StatusOr<std::shared_ptr<Device>> Engine::GetDevice(Connection& c) {
+absl::StatusOr<LocalSharedPtr<Device>> Engine::GetDevice(Connection& c) {
   auto* selected = c.id->verbs;
   if (!selected || !selected->device)
     return absl::FailedPreconditionError("CM did not select a verbs device");
@@ -240,7 +241,8 @@ absl::StatusOr<std::shared_ptr<Device>> Engine::GetDevice(Connection& c) {
           "shared RDMA CQ capacity is already fixed");
     return it->second;
   }
-  auto device = std::make_shared<Device>();
+  auto device = MakeLocalShared<Device>();
+  device->self = device;
   auto* opened = ibv_open_device(selected->device);
   if (!opened) return ErrnoStatus("ibv_open_device(RC)");
   device->context =
@@ -299,7 +301,7 @@ absl::Status Engine::Transition(Connection& c, ibv_qp_state state) {
   return result ? absl::ErrnoToStatus(result, "ibv_modify_qp(RC)")
                 : absl::OkStatus();
 }
-absl::Status Engine::CreateQp(const std::shared_ptr<Connection>& c) {
+absl::Status Engine::CreateQp(const LocalSharedPtr<Connection>& c) {
   auto found = GetDevice(*c);
   if (!found.ok()) return found.status();
   auto device = *found;
@@ -335,7 +337,7 @@ absl::Status Engine::CreateQp(const std::shared_ptr<Connection>& c) {
   return Transition(*c, IBV_QPS_INIT);
 }
 
-void Engine::Established(const std::shared_ptr<Connection>& c) {
+void Engine::Established(const LocalSharedPtr<Connection>& c) {
   if (std::chrono::steady_clock::now() >= c->expires) {
     Close(c, absl::DeadlineExceededError("RDMA connection deadline exceeded"));
     return;
@@ -380,8 +382,8 @@ void Engine::HandleCm(rdma_cm_id* id, rdma_cm_id* listen_id,
       return;
     }
     auto listener = it->second;
-    auto c = std::make_shared<Connection>();
-    c->engine = shared_from_this();
+    auto c = MakeLocalShared<Connection>();
+    c->engine = self;
     c->listener = listener;
     c->id = id;
     c->options = listener->options;
@@ -641,7 +643,7 @@ void Engine::FailAll(const absl::Status& error) {
   for (auto& c : Snapshot(connections)) Close(c, error);
 }
 
-void Engine::Close(std::shared_ptr<Connection> c, absl::Status reason) {
+void Engine::Close(LocalSharedPtr<Connection> c, absl::Status reason) {
   if (c->closing || c->closed) return;
   c->closing = true;
   c->handshake_done = true;
@@ -660,7 +662,7 @@ void Engine::Close(std::shared_ptr<Connection> c, absl::Status reason) {
   }
   Progress(c);
 }
-void Engine::Progress(std::shared_ptr<Connection> c) {
+void Engine::Progress(LocalSharedPtr<Connection> c) {
   if (c->timer.armed || c->closed) return;
   if (c->closing) {
     // Erase before any CQ drain can fail another connection and reenter this
@@ -692,7 +694,7 @@ void Engine::Progress(std::shared_ptr<Connection> c) {
     }
   }
 }
-void Engine::Close(std::shared_ptr<Listener> listener, absl::Status reason) {
+void Engine::Close(LocalSharedPtr<Listener> listener, absl::Status reason) {
   if (listener->closing || listener->closed) return;
   listener->closing = true;
   listener->error = reason;
@@ -704,7 +706,7 @@ void Engine::Close(std::shared_ptr<Listener> listener, absl::Status reason) {
   listener->accepted.Publish(wake_worker());
   Progress(listener);
 }
-void Engine::Progress(std::shared_ptr<Listener> listener) {
+void Engine::Progress(LocalSharedPtr<Listener> listener) {
   if (!listener->closing || listener->closed) return;
   for (const auto& [key, c] : listener->children)
     if (!c->closed) return;
