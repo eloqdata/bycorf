@@ -479,7 +479,9 @@ void Engine::DrainCm() {
     rdma_cm_event* event = nullptr;
     if (rdma_get_cm_event(cm, &event)) {
       if (errno == EINTR) continue;
-      if (!Again()) FailAll(ErrnoStatus("rdma_get_cm_event"));
+      if (!Again()) [[unlikely]] {
+        FailAll(ErrnoStatus("rdma_get_cm_event"));
+      }
       return;
     }
     auto* id = event->id;
@@ -513,8 +515,8 @@ void Engine::DrainCq(Device& device) {
       FailDevice(device, absl::UnavailableError("ibv_poll_cq failed"));
       return;
     }
-    if (!count) [[unlikely]]
-      return;
+    // Empty is the normal end of a drain, including notification rechecks.
+    if (!count) return;
     for (int i = 0; i < count; ++i) {
       const auto& wc = completions[i];
       // No public data-posting API exists yet. Error completions still
@@ -537,19 +539,20 @@ void Engine::DrainNotifications(Device& device, bool rearm) {
     void* context = nullptr;
     if (ibv_get_cq_event(device.channel, &cq, &context)) {
       if (errno == EINTR) continue;
-      if (!Again() && rearm)
+      if (!Again() && rearm) [[unlikely]] {
         FailDevice(device, ErrnoStatus("ibv_get_cq_event"));
+      }
       return;
     }
     ibv_ack_cq_events(cq, 1);
-    if (cq != device.cq) {
+    if (cq != device.cq) [[unlikely]] {
       FailDevice(device, absl::InternalError(
                              "unexpected CQ on worker completion channel"));
       continue;
     }
     if (rearm && device.error.ok()) {
       const int result = ibv_req_notify_cq(cq, 0);
-      if (result) {
+      if (result) [[unlikely]] {
         FailDevice(device, absl::ErrnoToStatus(result, "ibv_req_notify_cq"));
         continue;
       }
@@ -565,7 +568,9 @@ void Engine::DrainAsync(Device& device) {
     ibv_async_event event{};
     if (ibv_get_async_event(device.context.get(), &event)) {
       if (errno == EINTR) continue;
-      if (!Again()) FailDevice(device, ErrnoStatus("ibv_get_async_event"));
+      if (!Again()) [[unlikely]] {
+        FailDevice(device, ErrnoStatus("ibv_get_async_event"));
+      }
       return;
     }
     const auto type = event.event_type;
@@ -588,7 +593,7 @@ void Engine::DrainAsync(Device& device) {
   }
 }
 void Engine::OnPoll(Poll& poll, int result) {
-  if (result < 0 || (result & (POLLERR | POLLHUP | POLLNVAL))) {
+  if (result < 0 || (result & (POLLERR | POLLHUP | POLLNVAL))) [[unlikely]] {
     auto error =
         absl::UnavailableError(absl::StrCat("RDMA fd poll failed: ", result));
     if (poll.device)
@@ -609,7 +614,7 @@ void Engine::OnPoll(Poll& poll, int result) {
       break;
   }
   auto status = poll.Arm();
-  if (!status.ok()) {
+  if (!status.ok()) [[unlikely]] {
     if (poll.device)
       FailDevice(*poll.device, status);
     else
