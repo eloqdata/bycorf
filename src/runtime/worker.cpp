@@ -237,17 +237,19 @@ absl::Status Worker::Init(const WorkerOptions& options) {
 
 void Worker::Shutdown() {
 #if BYCORF_ENABLE_RDMA
-  // Registration can be used before Init; its handles retain verbs resources
-  // independently of the ring. Never invalidate a live MR during shutdown.
+  // Stop RDMA admission first but retain fd tags and device resources until
+  // kernel shutdown confirms that no poll or timeout can reference them.
   Rdma::Shutdown();
 #endif
-  if (!initialized_) {
-    return;
+  if (initialized_) {
+    Storage::Shutdown();
+    Network::Shutdown();
+    KernelBackend().Shutdown();
+    initialized_ = false;
   }
-  Storage::Shutdown();
-  Network::Shutdown();
-  KernelBackend().Shutdown();
-  initialized_ = false;
+#if BYCORF_ENABLE_RDMA
+  Rdma::AfterRingShutdown();
+#endif
 }
 
 void Worker::Spawn(Task<absl::Status> task) {

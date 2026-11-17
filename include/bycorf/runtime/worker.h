@@ -91,6 +91,7 @@ class Worker : private IoUringBackend,
   using Rdma::CancelRdmaEventPoll;
   using Rdma::OpenRdmaDevice;
   using Rdma::RegisterRdmaMemory;
+  using Rdma::SubmitRdmaDeadline;
   using Rdma::SubmitRdmaEventPoll;
 #endif
   struct WakeStats {
@@ -386,6 +387,8 @@ class Worker : private IoUringBackend,
   friend class StorageBackend<Worker>;
 #if BYCORF_ENABLE_RDMA
   friend class RdmaBackend<Worker>;
+  friend class rdma::RcConnection;
+  friend class rdma::RcListener;
 #endif
   // Shared-ring access for the CRTP facades; the base conversion is a fixed
   // address adjustment rather than a load of a stored pointer.

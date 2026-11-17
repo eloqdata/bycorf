@@ -26,7 +26,7 @@ connections, and asynchronous I/O; applications provide services above
 
 - [Name](#name)
 - [Build and test](#build-and-test)
-- [Optional RDMA registration](#optional-rdma-registration)
+- [Optional RDMA connections and registration](#optional-rdma-connections-and-registration)
 - [Run the examples](#run-the-examples)
 - [Use Bycorf in a CMake project](#use-bycorf-in-a-cmake-project)
 - [Development](#development)
@@ -179,10 +179,10 @@ Follow the [DPDK/SPDK build and test guide](docs/dpdk-prototype.md) for its
 additional dependencies, virtual-device checks, physical-device configuration,
 and experimental compatibility limits.
 
-## Optional RDMA registration
+## Optional RDMA connections and registration
 
-`BYCORF_ENABLE_RDMA` enables the private worker facade and explicit memory
-registration API. It defaults to off and is independent of
+`BYCORF_ENABLE_RDMA` enables the private worker facade, RC connection API and
+explicit memory registration. It defaults to off and is independent of
 `BYCORF_KERNEL_BYPASS`; enabling it requires libibverbs and librdmacm development
 packages, without DPDK/SPDK. On Ubuntu:
 
@@ -190,7 +190,7 @@ packages, without DPDK/SPDK. On Ubuntu:
 sudo apt-get install --no-install-recommends libibverbs-dev librdmacm-dev
 cmake -S . -B build-rdma -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBYCORF_ENABLE_RDMA=ON
 cmake --build build-rdma --parallel
-ctest --test-dir build-rdma -R '^bycorf_RdmaMemory\.' --output-on-failure
+ctest --test-dir build-rdma -R '^bycorf_(RdmaMemory|RcLoopFake)\.' --output-on-failure
 ```
 
 The device-free `RdmaMemory` suite injects verbs failures and verifies lazy
@@ -206,9 +206,21 @@ BYCORF_RDMA_TEST_DEVICE=rxe0 ctest --test-dir build-rdma \
 
 This opens the selected device, registers and deregisters memory, creates real
 QPs sharing a PD, and checks permissions, bounds, and mismatched PD rejection.
-It requires access to the device's uverbs node and sufficient memlock. It does
-not test a connected data-transfer or immediate-data protocol. No device is
-opened by unused workers or test discovery.
+It requires access to the device's uverbs node and sufficient memlock. For RC
+connection tests on an existing Soft-RoCE interface, supply its local IP:
+
+```bash
+BYCORF_RDMA_TEST_IP=192.0.2.1 ctest --test-dir build-rdma \
+  -R '^bycorf_RcLoop\.' --output-on-failure
+```
+
+These exercise idle-worker connection events, private data, distinct worker
+contexts, shared CQ/PD ownership, refused connections and close/accept races.
+The device-free `RcLoopFake` cases additionally inject notification races,
+provider capacity rounding, budget exhaustion, deadlines, CQ/device failures,
+and late events during cancellation and shutdown. They use real io_uring with
+link-time CM/verbs stubs. Data-transfer and immediate-data protocols remain
+outside these tests. No device is opened by unused workers or test discovery.
 
 Use `Worker::OpenRdmaDevice(name)` or `AcquireRdmaDomain(owning_context)` on the
 owner worker, then `RegisterRdmaMemory(domain, backing_span, explicit_access)`.
@@ -218,6 +230,18 @@ returns an SGE lease to retain through terminal completion. The caller owns
 backing memory and must stop remote access before releasing registrations and
 freeing it. See [RDMA ownership](docs/architecture/rdma.md) for remote descriptors,
 permissions, CM context ownership, and the independent storage-buffer contract.
+
+The RC API is in `bycorf/rdma/rc.h`. On the owning worker, call
+`RcListener::Listen(worker, numeric_ip, port)` and await `listener.Accept()`, or
+await `RcConnection::Connect(worker, numeric_ip, port)`. Pass `RcOptions` to set
+QP/CQ capacities and the handshake timeout, and an optional byte span for CM
+private data. Await `connection.Close()` or `listener.Close()` to join resource
+retirement. Destruction only requests close. Use
+`connection.protection_domain()` when registering memory for that connection.
+An accepted connection stays on the listener's worker; moving a C++ handle
+does not move worker ownership. Private data is limited to 56 bytes; CM may
+report a padded peer-data length. The first connection fixes that worker/device
+CQ capacity, and subsequent connections must request the same capacity.
 
 ## Run the examples
 

@@ -135,6 +135,10 @@ class IoUringBackend {
   absl::Status SubmitFdatasync(FixedFile file, IoCompletion* tag);
   absl::Status SubmitTimeout(const __kernel_timespec& timeout,
                              IoCompletion* tag);
+  // CLOCK_MONOTONIC absolute deadline. Admission/submission backpressure must
+  // not restart the budget. Caller retains timespec/tag until terminal CQE.
+  absl::Status SubmitDeadline(const __kernel_timespec& deadline,
+                              IoCompletion* tag);
   // Observe a host descriptor (e.g. a DPDK RX notification) through the same
   // CQ as storage and MSG_RING. The caller retains tag until completion/cancel.
   absl::Status SubmitPoll(int fd, unsigned events, IoCompletion* tag);

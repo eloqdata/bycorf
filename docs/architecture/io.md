@@ -44,11 +44,12 @@ Network adapters supply notification preparation, idle checks,
 deadlines, and cleanup to the [worker sleep protocol](runtime.md#sleep-and-wakeups).
 The worker enters the ring's blocking wait; adapters never block independently.
 
-The ring outlives all facades. RDMA drops its weak resource cache on shutdown;
-registration and operation handles retain their PD/context independently. The
-worker initializes the ring first, stops storage and networking in that order,
-then shuts the ring down. Storage dispatch remains
-valid through shutdown completion draining; SPDK callbacks use the owning
+The ring outlives all facades. RDMA stops admission before ring shutdown but
+retains channel polls until the ring has quiesced; it then retires remaining
+RDMA events and connection resources. Exported registration handles retain
+their PD/context independently. The worker initializes the ring first, stops
+storage and networking in that order, then shuts the ring down. Storage dispatch
+remains valid through shutdown completion draining; SPDK callbacks use the owning
 worker's TLS to reach its storage adapter. Kernel registrations remain live
 until ring shutdown quiesces kernel access.
 
