@@ -8,7 +8,6 @@
 
 #include <coroutine>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -145,9 +144,9 @@ class Engine {
   absl::Status error;
   rdma_event_channel* cm = nullptr;
   Poll cm_poll;
-  std::unordered_map<rdma_cm_id*, LocalSharedPtr<Connection>> connections;
-  std::unordered_map<rdma_cm_id*, LocalSharedPtr<Listener>> listeners;
-  std::unordered_map<std::string, LocalSharedPtr<Device>> devices;
+  absl::flat_hash_map<rdma_cm_id*, LocalSharedPtr<Connection>> connections;
+  absl::flat_hash_map<rdma_cm_id*, LocalSharedPtr<Listener>> listeners;
+  absl::flat_hash_map<std::string, LocalSharedPtr<Device>> devices;
 
  private:
   absl::Status StartTimer(const LocalSharedPtr<Connection>& connection);

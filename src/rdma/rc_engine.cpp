@@ -509,11 +509,12 @@ void Engine::DrainCq(Device& device) {
   ibv_wc completions[32];
   for (;;) {
     const int count = ibv_poll_cq(device.cq, 32, completions);
-    if (count < 0) {
+    if (count < 0) [[unlikely]] {
       FailDevice(device, absl::UnavailableError("ibv_poll_cq failed"));
       return;
     }
-    if (!count) return;
+    if (!count) [[unlikely]]
+      return;
     for (int i = 0; i < count; ++i) {
       const auto& wc = completions[i];
       // No public data-posting API exists yet. Error completions still
