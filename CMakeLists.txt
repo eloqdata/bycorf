@@ -499,7 +499,8 @@ if (BYCORF_BUILD_TESTS)
         ibv_get_device_name ibv_open_device ibv_close_device ibv_query_device
         ibv_alloc_pd ibv_dealloc_pd ibv_create_comp_channel ibv_destroy_comp_channel
         ibv_create_cq ibv_destroy_cq ibv_create_qp ibv_modify_qp ibv_destroy_qp
-        ibv_get_cq_event ibv_ack_cq_events ibv_get_async_event ibv_ack_async_event)
+        ibv_get_cq_event ibv_ack_cq_events ibv_get_async_event ibv_ack_async_event
+        ibv_reg_mr ibv_reg_mr_iova2 ibv_dereg_mr)
       target_link_options(bycorf_rdma_rc_fake_tests PRIVATE "LINKER:--wrap=${symbol}")
     endforeach()
     bycorf_discover_tests(bycorf_rdma_rc_fake_tests 30 "runtime;rdma;stub")

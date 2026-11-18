@@ -91,6 +91,15 @@ class RcLoop : public testing::Test {
     if (!status.ok()) return status;
     return std::pair(std::move(*client), std::move(*server));
   }
+  RegisteredMemorySlice Buffer(RcConnection& connection,
+                               std::span<std::byte> bytes,
+                               RdmaAccess access = RdmaAccess::kLocalWrite) {
+    auto memory = worker.RegisterRdmaMemory(connection.protection_domain(),
+                                            bytes, access);
+    EXPECT_TRUE(memory.ok()) << memory.status();
+    if (!memory.ok()) return {};
+    return *memory->Slice(0, bytes.size());
+  }
   const char* ip = nullptr;
   bool initialized = false;
   CrossCore cc{1};
@@ -253,7 +262,472 @@ TEST_F(RcLoop, InvalidOptionsAndPrivateDataAreRejected) {
       Run(RcConnection::Connect(worker, "hostname", 123)).status()));
 }
 
+TEST_F(RcLoop, BidirectionalSendRecvOnSharedCq) {
+  auto first = Pair(), second = Pair();
+  ASSERT_TRUE(first.ok()) << first.status();
+  ASSERT_TRUE(second.ok()) << second.status();
+  std::array<std::array<std::byte, 8>, 4> source{};
+  std::array<std::array<std::byte, 16>, 4> destination{};
+  std::array<RcConnection*, 4> peers{&first->first, &first->second,
+                                     &second->first, &second->second};
+  std::array<std::optional<absl::StatusOr<std::size_t>>, 4> sent, received;
+  for (unsigned i = 0; i < peers.size(); ++i) {
+    std::fill(source[i].begin(), source[i].end(),
+              std::byte{static_cast<unsigned char>(i + 1)});
+    auto send = Buffer(*peers[i], source[i], RdmaAccess::kNone);
+    auto recv = Buffer(*peers[i ^ 1], destination[i]);
+    worker.Spawn(Collect(peers[i ^ 1]->Recv(recv), &received[i]));
+    worker.Spawn(Collect(peers[i]->Send(send), &sent[i]));
+    // Both lazy adapters must own their invocation-time descriptors.
+    send = {};
+    recv = {};
+  }
+  Until([&] {
+    return std::all_of(sent.begin(), sent.end(),
+                       [](auto& r) { return r.has_value(); }) &&
+           std::all_of(received.begin(), received.end(),
+                       [](auto& r) { return r.has_value(); });
+  });
+  for (unsigned i = 0; i < peers.size(); ++i) {
+    ASSERT_TRUE(sent[i]->ok()) << sent[i]->status();
+    ASSERT_TRUE(received[i]->ok()) << received[i]->status();
+    EXPECT_EQ(**sent[i], source[i].size());
+    EXPECT_EQ(**received[i], source[i].size());
+    EXPECT_TRUE(
+        std::equal(source[i].begin(), source[i].end(), destination[i].begin()));
+    EXPECT_EQ(destination[i].back(), std::byte{0});
+  }
+}
+
+TEST_F(RcLoop, ReceiveValidatesRegistrationBeforePosting) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 8> bytes{};
+  auto readonly = Buffer(pair->first, bytes, RdmaAccess::kNone);
+  EXPECT_TRUE(
+      absl::IsPermissionDenied(pair->first.SubmitRecv(readonly).status()));
+  EXPECT_TRUE(absl::IsFailedPrecondition(pair->first.SubmitSend({}).status()));
+  auto send = pair->first.SubmitSend(readonly);
+  ASSERT_TRUE(send.ok());
+  EXPECT_TRUE(send->Cancel().ok());
+  EXPECT_FALSE(Run(send->Wait()).ok());
+}
+
 #ifdef BYCORF_RDMA_FAKE
+TEST_F(RcLoop, AsyncAdaptersRetryBothSmallQueuesWithoutCallerRetries) {
+  RcOptions options;
+  options.send_wr = options.recv_wr = 1;
+  auto pair = Pair(options);
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 64> input{}, output{};
+  for (unsigned i = 0; i < input.size(); ++i)
+    input[i] = static_cast<std::byte>(i);
+  auto source = Buffer(pair->first, input, RdmaAccess::kNone);
+  auto target = Buffer(pair->second, output);
+  std::array<std::optional<absl::StatusOr<std::size_t>>, 64> sent, received;
+  for (unsigned i = 0; i < input.size(); ++i) {
+    worker.Spawn(Collect(pair->first.Send(*source.Slice(i, 1)), &sent[i]));
+    worker.Spawn(Collect(pair->second.Recv(*target.Slice(i, 1)), &received[i]));
+  }
+  source = target = {};
+  Until([&] { return sent.back() && received.back(); });
+  for (unsigned i = 0; i < input.size(); ++i) {
+    ASSERT_TRUE(sent[i] && received[i]);
+    ASSERT_TRUE(sent[i]->ok()) << sent[i]->status();
+    ASSERT_TRUE(received[i]->ok()) << received[i]->status();
+    EXPECT_EQ(**sent[i], 1);
+    EXPECT_EQ(**received[i], 1);
+  }
+  EXPECT_EQ(output, input);
+  EXPECT_EQ(rdma_fake::Posts(false), input.size());
+  EXPECT_EQ(rdma_fake::Posts(true), input.size());
+  EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+}
+
+TEST_F(RcLoop, QueueFifoSnapshotsCancellationAndOtherConnectionProgress) {
+  RcOptions options;
+  options.send_wr = options.recv_wr = 1;
+  auto pair = Pair(options), other = Pair(options);
+  ASSERT_TRUE(pair.ok());
+  ASSERT_TRUE(other.ok());
+  std::array<std::byte, 4> source{std::byte{11}, std::byte{22}, std::byte{33},
+                                  std::byte{44}};
+  std::array<std::byte, 4> destination{};
+  auto send_buffer = Buffer(pair->first, source, RdmaAccess::kNone);
+  auto recv_buffer = Buffer(pair->second, destination);
+  std::vector<RcOperation> sends, recvs;
+  for (unsigned i = 0; i < 4; ++i) {
+    auto descriptor = *send_buffer.Slice(i, 1);
+    auto op = pair->first.SubmitSend(descriptor);
+    ASSERT_TRUE(op.ok()) << op.status();
+    sends.push_back(std::move(*op));
+    descriptor = *send_buffer.Slice(0, 4);
+  }
+  EXPECT_EQ(Peer::State(pair->first)->send.posted, 1);
+  EXPECT_EQ(Peer::State(pair->first)->send.pending.size(), 3);
+  EXPECT_TRUE(absl::IsResourceExhausted(
+      pair->first.TrySubmitSend(send_buffer).status()));
+  EXPECT_FALSE(sends.front().ready());
+  EXPECT_TRUE(sends[1].Cancel().ok());
+  EXPECT_TRUE(absl::IsCancelled(sends[1].result().status()));
+  // SQ blockage does not block the RQ or another connection on the shared CQ.
+  std::array<std::byte, 4> opposite_buffer{};
+  auto opposite =
+      pair->first.TrySubmitRecv(Buffer(pair->first, opposite_buffer));
+  ASSERT_TRUE(opposite.ok());
+  auto other_recv =
+      other->second.SubmitRecv(Buffer(other->second, destination));
+  ASSERT_TRUE(other_recv.ok());
+  EXPECT_TRUE(Run(other->first.Send(Buffer(other->first, source))).ok());
+  EXPECT_EQ(*Run(other_recv->Wait()), 4);
+  std::fill(destination.begin(), destination.end(), std::byte{0});
+  for (unsigned i = 0; i < 4; ++i) {
+    auto descriptor = *recv_buffer.Slice(i, 1);
+    auto op = pair->second.SubmitRecv(descriptor);
+    ASSERT_TRUE(op.ok());
+    recvs.push_back(std::move(*op));
+    descriptor = {};
+  }
+  EXPECT_TRUE(absl::IsResourceExhausted(
+      pair->second.TrySubmitRecv(recv_buffer).status()));
+  EXPECT_TRUE(recvs[1].Cancel().ok());
+  send_buffer = recv_buffer = {};
+  Until([&] { return sends.back().ready() && recvs.back().ready(); });
+  EXPECT_EQ(destination[0], source[0]);
+  EXPECT_EQ(destination[1], std::byte{0});
+  EXPECT_EQ(destination[2], source[2]);
+  EXPECT_EQ(destination[3], source[3]);
+  for (unsigned i : {0U, 2U, 3U}) {
+    EXPECT_EQ(*sends[i].result(), 1);
+    EXPECT_EQ(*recvs[i].result(), 1);
+  }
+  EXPECT_EQ(Peer::State(pair->first)->send.posted, 0);
+  EXPECT_TRUE(Peer::State(pair->first)->send.pending.empty());
+  EXPECT_EQ(Peer::State(pair->second)->recv.posted, 0);
+  EXPECT_TRUE(Peer::State(pair->second)->recv.pending.empty());
+  EXPECT_TRUE(opposite->Cancel().ok());
+}
+
+TEST_F(RcLoop, ProviderPostErrorsAreTerminalWithoutCapacityRetry) {
+  RcOptions options;
+  options.send_wr = options.recv_wr = 1;
+  auto pair = Pair(options);
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 8> bytes{}, output{};
+  auto send = Buffer(pair->first, bytes);
+  auto recv = Buffer(pair->second, output);
+  for (int error : {EINVAL, ENOMEM, EAGAIN}) {
+    for (bool receive : {false, true}) {
+      const int posts = rdma_fake::Posts(receive);
+      rdma_fake::FailNextPost(error, receive);
+      auto op = receive ? pair->second.SubmitRecv(recv)
+                        : pair->first.SubmitSend(send);
+      ASSERT_FALSE(op.ok());
+      EXPECT_EQ(rdma_fake::Posts(receive), posts + 1);
+      EXPECT_TRUE(Peer::State(pair->first)->operations.empty());
+      EXPECT_TRUE(Peer::State(pair->second)->operations.empty());
+    }
+  }
+  auto first = pair->first.SubmitSend(send);
+  auto failed = pair->first.SubmitSend(send);
+  auto last = pair->first.SubmitSend(send);
+  ASSERT_TRUE(first.ok() && failed.ok() && last.ok());
+  auto receive = pair->second.SubmitRecv(recv);
+  ASSERT_TRUE(receive.ok());
+  rdma_fake::FailNextPost(ENOMEM);
+  Until([&] { return failed->ready(); });
+  EXPECT_FALSE(failed->result().ok());
+  EXPECT_TRUE(first->result().ok());
+  EXPECT_FALSE(last->ready());
+  EXPECT_EQ(*Run(pair->second.Recv(recv)), bytes.size());
+  EXPECT_EQ(*Run(last->Wait()), bytes.size());
+}
+
+TEST_F(RcLoop, CloseRetiresPostedAndQueuedOperationsExactlyOnce) {
+  for (bool drop_flush : {false, true}) {
+    rdma_fake::DropFlush(drop_flush);
+    rdma_fake::HoldTransfers(true);
+    RcOptions options;
+    options.send_wr = options.recv_wr = 1;
+    auto pair = Pair(options);
+    ASSERT_TRUE(pair.ok());
+    std::array<std::byte, 4> a{}, b{};
+    auto sa = Buffer(pair->first, a), sb = Buffer(pair->second, b);
+    std::vector<RcOperation> operations;
+    for (unsigned i = 0; i < 2; ++i) {
+      for (auto* peer : {&pair->first, &pair->second}) {
+        auto& slice = peer == &pair->first ? sa : sb;
+        auto send = peer->SubmitSend(*slice.Slice(i, 1));
+        auto recv = peer->SubmitRecv(*slice.Slice(i + 2, 1));
+        ASSERT_TRUE(send.ok() && recv.ok());
+        operations.push_back(std::move(*send));
+        operations.push_back(std::move(*recv));
+      }
+    }
+    std::array<int, 8> counts{};
+    auto count = [](Task<absl::StatusOr<std::size_t>> wait,
+                    int* count) -> Task<absl::Status> {
+      auto result = co_await std::move(wait);
+      EXPECT_FALSE(result.ok());
+      ++*count;
+      co_return absl::OkStatus();
+    };
+    for (unsigned i = 0; i < operations.size(); ++i)
+      worker.Spawn(count(operations[i].Wait(), &counts[i]));
+    worker.RunOnce(false);
+    sa = sb = {};
+    EXPECT_EQ(rdma_fake::LiveMrs(), 2);
+    EXPECT_TRUE(Run(pair->first.Close()).ok());
+    Until([&] {
+      return std::all_of(counts.begin(), counts.end(),
+                         [](int n) { return n == 1; });
+    });
+    for (auto& op : operations) {
+      EXPECT_TRUE(op.ready());
+      EXPECT_TRUE(op.Cancel().ok());
+    }
+    EXPECT_TRUE(Run(pair->second.Close()).ok());
+    EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+    EXPECT_TRUE(Peer::State(pair->first)->operations.empty());
+    EXPECT_TRUE(Peer::State(pair->second)->operations.empty());
+    EXPECT_TRUE(Peer::State(pair->first)->engine.lock()->operations.empty());
+    for (int count : counts) EXPECT_EQ(count, 1);
+  }
+}
+
+TEST_F(RcLoop, ShutdownStopsDmaBeforeReclaimingSuspendedTransferFrames) {
+  rdma_fake::HoldTransfers(true);
+  RcOptions options;
+  options.send_wr = options.recv_wr = 1;
+  auto pair = Pair(options);
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 4> bytes{};
+  auto memory = Buffer(pair->first, bytes);
+  auto posted = pair->first.SubmitSend(*memory.Slice(0, 1));
+  auto queued = pair->first.SubmitSend(*memory.Slice(1, 1));
+  auto receive = pair->first.SubmitRecv(*memory.Slice(2, 1));
+  ASSERT_TRUE(posted.ok() && queued.ok() && receive.ok());
+  std::optional<absl::StatusOr<std::size_t>> result;
+  worker.Spawn(Collect(pair->first.Recv(*memory.Slice(3, 1)), &result));
+  worker.RunOnce(false);
+  auto engine = Peer::State(pair->first)->engine.lock();
+  EXPECT_EQ(engine->operations.size(), 4);
+  memory = {};
+  worker.Shutdown();
+  EXPECT_EQ(rdma_fake::LiveQps(), 0);
+  EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+  EXPECT_TRUE(engine->operations.empty());
+  EXPECT_EQ(engine->worker, nullptr);
+  for (auto* op : {&*posted, &*queued, &*receive}) {
+    EXPECT_TRUE(op->ready());
+    EXPECT_TRUE(absl::IsCancelled(op->result().status()));
+    EXPECT_TRUE(op->Cancel().ok());
+  }
+  EXPECT_FALSE(result.has_value());  // shutdown does not dispatch callbacks
+  worker.DestroyDetachedTasks();
+  EXPECT_FALSE(RcListener::Listen(worker, ip, 0).ok());
+  pair = absl::CancelledError("release handles after shutdown");
+}
+
+TEST_F(RcLoop, ShutdownReclaimsFrameOwnedPayloadAfterDmaAndCallbacksStop) {
+  rdma_fake::HoldTransfers(true);
+  RcOptions options;
+  options.send_wr = options.recv_wr = 1;
+  auto pair = Pair(options);
+  ASSERT_TRUE(pair.ok());
+  bool reclaimed = false;
+  auto run = [](Worker* worker, RcConnection* connection,
+                bool* reclaimed) -> Task<absl::Status> {
+    struct Payload {
+      bool* reclaimed;
+      std::array<std::byte, 8> bytes{};
+      ~Payload() {
+        EXPECT_EQ(rdma_fake::LiveQps(), 0);
+        EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+        *reclaimed = true;
+      }
+    } payload{reclaimed};
+    auto memory =
+        worker->RegisterRdmaMemory(connection->protection_domain(),
+                                   payload.bytes, RdmaAccess::kLocalWrite);
+    if (!memory.ok()) co_return memory.status();
+    auto posted = connection->SubmitSend(*memory->Slice(0, 1));
+    auto queued = connection->SubmitSend(*memory->Slice(1, 1));
+    auto recv = connection->SubmitRecv(*memory->Slice(2, 1));
+    if (!posted.ok() || !queued.ok() || !recv.ok())
+      co_return absl::InternalError("test admission failed");
+    auto result = co_await connection->Recv(*memory->Slice(3, 1));
+    ADD_FAILURE() << "shutdown must not resume this coroutine";
+    co_return result.status();
+  };
+  worker.Spawn(run(&worker, &pair->first, &reclaimed));
+  worker.RunOnce(false);
+  EXPECT_EQ(Peer::State(pair->first)->operations.size(), 4);
+  worker.Shutdown();
+  EXPECT_FALSE(reclaimed);
+  worker.DestroyDetachedTasks();
+  EXPECT_TRUE(reclaimed);
+}
+
+TEST_F(RcLoop, QpAndCqFailuresRetireDataOperationsAndPreserveFailureScope) {
+  for (auto failure : {IBV_EVENT_QP_FATAL, IBV_EVENT_CQ_ERR}) {
+    RcOptions options;
+    options.send_wr = options.recv_wr = 1;
+    auto pair = Pair(options), other = Pair(options);
+    ASSERT_TRUE(pair.ok() && other.ok());
+    std::array<std::byte, 4> bytes{};
+    auto memory = Buffer(pair->first, bytes);
+    auto posted = pair->first.SubmitSend(*memory.Slice(0, 1));
+    auto queued = pair->first.SubmitSend(*memory.Slice(1, 1));
+    auto recv = pair->first.SubmitRecv(*memory.Slice(2, 1));
+    auto queued_recv = pair->first.SubmitRecv(*memory.Slice(3, 1));
+    ASSERT_TRUE(posted.ok() && queued.ok() && recv.ok() && queued_recv.ok());
+    memory = {};
+    auto state = Peer::State(pair->first);
+    rdma_fake::Async(state->qp->context, failure, state->qp);
+    Until([&] { return state->closed; });
+    for (auto* op : {&*posted, &*queued, &*recv, &*queued_recv}) {
+      ASSERT_TRUE(op->ready());
+      EXPECT_TRUE(absl::IsUnavailable(op->result().status()));
+    }
+    EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+    if (failure == IBV_EVENT_QP_FATAL) {
+      std::array<std::byte, 4> output{};
+      auto receive = other->second.SubmitRecv(Buffer(other->second, output));
+      ASSERT_TRUE(receive.ok());
+      EXPECT_TRUE(Run(other->first.Send(Buffer(other->first, bytes))).ok());
+      EXPECT_TRUE(Run(receive->Wait()).ok());
+    } else {
+      EXPECT_FALSE(other->first.IsOpen());
+      EXPECT_FALSE(other->second.IsOpen());
+    }
+    EXPECT_TRUE(Run(pair->first.Close()).ok());
+    EXPECT_TRUE(Run(pair->second.Close()).ok());
+    EXPECT_TRUE(Run(other->first.Close()).ok());
+    EXPECT_TRUE(Run(other->second.Close()).ok());
+  }
+}
+
+TEST_F(RcLoop, CompletionErrorClosesQpAndRetiresQueuedWork) {
+  RcOptions options;
+  options.send_wr = options.recv_wr = 1;
+  auto pair = Pair(options);
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 8> source{};
+  std::array<std::byte, 1> destination{};
+  auto buffer = Buffer(pair->second, destination);
+  auto recv = pair->second.SubmitRecv(buffer);
+  auto queued = pair->second.SubmitRecv(buffer);
+  ASSERT_TRUE(recv.ok() && queued.ok());
+  auto send = pair->first.SubmitSend(Buffer(pair->first, source));
+  ASSERT_TRUE(send.ok());
+  Until([&] { return queued->ready(); });
+  EXPECT_TRUE(absl::IsUnavailable(recv->result().status()));
+  EXPECT_EQ(recv->result().status(), queued->result().status());
+  EXPECT_FALSE(pair->second.IsOpen());
+}
+
+TEST_F(RcLoop, ReceiveCompletionWakesSleepingWorkerWithoutInlineResume) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  for (int i = 0; i < 8; ++i) worker.RunOnce(false);
+  std::array<std::byte, 4> input{std::byte{7}}, output{};
+  auto recv = pair->second.SubmitRecv(Buffer(pair->second, output));
+  ASSERT_TRUE(recv.ok());
+  std::optional<absl::StatusOr<std::size_t>> received;
+  worker.Spawn(Collect(recv->Wait(), &received));
+  worker.RunOnce(false);
+  const int fd =
+      rdma_fake::DeferNotification(Peer::State(pair->first)->device->cq);
+  auto send = pair->first.SubmitSend(Buffer(pair->first, input));
+  ASSERT_TRUE(send.ok());
+  EXPECT_FALSE(received.has_value());
+  EXPECT_FALSE(send->ready());
+  // Only the eventfd is touched on this thread; fake state remains
+  // worker-local.
+  std::atomic<bool> parked{false};
+  auto& mailbox = cc.mailbox(0);
+  std::jthread wake([fd, &mailbox, &parked] {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (mailbox.wake_seq_.load(std::memory_order_acquire) !=
+               kWakeSeqParked &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    parked.store(
+        mailbox.wake_seq_.load(std::memory_order_acquire) == kWakeSeqParked,
+        std::memory_order_release);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    std::uint64_t one = 1;
+    EXPECT_EQ(write(fd, &one, sizeof(one)), sizeof(one));
+  });
+  const auto start = std::chrono::steady_clock::now();
+  Until([&] { return received.has_value(); });
+  EXPECT_TRUE(parked.load(std::memory_order_acquire));
+  EXPECT_GE(std::chrono::steady_clock::now() - start,
+            std::chrono::milliseconds(15));
+  ASSERT_TRUE(received->ok()) << received->status();
+  EXPECT_EQ(**received, input.size());
+  EXPECT_EQ(output, input);
+}
+
+TEST_F(RcLoop, RetainedHandlesCanBeReleasedAfterBackendDestruction) {
+  CrossCore owned_cc{1};
+  owned_cc.mailbox(0).wake_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  ASSERT_GE(owned_cc.mailbox(0).wake_fd_, 0);
+  auto owner = std::make_unique<Worker>();
+  owner->BindCrossCore(0, &owned_cc);
+  SetThisWorker(0, &owned_cc, owner.get());
+  struct Cleanup {
+    std::unique_ptr<Worker>& owner;
+    Worker& previous;
+    CrossCore& previous_cc;
+    CrossCore& owned_cc;
+    ~Cleanup() {
+      if (owner) {
+        owner->Shutdown();
+        owner->DestroyDetachedTasks();
+        owner.reset();
+      }
+      SetThisWorker(0, &previous_cc, &previous);
+      close(owned_cc.mailbox(0).wake_fd_);
+    }
+  } cleanup{owner, worker, cc, owned_cc};
+  ASSERT_TRUE(owner->Init({.recv_buffer_count_ = 0}).ok());
+  auto listener = RcListener::Listen(*owner, ip, 0);
+  ASSERT_TRUE(listener.ok());
+  std::optional<absl::StatusOr<RcConnection>> client, server;
+  owner->Spawn(
+      Collect(RcConnection::Connect(*owner, ip, listener->port()), &client));
+  owner->Spawn(Collect(listener->Accept(), &server));
+  while (!client || !server) ASSERT_TRUE(owner->RunOnce(true));
+  ASSERT_TRUE(client->ok() && server->ok());
+  std::array<std::byte, 1> bytes{};
+  auto memory = owner->RegisterRdmaMemory((**client).protection_domain(), bytes,
+                                          RdmaAccess::kLocalWrite);
+  ASSERT_TRUE(memory.ok());
+  auto operation = (**client).SubmitRecv(*memory->Slice(0, 1));
+  ASSERT_TRUE(operation.ok());
+  // Lazy tasks retain states past their public handles and the owning backend.
+  auto waiting = operation->Wait();
+  auto closing = (**client).Close();
+  owner->Shutdown();
+  owner->DestroyDetachedTasks();
+  owner.reset();
+  SetThisWorker(0, &cc, &worker);
+  EXPECT_TRUE(operation->ready());
+  EXPECT_TRUE(operation->Cancel().ok());
+  waiting = {};
+  closing = {};
+  client.reset();
+  server.reset();
+  listener = absl::CancelledError("release listener");
+  operation = absl::CancelledError("release operation");
+  EXPECT_EQ(rdma_fake::LiveMrs(), 1);
+  memory = RegisteredMemory{};
+  EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+}
+
 TEST(RcThreadOwnership, ServerShutdownReclaimsSuspendedAcceptOnOwnerThread) {
   rdma_fake::Reset();
   class ListeningService final : public Service {

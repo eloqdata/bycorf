@@ -15,6 +15,14 @@ void Cm(rdma_cm_id* id, rdma_cm_event_type event, int status = 0);
 void RoundQp(unsigned extra);
 void FailNextQp();
 void FailNextNotify();
+void FailNextPost(int error, bool receive = false);
+void HoldTransfers(bool hold);
+void DropFlush(bool drop);
+int LiveMrs();
+int Posts(bool receive);
+// Suppress the next notification's fd wake, retaining the CQ event. A test may
+// write to the returned fd from another thread without accessing fake state.
+int DeferNotification(ibv_cq* cq);
 void Completion(ibv_cq* cq, std::uint32_t qp,
                 ibv_wc_status status = IBV_WC_SUCCESS);
 void Async(ibv_context* context, ibv_event_type type, ibv_qp* qp = nullptr);
