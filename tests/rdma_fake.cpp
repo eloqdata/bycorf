@@ -13,10 +13,11 @@
 #include <cstring>
 #include <deque>
 #include <memory>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 
 namespace {
 struct CmEvent {
@@ -47,18 +48,18 @@ struct Cq {
   std::deque<ibv_wc> completions;
 };
 struct Fake {
-  std::unordered_map<rdma_event_channel*, std::deque<std::unique_ptr<CmEvent>>>
+  absl::flat_hash_map<rdma_event_channel*, std::deque<std::unique_ptr<CmEvent>>>
       channels;
-  std::unordered_map<rdma_cm_event*, std::unique_ptr<CmEvent>> delivered;
-  std::unordered_map<rdma_cm_id*, Id> ids;
-  std::unordered_map<ibv_context*, std::deque<ibv_async_event>> contexts;
-  std::unordered_map<ibv_comp_channel*, std::deque<ibv_cq*>>
+  absl::flat_hash_map<rdma_cm_event*, std::unique_ptr<CmEvent>> delivered;
+  absl::flat_hash_map<rdma_cm_id*, Id> ids;
+  absl::flat_hash_map<ibv_context*, std::deque<ibv_async_event>> contexts;
+  absl::flat_hash_map<ibv_comp_channel*, std::deque<ibv_cq*>>
       completion_channels;
-  std::unordered_map<ibv_cq*, Cq> cqs;
-  std::unordered_set<ibv_pd*> pds;
-  std::unordered_map<ibv_qp*, Qp> qps;
-  std::unordered_map<std::uint32_t, ibv_mr*> mrs;
-  std::unordered_map<std::uint32_t, int> permissions;
+  absl::flat_hash_map<ibv_cq*, Cq> cqs;
+  absl::flat_hash_set<ibv_pd*> pds;
+  absl::flat_hash_map<ibv_qp*, Qp> qps;
+  absl::flat_hash_map<std::uint32_t, ibv_mr*> mrs;
+  absl::flat_hash_map<std::uint32_t, int> permissions;
   std::uint32_t wire_immediate = 0;
   int post_error[2]{}, posts[2]{};
   bool hold_transfers = false, drop_flush = false, defer_notification = false;
