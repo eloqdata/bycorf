@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <unordered_map>
@@ -25,6 +26,15 @@ struct CmEvent {
 struct Id {
   bool listening = false;
   rdma_cm_id* peer = nullptr;
+  std::uint32_t qp = 0;
+};
+struct Wr {
+  std::uint64_t id;
+  ibv_sge sge;
+};
+struct Qp {
+  unsigned send_capacity, recv_capacity;
+  std::deque<Wr> sends, recvs;
 };
 struct Cq {
   bool armed = false;
@@ -42,10 +52,13 @@ struct Fake {
       completion_channels;
   std::unordered_map<ibv_cq*, Cq> cqs;
   std::unordered_set<ibv_pd*> pds;
-  std::unordered_set<ibv_qp*> qps;
+  std::unordered_map<ibv_qp*, Qp> qps;
+  std::unordered_map<std::uint32_t, ibv_mr*> mrs;
+  int post_error[2]{}, posts[2]{};
+  bool hold_transfers = false, drop_flush = false, defer_notification = false;
   bool suppress_establish = false, suppress_connect = false, fail_qp = false,
        fail_notify = false;
-  unsigned qp_extra = 0, next_qp = 1;
+  unsigned qp_extra = 0, next_qp = 1, next_key = 1;
   std::uint16_t next_port = 10000;
   int cq_acks = 0, async_acks = 0;
 } f;
@@ -103,6 +116,117 @@ int ArmCq(ibv_cq* cq, int solicited) {
     rdma_fake::Completion(cq, qp);
   return 0;
 }
+void Complete(ibv_cq* cq, const ibv_wc& wc) {
+  auto& state = f.cqs.at(cq);
+  state.completions.push_back(wc);
+  EXPECT_LE(state.completions.size(), static_cast<std::size_t>(cq->cqe));
+  if (std::exchange(state.armed, false)) {
+    f.completion_channels.at(cq->channel).push_back(cq);
+    ++state.notifications;
+    if (!std::exchange(f.defer_notification, false)) Notify(cq->channel->fd);
+  }
+}
+ibv_qp* Peer(ibv_qp* qp) {
+  for (const auto& [id, state] : f.ids) {
+    if (state.qp != qp->qp_num || !state.peer) continue;
+    const auto number = f.ids.at(state.peer).qp;
+    for (const auto& [other, value] : f.qps)
+      if (other->qp_num == number) return other;
+  }
+  return nullptr;
+}
+bool Valid(ibv_qp* qp, const ibv_sge& sge) {
+  auto it = f.mrs.find(sge.lkey);
+  if (it == f.mrs.end()) return false;
+  auto* mr = it->second;
+  auto start = reinterpret_cast<std::uintptr_t>(mr->addr);
+  return mr->pd == qp->pd && sge.addr >= start &&
+         sge.addr - start <= mr->length &&
+         sge.length <= mr->length - (sge.addr - start);
+}
+void Transfer(ibv_qp* qp) {
+  if (f.hold_transfers || qp->state == IBV_QPS_ERR) return;
+  auto* peer = Peer(qp);
+  if (!peer || peer->state == IBV_QPS_ERR) return;
+  auto& sends = f.qps.at(qp).sends;
+  auto& recvs = f.qps.at(peer).recvs;
+  while (!sends.empty() && !recvs.empty()) {
+    auto send = sends.front(), recv = recvs.front();
+    sends.pop_front();
+    recvs.pop_front();
+    EXPECT_TRUE(Valid(qp, send.sge));
+    EXPECT_TRUE(Valid(peer, recv.sge));
+    const bool fits = send.sge.length <= recv.sge.length;
+    if (fits)
+      std::memcpy(reinterpret_cast<void*>(recv.sge.addr),
+                  reinterpret_cast<const void*>(send.sge.addr),
+                  send.sge.length);
+    ibv_wc wc{};
+    wc.wr_id = send.id;
+    wc.qp_num = qp->qp_num;
+    wc.opcode = IBV_WC_SEND;
+    wc.status = IBV_WC_SUCCESS;
+    Complete(qp->send_cq, wc);
+    wc.wr_id = recv.id;
+    wc.qp_num = peer->qp_num;
+    wc.opcode = IBV_WC_RECV;
+    wc.byte_len = send.sge.length;
+    wc.status = fits ? IBV_WC_SUCCESS : IBV_WC_LOC_LEN_ERR;
+    Complete(peer->recv_cq, wc);
+  }
+}
+int PostSend(ibv_qp* qp, ibv_send_wr* wr, ibv_send_wr** bad) {
+  ++f.posts[0];
+  int error = std::exchange(f.post_error[0], 0);
+  auto& state = f.qps.at(qp);
+  if (state.sends.size() == state.send_capacity) error = ENOMEM;
+  if (qp->state != IBV_QPS_RTS) error = EINVAL;
+  if (error) {
+    *bad = wr;
+    return error;
+  }
+  EXPECT_EQ(wr->next, nullptr);
+  EXPECT_EQ(wr->num_sge, 1);
+  EXPECT_EQ(wr->opcode, IBV_WR_SEND);
+  EXPECT_EQ(wr->send_flags, IBV_SEND_SIGNALED);
+  EXPECT_TRUE(Valid(qp, wr->sg_list[0]));
+  state.sends.push_back({wr->wr_id, wr->sg_list[0]});
+  Transfer(qp);
+  return 0;
+}
+int PostRecv(ibv_qp* qp, ibv_recv_wr* wr, ibv_recv_wr** bad) {
+  ++f.posts[1];
+  int error = std::exchange(f.post_error[1], 0);
+  auto& state = f.qps.at(qp);
+  if (state.recvs.size() == state.recv_capacity) error = ENOMEM;
+  if (qp->state != IBV_QPS_RTS) error = EINVAL;
+  if (error) {
+    *bad = wr;
+    return error;
+  }
+  EXPECT_EQ(wr->next, nullptr);
+  EXPECT_EQ(wr->num_sge, 1);
+  EXPECT_TRUE(Valid(qp, wr->sg_list[0]));
+  state.recvs.push_back({wr->wr_id, wr->sg_list[0]});
+  if (auto* peer = Peer(qp)) Transfer(peer);
+  return 0;
+}
+void Flush(ibv_qp* qp) {
+  auto& state = f.qps.at(qp);
+  for (auto* queue : {&state.sends, &state.recvs}) {
+    for (const auto& wr : *queue) {
+      EXPECT_TRUE(Valid(qp, wr.sge));
+      if (f.drop_flush) continue;
+      ibv_wc wc{};
+      wc.wr_id = wr.id;
+      wc.qp_num = qp->qp_num;
+      wc.status = IBV_WC_WR_FLUSH_ERR;
+      // Other WC fields are intentionally unset on error.
+      Complete(qp->send_cq, wc);
+    }
+    queue->clear();
+  }
+}
 }  // namespace
 
 namespace rdma_fake {
@@ -119,6 +243,7 @@ void CheckEmpty() {
   EXPECT_TRUE(f.cqs.empty());
   EXPECT_TRUE(f.pds.empty());
   EXPECT_TRUE(f.qps.empty());
+  EXPECT_TRUE(f.mrs.empty());
 }
 void Cm(rdma_cm_id* id, rdma_cm_event_type event, int status) {
   Event(id, event, nullptr, nullptr, 0, status);
@@ -128,17 +253,24 @@ void SuppressConnect(bool value) { f.suppress_connect = value; }
 void RoundQp(unsigned extra) { f.qp_extra = extra; }
 void FailNextQp() { f.fail_qp = true; }
 void FailNextNotify() { f.fail_notify = true; }
+void FailNextPost(int error, bool receive) { f.post_error[receive] = error; }
+void HoldTransfers(bool hold) {
+  f.hold_transfers = hold;
+  if (!hold)
+    for (auto& [qp, state] : f.qps) Transfer(qp);
+}
+void DropFlush(bool drop) { f.drop_flush = drop; }
+int LiveMrs() { return f.mrs.size(); }
+int Posts(bool receive) { return f.posts[receive]; }
+int DeferNotification(ibv_cq* cq) {
+  f.defer_notification = true;
+  return cq->channel->fd;
+}
 void Completion(ibv_cq* cq, std::uint32_t qp, ibv_wc_status status) {
-  auto& state = f.cqs.at(cq);
   ibv_wc wc{};
   wc.qp_num = qp;
   wc.status = status;
-  state.completions.push_back(wc);
-  if (std::exchange(state.armed, false)) {
-    f.completion_channels.at(cq->channel).push_back(cq);
-    ++state.notifications;
-    Notify(cq->channel->fd);
-  }
+  Complete(cq, wc);
 }
 void Async(ibv_context* context, ibv_event_type type, ibv_qp* qp) {
   ibv_async_event e{};
@@ -230,6 +362,7 @@ int __wrap_rdma_resolve_route(rdma_cm_id* id, int) {
 int __wrap_rdma_connect(rdma_cm_id* id, rdma_conn_param* param) {
   EXPECT_EQ(id->qp, nullptr);
   EXPECT_NE(param->qp_num, 0U);
+  f.ids.at(id).qp = param->qp_num;
   if (f.suppress_connect) return 0;
   rdma_cm_id* listener = nullptr;
   for (const auto& [key, value] : f.ids)
@@ -252,6 +385,7 @@ int __wrap_rdma_connect(rdma_cm_id* id, rdma_conn_param* param) {
 int __wrap_rdma_accept(rdma_cm_id* id, rdma_conn_param* param) {
   EXPECT_EQ(id->qp, nullptr);
   EXPECT_NE(param->qp_num, 0U);
+  f.ids.at(id).qp = param->qp_num;
   Event(f.ids.at(id).peer, RDMA_CM_EVENT_CONNECT_RESPONSE, nullptr,
         param->private_data, param->private_data_len);
   return 0;
@@ -296,6 +430,8 @@ ibv_context* __wrap_ibv_open_device(ibv_device* dev) {
   context->async_fd = EventFd();
   context->ops.poll_cq = PollCq;
   context->ops.req_notify_cq = ArmCq;
+  context->ops.post_send = PostSend;
+  context->ops.post_recv = PostRecv;
   f.contexts.emplace(context, std::deque<ibv_async_event>{});
   return context;
 }
@@ -319,8 +455,31 @@ ibv_pd* __wrap_ibv_alloc_pd(ibv_context* context) {
   return pd;
 }
 int __wrap_ibv_dealloc_pd(ibv_pd* pd) {
+  for (const auto& [key, mr] : f.mrs) EXPECT_NE(mr->pd, pd);
   EXPECT_EQ(f.pds.erase(pd), 1U);
   delete pd;
+  return 0;
+}
+ibv_mr* __wrap_ibv_reg_mr(ibv_pd* pd, void* addr, size_t length, int) {
+  auto* mr = new ibv_mr{};
+  mr->pd = pd;
+  mr->context = pd->context;
+  mr->addr = addr;
+  mr->length = length;
+  mr->lkey = mr->rkey = f.next_key++;
+  f.mrs.emplace(mr->lkey, mr);
+  return mr;
+}
+ibv_mr* __wrap_ibv_reg_mr_iova2(ibv_pd* pd, void* addr, size_t length,
+                                std::uint64_t, unsigned int access) {
+  return __wrap_ibv_reg_mr(pd, addr, length, static_cast<int>(access));
+}
+int __wrap_ibv_dereg_mr(ibv_mr* mr) {
+  for (const auto& [qp, state] : f.qps)
+    for (auto* queue : {&state.sends, &state.recvs})
+      for (const auto& wr : *queue) EXPECT_NE(wr.sge.lkey, mr->lkey);
+  EXPECT_EQ(f.mrs.erase(mr->lkey), 1U);
+  delete mr;
   return 0;
 }
 ibv_comp_channel* __wrap_ibv_create_comp_channel(ibv_context* context) {
@@ -368,14 +527,16 @@ ibv_qp* __wrap_ibv_create_qp(ibv_pd* pd, ibv_qp_init_attr* attr) {
   qp->qp_type = attr->qp_type;
   qp->send_cq = attr->send_cq;
   qp->recv_cq = attr->recv_cq;
-  f.qps.insert(qp);
+  f.qps.emplace(qp, Qp{attr->cap.max_send_wr, attr->cap.max_recv_wr, {}, {}});
   return qp;
 }
 int __wrap_ibv_modify_qp(ibv_qp* qp, ibv_qp_attr* attr, int) {
   qp->state = attr->qp_state;
+  if (qp->state == IBV_QPS_ERR) Flush(qp);
   return 0;
 }
 int __wrap_ibv_destroy_qp(ibv_qp* qp) {
+  Flush(qp);
   EXPECT_EQ(f.qps.erase(qp), 1U);
   delete qp;
   return 0;

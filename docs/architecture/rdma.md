@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# RDMA connections, notifications and memory ownership
+# RDMA connections, data operations and memory ownership
 
 `BYCORF_ENABLE_RDMA` adds an independent I/O capability backed by libibverbs and
 librdmacm. It defaults to off and does not select or require DPDK/SPDK. The
@@ -41,8 +41,8 @@ multiple QPs in the same PD; it belongs to neither a particular QP nor an IMM
 (immediate-data) operation. Operation leases check both the QP's context and PD.
 RC connections expose their actual protection domain for registration. A caller
 must use that domain rather than assume a separately opened device handle has
-the same PD. Data-posting and application completion protocols are outside the
-connection API.
+the same PD. Connections provide SEND/RECV; application consumption
+acknowledgements, receive credits and buffer pools belong to the upper protocol.
 
 ## RC ownership and connection flow
 
@@ -73,6 +73,29 @@ budget fits; excess capacity fails admission instead of growing the CQ.
 Reservations cover error/flush completions as well as successful completions,
 and are returned only after QP destruction and CQ draining.
 
+## Data operations and local backpressure
+
+Each accepted SEND/RECV has independent engine-owned state identified by a
+non-reused `wr_id` in the shared CQ. Admission acquires an MR lease and snapshots
+address, length and lkey; neither queued nor posted work borrows a descriptor or
+SGE array. The caller owns backing memory through terminal completion.
+Every send is signalled. Completion records the result, releases the lease and
+local queue slot, and schedules the waiting coroutine on its worker. Submission
+does not dispatch completions inline. SEND success permits local buffer reuse;
+it does not acknowledge remote application consumption. RECV success reports
+the actual received length and requires local-write registration.
+
+Each QP accounts for its provider-reported SQ and RQ capacities separately.
+Ordinary submissions queue FIFO within their direction when local capacity is
+exhausted; CQ completions return slots and advance that FIFO without involving
+other QPs. `TrySubmitSend/Recv` reject local exhaustion immediately. Provider
+posting errors fail the operation rather than retrying based on errno: only
+local slot accounting establishes that a completion can restore capacity.
+The engine retains accepted operations even when an application drops its
+operation handle. Coroutine adapters copy descriptors before returning their
+lazy tasks and submit when awaited. No receive WRs, remote credits, windows or
+control messages are generated automatically.
+
 ## Notification and failure flow
 
 The CM channel, completion channel and private context's async-event fd are
@@ -100,10 +123,18 @@ listener and connection states use non-atomic strong/weak ownership. Every
 handle and associated coroutine frame is accessed, moved and destroyed on its
 creating thread, including any handles retained after worker shutdown; they
 cannot be handed to another thread for cleanup. Exported PD/MR/context handles
-retain their separate shared ownership contract. Destruction requests close;
-awaiting Close joins retirement. Closing stops admission,
-disconnects the CM association and puts the external QP into ERR. The
-connection retains its timer tag until the timer's terminal completion, even
+retain their separate shared ownership contract. Connection/listener destruction
+requests close; awaiting Close joins retirement. Closing stops admission,
+disconnects the CM association and puts the external QP into ERR. Queued
+operations terminate without reaching hardware. Posted operations retain
+their leases until terminal CQEs or successful QP destruction; destruction also
+retires operations whose flush CQEs the provider discarded. Every accepted
+operation reaches exactly one terminal result. Cancelling a queued operation
+removes only that operation; cancelling a posted WR closes its connection,
+because verbs cannot cancel one RC WR independently. Callers join cancellation
+or close before reclaiming suspended frames or their backing memory.
+
+The connection retains its timer tag until the timer's terminal completion, even
 when cancellation has already been accepted. It leaves the ID registry before
 resource destruction and releases its CQ budget only after the QP is destroyed
 and the CQ drained. The shared channel polls reference the worker's event
@@ -121,8 +152,10 @@ retaining every poll tag and descriptor. It then quiesces the shared ring.
 Only after ring shutdown confirms that no kernel operation can refer to those
 tags does RDMA retire requests that did not receive callbacks, acknowledge
 remaining events, destroy QPs/CM IDs, and release channels/CQs. Coroutine frames
-are reclaimed afterward. Exported registration/PD handles retain their own
-context independently. `Server` quiesces the ring and reclaims coroutine frames
+are reclaimed afterward, once DMA and callback dispatch have stopped. Final
+cleanup of retained operation/connection handles does not access the backend,
+and shutdown rejects new engine creation. Exported registration/PD handles
+retain their own context independently. `Server` quiesces the ring and reclaims coroutine frames
 on the worker thread. Direct `Runtime` integrations must likewise call worker
 `Shutdown()` and `DestroyDetachedTasks()` on that thread before it exits, and
 release any application-owned RC handles and Tasks there. Unexpected destruction

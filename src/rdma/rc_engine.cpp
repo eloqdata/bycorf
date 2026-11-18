@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cerrno>
 #include <limits>
 #include <utility>
@@ -331,6 +332,8 @@ absl::Status Engine::CreateQp(const LocalSharedPtr<Connection>& c) {
   }
   c->device = device;
   c->budget = actual;
+  c->send.capacity = attr.cap.max_send_wr;
+  c->recv.capacity = attr.cap.max_recv_wr;
   device->reserved += actual;
   // External-QP CM mode: never assign id->qp. CM routes/negotiates, while the
   // worker's own context owns QP/PD/MR/CQ and the sole async-event reader.
@@ -519,9 +522,39 @@ void Engine::DrainCq(Device& device) {
     if (!count) return;
     for (int i = 0; i < count; ++i) {
       const auto& wc = completions[i];
-      // No public data-posting API exists yet. Error completions still
-      // terminate their connection; success entries are consumed so
-      // notifications rearm.
+      auto found = operations.find(wc.wr_id);
+      if (found != operations.end()) {
+        auto operation = found->second;
+        auto c = operation->connection.lock();
+        if (!c || c->device.get() != &device || !operation->posted)
+          std::terminate();
+        if (wc.status != IBV_WC_SUCCESS) {
+          auto error = absl::UnavailableError(
+              absl::StrCat("RDMA completion: ", ibv_wc_status_str(wc.status),
+                           " (vendor ", wc.vendor_err, ")"));
+          Finish(operation, c->closing ? c->error : error);
+          Close(c, error);
+        } else if (c->closing) {
+          Finish(operation, c->error);
+        } else if ((operation->receive && (wc.opcode != IBV_WC_RECV ||
+                                           (wc.wc_flags & IBV_WC_WITH_IMM))) ||
+                   (!operation->receive && wc.opcode != IBV_WC_SEND)) {
+          // Immediate-data operations are not part of this API yet. Never
+          // silently interpret a notification as ordinary SEND payload.
+          auto error =
+              absl::UnimplementedError("unexpected RDMA completion type");
+          Finish(operation, error);
+          Close(c, error);
+        } else {
+          const auto bytes =
+              operation->receive ? wc.byte_len : operation->lease.sge().length;
+          Finish(operation, bytes);
+          Advance(*c, operation->receive);
+        }
+        continue;
+      }
+      // A reentrant close may retire IDs still in this already-polled batch.
+      // Unknown error CQEs still identify a live QP by number when available.
       if (wc.status == IBV_WC_SUCCESS) continue;
       for (auto& c : Snapshot(connections)) {
         if (c->device.get() == &device && c->qp && c->qp->qp_num == wc.qp_num) {
@@ -654,6 +687,15 @@ void Engine::Close(LocalSharedPtr<Connection> c, absl::Status reason) {
   c->closing = true;
   c->handshake_done = true;
   if (c->error.ok()) c->error = std::move(reason);
+  // Queued work never reached hardware and can retire independently. Posted
+  // work keeps its lease until a CQE or successful QP destruction stops DMA.
+  for (auto* queue : {&c->send, &c->recv}) {
+    while (!queue->pending.empty()) {
+      auto operation = operations.at(queue->pending.front());
+      queue->pending.pop_front();
+      Finish(operation, c->error);
+    }
+  }
   if (c->cm_started) (void)rdma_disconnect(c->id);
   // External QPs are not transitioned by rdma_disconnect. Posting stops before
   // ERR, and CQ capacity is not returned until the QP is destroyed and drained.
@@ -678,6 +720,10 @@ void Engine::Progress(LocalSharedPtr<Connection> c) {
       auto* qp = std::exchange(c->qp, nullptr);
       CheckDestroy(ibv_destroy_qp(qp), "ibv_destroy_qp(RC)");
       DrainCq(*c->device);
+      // Providers may discard outstanding CQEs when destroying a QP. The
+      // destroy boundary stops hardware references even without flush CQEs.
+      while (!c->operations.empty())
+        Finish(operations.at(*c->operations.begin()), c->error);
       c->device->reserved -= c->budget;
       c->budget = 0;
       RetireFailedDevice(*c->device);
@@ -765,5 +811,125 @@ void Engine::AfterRingShutdown() {
     cm = nullptr;
   }
   worker = nullptr;
+}
+
+absl::StatusOr<LocalSharedPtr<Operation>> Engine::Submit(
+    const LocalSharedPtr<Connection>& c, const RegisteredMemorySlice& slice,
+    bool receive, bool try_only) {
+  if (stopping) return absl::CancelledError("RDMA worker is shutting down");
+  if (!OnOwner())
+    return absl::FailedPreconditionError(
+        "RDMA submission on a different worker");
+  if (c->closing || !c->established || !c->qp)
+    return c->error.ok()
+               ? absl::FailedPreconditionError("RDMA is not connected")
+               : c->error;
+  auto lease = slice.Acquire(
+      *c->qp, receive ? RdmaLocalAccess::kWrite : RdmaLocalAccess::kRead);
+  if (!lease.ok()) return lease.status();
+  auto& queue = receive ? c->recv : c->send;
+  const bool full = queue.posted == queue.capacity || !queue.pending.empty();
+  if (full && try_only)
+    return absl::ResourceExhaustedError("local RDMA QP queue is full");
+  if (next_operation == 0)
+    return absl::ResourceExhaustedError("RDMA operation IDs exhausted");
+  auto operation = MakeLocalShared<Operation>();
+  operation->connection = c;
+  operation->id = next_operation++;
+  operation->receive = receive;
+  operation->lease = std::move(*lease);
+  // Install ownership before posting. CQ processing only happens later in the
+  // reactor, never from Submit, even when hardware completes immediately.
+  operations.emplace(operation->id, operation);
+  c->operations.insert(operation->id);
+  if (full) {
+    queue.pending.push_back(operation->id);
+  } else {
+    auto status = Post(*c, *operation);
+    if (!status.ok()) {
+      c->operations.erase(operation->id);
+      operations.erase(operation->id);
+      return status;
+    }
+  }
+  return operation;
+}
+
+absl::Status Engine::Post(Connection& c, Operation& operation) {
+  // The lease stores an SGE value, not a caller descriptor/array address.
+  auto sge = operation.lease.sge();
+  int result;
+  if (operation.receive) {
+    ibv_recv_wr wr{};
+    wr.wr_id = operation.id;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    ibv_recv_wr* bad = nullptr;
+    result = ibv_post_recv(c.qp, &wr, &bad);
+  } else {
+    ibv_send_wr wr{};
+    wr.wr_id = operation.id;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.opcode = IBV_WR_SEND;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    ibv_send_wr* bad = nullptr;
+    result = ibv_post_send(c.qp, &wr, &bad);
+  }
+  // Local accounting already proved capacity. Even ENOMEM/EAGAIN here is a
+  // provider error, not evidence that a later CQE can make this WR postable.
+  if (result)
+    return absl::ErrnoToStatus(
+        result, operation.receive ? "ibv_post_recv" : "ibv_post_send");
+  operation.posted = true;
+  ++(operation.receive ? c.recv : c.send).posted;
+  return absl::OkStatus();
+}
+
+void Engine::Finish(LocalSharedPtr<Operation> operation,
+                    absl::StatusOr<std::size_t> result) {
+  if (operation->completed.ready) return;
+  if (auto c = operation->connection.lock()) {
+    c->operations.erase(operation->id);
+    if (operation->posted) {
+      auto& queue = operation->receive ? c->recv : c->send;
+      assert(queue.posted != 0);
+      --queue.posted;
+    }
+  }
+  operation->result = std::move(result);
+  operation->lease = {};
+  operations.erase(operation->id);
+  operation->completed.Publish(wake_worker());
+}
+
+void Engine::Advance(Connection& c, bool receive) {
+  auto& queue = receive ? c.recv : c.send;
+  while (!c.closing && queue.posted < queue.capacity &&
+         !queue.pending.empty()) {
+    auto operation = operations.at(queue.pending.front());
+    queue.pending.pop_front();
+    auto status = Post(c, *operation);
+    if (!status.ok()) Finish(operation, status);
+  }
+}
+
+absl::Status Engine::Cancel(const LocalSharedPtr<Operation>& operation) {
+  if (!OnOwner())
+    return absl::FailedPreconditionError(
+        "RDMA cancellation on a different worker");
+  if (operation->completed.ready) return absl::OkStatus();
+  auto c = operation->connection.lock();
+  assert(c);
+  auto reason = absl::CancelledError("RDMA operation cancelled");
+  if (operation->posted) {
+    Close(c, reason);
+  } else {
+    auto& queue = operation->receive ? c->recv : c->send;
+    std::erase(queue.pending, operation->id);
+    Finish(operation, reason);
+    Advance(*c, operation->receive);
+  }
+  return absl::OkStatus();
 }
 }  // namespace bycorf::rdma::detail

@@ -215,12 +215,15 @@ BYCORF_RDMA_TEST_IP=192.0.2.1 ctest --test-dir build-rdma \
 ```
 
 These exercise idle-worker connection events, private data, distinct worker
-contexts, shared CQ/PD ownership, refused connections and close/accept races.
+contexts, shared CQ/PD ownership, bidirectional SEND/RECV data and lengths,
+refused connections and close/accept races.
 The device-free `RcLoopFake` cases additionally inject notification races,
 provider capacity rounding, budget exhaustion, deadlines, CQ/device failures,
-and late events during cancellation and shutdown. They use real io_uring with
-link-time CM/verbs stubs. Data-transfer and immediate-data protocols remain
-outside these tests. No device is opened by unused workers or test discovery.
+and late events during cancellation and shutdown. They also check per-direction
+FIFO backpressure, descriptor snapshots, MR leases, post/flush failures,
+frame-owned payload retirement, and receive notification wakeups. They use real
+io_uring with link-time CM/verbs stubs. No device is opened by unused workers or
+test discovery.
 
 Use `Worker::OpenRdmaDevice(name)` or `AcquireRdmaDomain(owning_context)` on the
 owner worker, then `RegisterRdmaMemory(domain, backing_span, explicit_access)`.
@@ -242,6 +245,27 @@ An accepted connection stays on the listener's worker; moving a C++ handle
 does not move worker ownership. Private data is limited to 56 bytes; CM may
 report a padded peer-data length. The first connection fixes that worker/device
 CQ capacity, and subsequent connections must request the same capacity.
+
+Await `connection.Send(slice)` or `connection.Recv(slice)` for ordinary data
+transfers. Both return `StatusOr<size_t>`; receive reports the actual message
+length. The lazy tasks copy their descriptors before returning and submit when
+awaited. Register receive memory with `RdmaAccess::kLocalWrite`.
+`SubmitSend/Recv(slice)` admit immediately and return an `RcOperation` with
+`ready()`, `result()`, `Wait()` and `Cancel()`. Ordinary submission queues FIFO
+on local SQ/RQ exhaustion and advances automatically on completion;
+`TrySubmitSend/Recv` instead return `ResourceExhausted` without accepting work.
+Provider posting errors are terminal, not automatically retried.
+
+Each accepted operation retains its registration, including while queued, but
+the caller must keep payload alive through its terminal result. Descriptors may
+be changed or destroyed immediately after invocation. All sends request a
+completion; this permits local buffer reuse and does not imply peer application
+consumption. Dropping an operation handle does not cancel it. Cancelling queued
+work removes it independently; cancelling posted work closes the entire QP.
+Join completion or `Close()` before destroying suspended callers or payload;
+worker shutdown stops DMA and callbacks before reclaiming coroutine frames.
+The application decides when to post receives and manages receive credits,
+remote windows and business buffer pools. The runtime remains notification-driven.
 
 ## Run the examples
 

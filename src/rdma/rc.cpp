@@ -77,7 +77,63 @@ struct ConnectGuard {
     if (!delivered) Drop(state);
   }
 };
+
+Task<absl::StatusOr<std::size_t>> WaitOperation(
+    LocalSharedPtr<detail::Operation> operation) {
+  if (!operation)
+    co_return absl::FailedPreconditionError("empty RDMA operation");
+  auto status = co_await detail::Wait{operation->completed};
+  if (!status.ok()) co_return status;
+  co_return operation->result;
+}
+// Keep the ownership check in the caller's submission path even without LTO;
+// Engine::Submit is the out-of-line boundary for the actual admission work.
+[[gnu::always_inline]] inline absl::StatusOr<LocalSharedPtr<detail::Operation>>
+SubmitOperation(const LocalSharedPtr<detail::Connection>& connection,
+                const RegisteredMemorySlice& slice, bool receive,
+                bool try_only) {
+  assert(connection);
+  auto engine = connection->engine.lock();
+  if (!engine) [[unlikely]] {
+    return absl::CancelledError("RDMA owner is gone");
+  }
+  return engine->Submit(connection, slice, receive, try_only);
+}
+Task<absl::StatusOr<std::size_t>> Transfer(
+    LocalSharedPtr<detail::Connection> connection, RegisteredMemorySlice slice,
+    bool receive) {
+  auto operation = SubmitOperation(connection, slice, receive, false);
+  // The operation's lease is sufficient after admission. Do not keep an extra
+  // descriptor reference in a suspended frame past terminal completion.
+  slice = {};
+  if (!operation.ok()) co_return operation.status();
+  // Wait in this frame rather than constructing a second Task/frame just to
+  // install the completion waiter. The operation remains owned across suspend.
+  auto status = co_await detail::Wait{(*operation)->completed};
+  if (!status.ok()) co_return status;
+  co_return (*operation)->result;
+}
 }  // namespace
+
+bool RcOperation::ready() const noexcept {
+  return state_ && state_->completed.ready;
+}
+absl::StatusOr<std::size_t> RcOperation::result() const {
+  return state_ ? state_->result
+                : absl::StatusOr<std::size_t>(
+                      absl::FailedPreconditionError("empty RDMA operation"));
+}
+Task<absl::StatusOr<std::size_t>> RcOperation::Wait() {
+  return WaitOperation(state_);
+}
+absl::Status RcOperation::Cancel() {
+  if (!state_) return absl::FailedPreconditionError("empty RDMA operation");
+  if (ready()) return absl::OkStatus();
+  auto connection = state_->connection.lock();
+  auto engine = connection ? connection->engine.lock() : nullptr;
+  if (!engine) return absl::CancelledError("RDMA owner is gone");
+  return engine->Cancel(state_);
+}
 
 RcConnection::RcConnection(LocalSharedPtr<detail::Connection> state)
     : state_(std::move(state)) {}
@@ -136,6 +192,37 @@ std::span<const std::byte> RcConnection::peer_private_data() const noexcept {
 RdmaProtectionDomain RcConnection::protection_domain() const {
   return state_ && state_->device ? state_->device->domain
                                   : RdmaProtectionDomain{};
+}
+
+[[gnu::always_inline]] inline absl::StatusOr<RcOperation> RcConnection::Submit(
+    const RegisteredMemorySlice& slice, bool receive, bool try_only) {
+  auto operation = SubmitOperation(state_, slice, receive, try_only);
+  if (!operation.ok()) return operation.status();
+  return RcOperation(*operation);
+}
+absl::StatusOr<RcOperation> RcConnection::SubmitSend(
+    const RegisteredMemorySlice& slice) {
+  return Submit(slice, false, false);
+}
+absl::StatusOr<RcOperation> RcConnection::SubmitRecv(
+    const RegisteredMemorySlice& slice) {
+  return Submit(slice, true, false);
+}
+absl::StatusOr<RcOperation> RcConnection::TrySubmitSend(
+    const RegisteredMemorySlice& slice) {
+  return Submit(slice, false, true);
+}
+absl::StatusOr<RcOperation> RcConnection::TrySubmitRecv(
+    const RegisteredMemorySlice& slice) {
+  return Submit(slice, true, true);
+}
+Task<absl::StatusOr<std::size_t>> RcConnection::Send(
+    const RegisteredMemorySlice& slice) {
+  return Transfer(state_, slice, false);
+}
+Task<absl::StatusOr<std::size_t>> RcConnection::Recv(
+    const RegisteredMemorySlice& slice) {
+  return Transfer(state_, slice, true);
 }
 
 RcListener::RcListener(RcListener&&) noexcept = default;

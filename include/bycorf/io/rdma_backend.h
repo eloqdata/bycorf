@@ -64,13 +64,17 @@ class RdmaBackend {
   }
   // Stop admission before the ring shuts down. Tags/resources remain retained
   // until terminal completions or AfterRingShutdown confirms kernel quiescence.
-  void Shutdown() { rdma::detail::BeginShutdown(engine_); }
+  void Shutdown() {
+    stopped_ = true;
+    rdma::detail::BeginShutdown(engine_);
+  }
   void AfterRingShutdown() {
     rdma::detail::AfterRingShutdown(engine_);
     engine_.reset();
     resources_.Shutdown();
   }
   absl::StatusOr<LocalSharedPtr<rdma::detail::Engine>> GetRdmaEngine() {
+    if (stopped_) return absl::CancelledError("RDMA worker is shut down");
     if (!engine_) {
       auto created = rdma::detail::CreateEngine(static_cast<Owner&>(*this));
       if (!created.ok()) return created.status();
@@ -90,6 +94,7 @@ class RdmaBackend {
   }
   detail::RdmaResources resources_;
   LocalSharedPtr<rdma::detail::Engine> engine_;
+  bool stopped_ = false;
 };
 }  // namespace bycorf
 #endif  // BYCORF_ENABLE_RDMA

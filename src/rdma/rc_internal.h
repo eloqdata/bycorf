@@ -7,10 +7,12 @@
 #include <rdma/rdma_cma.h>
 
 #include <coroutine>
+#include <deque>
 #include <string>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "bycorf/base/inline_ring_queue.h"
 #include "bycorf/io/completion.h"
 #include "bycorf/rdma/rc.h"
@@ -56,6 +58,23 @@ struct Deadline final : IoCompletion {
   void Complete(Worker&, int result, unsigned flags) override;
 };
 
+struct Operation {
+  LocalWeakPtr<Connection> connection;
+  std::uint64_t id = 0;
+  bool receive = false;
+  bool posted = false;
+  RdmaMemoryLease lease;
+  Signal completed;
+  absl::StatusOr<std::size_t> result =
+      absl::FailedPreconditionError("RDMA operation is pending");
+};
+
+struct WorkQueue {
+  std::uint32_t capacity = 0;
+  std::uint32_t posted = 0;
+  std::deque<std::uint64_t> pending;
+};
+
 struct Connection {
   LocalWeakPtr<Engine> engine;
   LocalWeakPtr<Listener> listener;
@@ -63,6 +82,8 @@ struct Connection {
   ibv_qp* qp = nullptr;
   LocalSharedPtr<Device> device;
   std::uint64_t budget = 0;
+  WorkQueue send, recv;
+  absl::flat_hash_set<std::uint64_t> operations;
   RcOptions options;
   std::vector<std::byte> local_data, peer_data;
   Deadline timer;
@@ -136,6 +157,10 @@ class Engine {
   void RetireFailedDevice(Device& device);
   void BeginShutdown();
   void AfterRingShutdown();
+  absl::StatusOr<LocalSharedPtr<Operation>> Submit(
+      const LocalSharedPtr<Connection>& connection,
+      const RegisteredMemorySlice& slice, bool receive, bool try_only);
+  absl::Status Cancel(const LocalSharedPtr<Operation>& operation);
   bool OnOwner() const;
   Worker* wake_worker() const { return stopping ? nullptr : worker; }
 
@@ -147,6 +172,9 @@ class Engine {
   absl::flat_hash_map<rdma_cm_id*, LocalSharedPtr<Connection>> connections;
   absl::flat_hash_map<rdma_cm_id*, LocalSharedPtr<Listener>> listeners;
   absl::flat_hash_map<std::string, LocalSharedPtr<Device>> devices;
+  // Monotonic IDs are never reused: CQ batches read before a reentrant
+  // close may still contain entries for operations retired by QP destruction.
+  absl::flat_hash_map<std::uint64_t, LocalSharedPtr<Operation>> operations;
 
  private:
   absl::Status StartTimer(const LocalSharedPtr<Connection>& connection);
@@ -158,6 +186,11 @@ class Engine {
   void Established(const LocalSharedPtr<Connection>& connection);
   void FailAll(const absl::Status& error);
   void DrainNotifications(Device& device, bool rearm);
+  std::uint64_t next_operation = 1;
+  absl::Status Post(Connection& connection, Operation& operation);
+  void Finish(LocalSharedPtr<Operation> operation,
+              absl::StatusOr<std::size_t> result);
+  void Advance(Connection& connection, bool receive);
 };
 
 absl::Status ErrnoStatus(const char* operation);
