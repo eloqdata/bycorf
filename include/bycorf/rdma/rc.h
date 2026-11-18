@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -25,6 +26,7 @@ namespace detail {
 struct Connection;
 struct Listener;
 struct Operation;
+struct Request;
 class Engine;
 class RcTestPeer;
 }  // namespace detail
@@ -39,7 +41,26 @@ struct RcOptions {
   std::chrono::milliseconds connect_timeout{5000};
 };
 
-// Owner-worker-only handle for one accepted SEND or RECV. The engine retains
+enum class RcCompletionKind {
+  kSend,
+  kRecv,
+  kRead,
+  kWrite,
+  kRecvWriteWithImm,
+};
+
+// Successful local completion. kRecv covers SEND with or without immediate
+// data; kRecvWriteWithImm is a notification, whose payload was written to the
+// remote address rather than this receive WR's buffer. bytes is the actual
+// transfer length in both cases. immediate is present only on receives carrying
+// IBV_WC_WITH_IMM, and is always in host byte order (including a valid zero).
+struct RcCompletion {
+  RcCompletionKind kind;
+  std::size_t bytes;
+  std::optional<std::uint32_t> immediate;
+};
+
+// Owner-worker-only handle for one accepted data operation. The engine retains
 // its state and MR lease even if this handle is dropped. Caller-owned payload
 // must survive until terminal completion; dropping a handle does not cancel.
 class RcOperation {
@@ -51,12 +72,12 @@ class RcOperation {
   RcOperation& operator=(const RcOperation&) = delete;
 
   bool ready() const noexcept;
-  // FailedPrecondition before completion or on an empty handle. Success is
-  // bytes sent / actually received. Only local buffer reuse is guaranteed;
-  // SEND completion does not mean the peer application has consumed the data.
-  absl::StatusOr<std::size_t> result() const;
+  // FailedPrecondition before completion or on an empty handle. Only local
+  // buffer reuse is guaranteed; a local send/write completion does not mean
+  // the peer application has consumed the data.
+  absl::StatusOr<RcCompletion> result() const;
   // One waiter at a time. Copies state before returning the lazy task.
-  Task<absl::StatusOr<std::size_t>> Wait();
+  Task<absl::StatusOr<RcCompletion>> Wait();
   // Queued work is removed independently. Verbs cannot cancel a single posted
   // RC WR: cancelling posted work closes the connection and fails its other
   // operations. Await Wait() (or connection.Close()) before freeing payload.
@@ -117,15 +138,55 @@ class RcConnection {
   // Lazy coroutine adapters copy the slice at invocation and submit when
   // awaited. Backpressure is automatic. Keep payload alive until completion;
   // cancel/close and join before destroying a suspended caller frame.
-  Task<absl::StatusOr<std::size_t>> Send(const RegisteredMemorySlice& slice);
-  Task<absl::StatusOr<std::size_t>> Recv(const RegisteredMemorySlice& slice);
+  Task<absl::StatusOr<RcCompletion>> Send(const RegisteredMemorySlice& slice);
+  Task<absl::StatusOr<RcCompletion>> Recv(const RegisteredMemorySlice& slice);
+
+  // RDMA transfers use slice.size() bytes starting at remote.address, checked
+  // against remote.length. READ requires local-write registration. The remote
+  // descriptor is non-owning: its memory, rkey validity and permissions remain
+  // the peer protocol's responsibility. Await READ before submitting operations
+  // that depend on its result; no implicit fences or remote credits are added.
+  absl::StatusOr<RcOperation> SubmitRead(const RegisteredMemorySlice& slice,
+                                         const RemoteMemoryRegion& remote);
+  absl::StatusOr<RcOperation> SubmitWrite(const RegisteredMemorySlice& slice,
+                                          const RemoteMemoryRegion& remote);
+  absl::StatusOr<RcOperation> TrySubmitRead(const RegisteredMemorySlice& slice,
+                                            const RemoteMemoryRegion& remote);
+  absl::StatusOr<RcOperation> TrySubmitWrite(const RegisteredMemorySlice& slice,
+                                             const RemoteMemoryRegion& remote);
+  Task<absl::StatusOr<RcCompletion>> Read(const RegisteredMemorySlice& slice,
+                                          const RemoteMemoryRegion& remote);
+  Task<absl::StatusOr<RcCompletion>> Write(const RegisteredMemorySlice& slice,
+                                           const RemoteMemoryRegion& remote);
+
+  // Immediate values are host-order at every public boundary. Both variants
+  // consume one peer-posted receive WR. WRITE_WITH_IMM writes the remote region
+  // and delivers a notification; it does not fill that receive WR's buffer.
+  // Like SEND/RECV, these methods snapshot descriptors before returning, queue
+  // on local SQ exhaustion (except TrySubmit), and request local completions.
+  absl::StatusOr<RcOperation> SubmitSendWithImm(
+      const RegisteredMemorySlice& slice, std::uint32_t immediate);
+  absl::StatusOr<RcOperation> TrySubmitSendWithImm(
+      const RegisteredMemorySlice& slice, std::uint32_t immediate);
+  Task<absl::StatusOr<RcCompletion>> SendWithImm(
+      const RegisteredMemorySlice& slice, std::uint32_t immediate);
+  absl::StatusOr<RcOperation> SubmitWriteWithImm(
+      const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote,
+      std::uint32_t immediate);
+  absl::StatusOr<RcOperation> TrySubmitWriteWithImm(
+      const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote,
+      std::uint32_t immediate);
+  Task<absl::StatusOr<RcCompletion>> WriteWithImm(
+      const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote,
+      std::uint32_t immediate);
 
  private:
   friend class RcListener;
   friend class detail::RcTestPeer;
   explicit RcConnection(LocalSharedPtr<detail::Connection> state);
   absl::StatusOr<RcOperation> Submit(const RegisteredMemorySlice& slice,
-                                     bool receive, bool try_only);
+                                     const detail::Request& request,
+                                     bool try_only);
   static Task<absl::StatusOr<RcConnection>> ConnectImpl(
       LocalSharedPtr<detail::Engine> engine, sockaddr_storage address,
       RcOptions options, std::vector<std::byte> data);

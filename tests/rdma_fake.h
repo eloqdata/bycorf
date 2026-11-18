@@ -20,6 +20,7 @@ void HoldTransfers(bool hold);
 void DropFlush(bool drop);
 int LiveMrs();
 int Posts(bool receive);
+std::uint32_t WireImmediate();
 // Suppress the next notification's fd wake, retaining the CQ event. A test may
 // write to the returned fd from another thread without accessing fake state.
 int DeferNotification(ibv_cq* cq);

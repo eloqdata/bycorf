@@ -53,6 +53,50 @@ rdma_conn_param Parameters(const Connection& c) {
   p.qp_num = c.qp->qp_num;
   return p;
 }
+
+absl::StatusOr<RcCompletion> Decode(const Operation& operation,
+                                    const ibv_wc& wc) {
+  RcCompletion result{};
+  result.bytes = operation.lease.sge().length;
+  ibv_wc_opcode expected;
+  switch (operation.request.opcode) {
+    case Opcode::kRecv:
+      result.bytes = wc.byte_len;
+      if (wc.opcode == IBV_WC_RECV) {
+        result.kind = RcCompletionKind::kRecv;
+        if (wc.byte_len > operation.lease.sge().length)
+          return absl::InternalError(
+              "RDMA receive length exceeds posted buffer");
+      } else if (wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM &&
+                 (wc.wc_flags & IBV_WC_WITH_IMM)) {
+        // This length describes the remote write, not bytes in the receive SGE.
+        result.kind = RcCompletionKind::kRecvWriteWithImm;
+      } else {
+        return absl::InternalError("unexpected RDMA receive completion type");
+      }
+      if (wc.wc_flags & IBV_WC_WITH_IMM) result.immediate = ntohl(wc.imm_data);
+      return result;
+    case Opcode::kSend:
+    case Opcode::kSendWithImm:
+      result.kind = RcCompletionKind::kSend;
+      expected = IBV_WC_SEND;
+      break;
+    case Opcode::kRead:
+      result.kind = RcCompletionKind::kRead;
+      expected = IBV_WC_RDMA_READ;
+      break;
+    case Opcode::kWrite:
+    case Opcode::kWriteWithImm:
+      result.kind = RcCompletionKind::kWrite;
+      expected = IBV_WC_RDMA_WRITE;
+      break;
+    default:
+      std::terminate();  // Request opcodes are constructed only by this API.
+  }
+  if (wc.opcode != expected)
+    return absl::InternalError("unexpected RDMA send completion type");
+  return result;
+}
 }  // namespace
 
 absl::Status ErrnoStatus(const char* operation) {
@@ -296,6 +340,12 @@ absl::Status Engine::Transition(Connection& c, ibv_qp_state state) {
   int mask = 0;
   if (rdma_init_qp_attr(c.id, &attr, &mask))
     return ErrnoStatus("rdma_init_qp_attr");
+  if (state == IBV_QPS_INIT) {
+    // CM supplies path attributes for this external QP. Enable RC remote
+    // operations here; individual MRs still enforce their explicit permissions.
+    attr.qp_access_flags = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
+    mask |= IBV_QP_ACCESS_FLAGS;
+  }
   if (state == IBV_QPS_RTR) attr.max_dest_rd_atomic = c.responder_resources;
   if (state == IBV_QPS_RTS) attr.max_rd_atomic = c.initiator_depth;
   const int result = ibv_modify_qp(c.qp, &attr, mask);
@@ -536,20 +586,14 @@ void Engine::DrainCq(Device& device) {
           Close(c, error);
         } else if (c->closing) {
           Finish(operation, c->error);
-        } else if ((operation->receive && (wc.opcode != IBV_WC_RECV ||
-                                           (wc.wc_flags & IBV_WC_WITH_IMM))) ||
-                   (!operation->receive && wc.opcode != IBV_WC_SEND)) {
-          // Immediate-data operations are not part of this API yet. Never
-          // silently interpret a notification as ordinary SEND payload.
-          auto error =
-              absl::UnimplementedError("unexpected RDMA completion type");
-          Finish(operation, error);
-          Close(c, error);
         } else {
-          const auto bytes =
-              operation->receive ? wc.byte_len : operation->lease.sge().length;
-          Finish(operation, bytes);
-          Advance(*c, operation->receive);
+          auto result = Decode(*operation, wc);
+          const auto status = result.status();
+          Finish(operation, std::move(result));
+          if (!status.ok())
+            Close(c, status);
+          else
+            Advance(*c, operation->receive());
         }
         continue;
       }
@@ -815,7 +859,7 @@ void Engine::AfterRingShutdown() {
 
 absl::StatusOr<LocalSharedPtr<Operation>> Engine::Submit(
     const LocalSharedPtr<Connection>& c, const RegisteredMemorySlice& slice,
-    bool receive, bool try_only) {
+    const Request& request, bool try_only) {
   if (stopping) return absl::CancelledError("RDMA worker is shutting down");
   if (!OnOwner())
     return absl::FailedPreconditionError(
@@ -824,10 +868,19 @@ absl::StatusOr<LocalSharedPtr<Operation>> Engine::Submit(
     return c->error.ok()
                ? absl::FailedPreconditionError("RDMA is not connected")
                : c->error;
-  auto lease = slice.Acquire(
-      *c->qp, receive ? RdmaLocalAccess::kWrite : RdmaLocalAccess::kRead);
+  auto lease =
+      slice.Acquire(*c->qp, request.receive() || request.opcode == Opcode::kRead
+                                ? RdmaLocalAccess::kWrite
+                                : RdmaLocalAccess::kRead);
   if (!lease.ok()) return lease.status();
-  auto& queue = receive ? c->recv : c->send;
+  if (request.remote_access()) {
+    auto range = request.remote.Slice(0, lease->sge().length);
+    if (!range.ok()) return range.status();
+  }
+  if (request.opcode == Opcode::kRead && c->initiator_depth == 0)
+    return absl::FailedPreconditionError(
+        "peer negotiated no RDMA read capacity");
+  auto& queue = request.receive() ? c->recv : c->send;
   const bool full = queue.posted == queue.capacity || !queue.pending.empty();
   if (full && try_only)
     return absl::ResourceExhaustedError("local RDMA QP queue is full");
@@ -836,7 +889,7 @@ absl::StatusOr<LocalSharedPtr<Operation>> Engine::Submit(
   auto operation = MakeLocalShared<Operation>();
   operation->connection = c;
   operation->id = next_operation++;
-  operation->receive = receive;
+  operation->request = request;
   operation->lease = std::move(*lease);
   // Install ownership before posting. CQ processing only happens later in the
   // reactor, never from Submit, even when hardware completes immediately.
@@ -859,7 +912,7 @@ absl::Status Engine::Post(Connection& c, Operation& operation) {
   // The lease stores an SGE value, not a caller descriptor/array address.
   auto sge = operation.lease.sge();
   int result;
-  if (operation.receive) {
+  if (operation.receive()) {
     ibv_recv_wr wr{};
     wr.wr_id = operation.id;
     wr.sg_list = &sge;
@@ -871,7 +924,32 @@ absl::Status Engine::Post(Connection& c, Operation& operation) {
     wr.wr_id = operation.id;
     wr.sg_list = &sge;
     wr.num_sge = 1;
-    wr.opcode = IBV_WR_SEND;
+    switch (operation.request.opcode) {
+      case Opcode::kSend:
+        wr.opcode = IBV_WR_SEND;
+        break;
+      case Opcode::kSendWithImm:
+        wr.opcode = IBV_WR_SEND_WITH_IMM;
+        break;
+      case Opcode::kRead:
+        wr.opcode = IBV_WR_RDMA_READ;
+        break;
+      case Opcode::kWrite:
+        wr.opcode = IBV_WR_RDMA_WRITE;
+        break;
+      case Opcode::kWriteWithImm:
+        wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+        break;
+      case Opcode::kRecv:
+        std::terminate();
+    }
+    if (operation.request.remote_access()) {
+      wr.wr.rdma.remote_addr = operation.request.remote.address;
+      wr.wr.rdma.rkey = operation.request.remote.rkey;
+    }
+    if (operation.request.opcode == Opcode::kSendWithImm ||
+        operation.request.opcode == Opcode::kWriteWithImm)
+      wr.imm_data = htonl(operation.request.immediate);
     wr.send_flags = IBV_SEND_SIGNALED;
     ibv_send_wr* bad = nullptr;
     result = ibv_post_send(c.qp, &wr, &bad);
@@ -880,19 +958,19 @@ absl::Status Engine::Post(Connection& c, Operation& operation) {
   // provider error, not evidence that a later CQE can make this WR postable.
   if (result)
     return absl::ErrnoToStatus(
-        result, operation.receive ? "ibv_post_recv" : "ibv_post_send");
+        result, operation.receive() ? "ibv_post_recv" : "ibv_post_send");
   operation.posted = true;
-  ++(operation.receive ? c.recv : c.send).posted;
+  ++(operation.receive() ? c.recv : c.send).posted;
   return absl::OkStatus();
 }
 
 void Engine::Finish(LocalSharedPtr<Operation> operation,
-                    absl::StatusOr<std::size_t> result) {
+                    absl::StatusOr<RcCompletion> result) {
   if (operation->completed.ready) return;
   if (auto c = operation->connection.lock()) {
     c->operations.erase(operation->id);
     if (operation->posted) {
-      auto& queue = operation->receive ? c->recv : c->send;
+      auto& queue = operation->receive() ? c->recv : c->send;
       assert(queue.posted != 0);
       --queue.posted;
     }
@@ -925,10 +1003,10 @@ absl::Status Engine::Cancel(const LocalSharedPtr<Operation>& operation) {
   if (operation->posted) {
     Close(c, reason);
   } else {
-    auto& queue = operation->receive ? c->recv : c->send;
+    auto& queue = operation->receive() ? c->recv : c->send;
     std::erase(queue.pending, operation->id);
     Finish(operation, reason);
-    Advance(*c, operation->receive);
+    Advance(*c, operation->receive());
   }
   return absl::OkStatus();
 }

@@ -25,7 +25,7 @@ and asynchronous I/O. Abseil supplies status types and spdlog supplies logging.
 | Runtime | Worker lifecycle, coroutine scheduling, sleep coordination, cross-worker and foreign ingress | [Runtime](runtime.md) |
 | I/O | Worker-owned shared io_uring, network/storage adapters, optional SPDK storage, shared DPDK environment | [I/O backends](io.md) |
 | Networking | Listeners, streams, services, TLS, optional DPDK/FreeBSD IPv4 TCP | [Networking](networking.md) |
-| RDMA | Worker-owned RC connections, SEND/RECV with local queue backpressure, CM/QP lifecycle, shared CQ notifications and memory registration | [RDMA](rdma.md) |
+| RDMA | Worker-owned RC connections, SEND/RECV/READ/WRITE and immediate data with local queue backpressure, CM/QP lifecycle, shared CQ notifications and memory registration | [RDMA](rdma.md) |
 | RPC | Framed request/reply protocol above streams | [RPC](rpc.md) |
 
 Each connection and its coroutines have one worker owner. Key ownership and

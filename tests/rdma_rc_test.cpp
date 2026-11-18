@@ -1,6 +1,7 @@
 // Copyright (C) 2026 EloqData Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -8,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -270,7 +272,7 @@ TEST_F(RcLoop, BidirectionalSendRecvOnSharedCq) {
   std::array<std::array<std::byte, 16>, 4> destination{};
   std::array<RcConnection*, 4> peers{&first->first, &first->second,
                                      &second->first, &second->second};
-  std::array<std::optional<absl::StatusOr<std::size_t>>, 4> sent, received;
+  std::array<std::optional<absl::StatusOr<RcCompletion>>, 4> sent, received;
   for (unsigned i = 0; i < peers.size(); ++i) {
     std::fill(source[i].begin(), source[i].end(),
               std::byte{static_cast<unsigned char>(i + 1)});
@@ -291,8 +293,8 @@ TEST_F(RcLoop, BidirectionalSendRecvOnSharedCq) {
   for (unsigned i = 0; i < peers.size(); ++i) {
     ASSERT_TRUE(sent[i]->ok()) << sent[i]->status();
     ASSERT_TRUE(received[i]->ok()) << received[i]->status();
-    EXPECT_EQ(**sent[i], source[i].size());
-    EXPECT_EQ(**received[i], source[i].size());
+    EXPECT_EQ((*sent[i])->bytes, source[i].size());
+    EXPECT_EQ((*received[i])->bytes, source[i].size());
     EXPECT_TRUE(
         std::equal(source[i].begin(), source[i].end(), destination[i].begin()));
     EXPECT_EQ(destination[i].back(), std::byte{0});
@@ -313,7 +315,345 @@ TEST_F(RcLoop, ReceiveValidatesRegistrationBeforePosting) {
   EXPECT_FALSE(Run(send->Wait()).ok());
 }
 
+TEST_F(RcLoop, ReadWriteWithoutReceiveCreditsAndLazyDescriptorSnapshots) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok()) << pair.status();
+  std::array<std::byte, 8> input{}, output{};
+  std::array<std::byte, 32> remote_bytes{};
+  for (unsigned i = 0; i < input.size(); ++i)
+    input[i] = static_cast<std::byte>(i + 1);
+  auto source = Buffer(pair->first, input, RdmaAccess::kNone);
+  auto target = Buffer(pair->first, output);
+  auto remote_memory =
+      Buffer(pair->second, remote_bytes,
+             RdmaAccess::kLocalWrite | RdmaAccess::kRemoteRead |
+                 RdmaAccess::kRemoteWrite);
+  auto exported = remote_memory.RemoteRegion(RdmaAccess::kRemoteRead |
+                                             RdmaAccess::kRemoteWrite);
+  ASSERT_TRUE(exported.ok());
+  auto region = *exported->Slice(5, 12);
+  auto writing = pair->first.Write(source, region);
+  source = {};
+  region = {};
+  auto written = Run(std::move(writing));
+  ASSERT_TRUE(written.ok()) << written.status();
+  EXPECT_EQ(written->kind, RcCompletionKind::kWrite);
+  EXPECT_EQ(written->bytes, input.size());
+  EXPECT_FALSE(written->immediate);
+  EXPECT_TRUE(std::equal(input.begin(), input.end(), remote_bytes.begin() + 5));
+  EXPECT_EQ(remote_bytes[4], std::byte{0});
+  EXPECT_EQ(remote_bytes[13], std::byte{0});
+  region = *exported->Slice(5, input.size());
+  auto reading = pair->first.Read(target, region);
+  target = {};
+  region = {};
+  auto read = Run(std::move(reading));
+  ASSERT_TRUE(read.ok()) << read.status();
+  EXPECT_EQ(read->kind, RcCompletionKind::kRead);
+  EXPECT_EQ(read->bytes, input.size());
+  EXPECT_FALSE(read->immediate);
+  EXPECT_EQ(input, output);
+  EXPECT_EQ(Peer::State(pair->second)->recv.posted, 0);
+  EXPECT_TRUE(Peer::State(pair->second)->recv.pending.empty());
+}
+
+TEST_F(RcLoop, ImmediateMessagesAndWriteNotificationsUseDifferentDestinations) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 8> input{std::byte{1}, std::byte{2}, std::byte{3},
+                                 std::byte{4}};
+  std::array<std::byte, 16> message{}, remote_bytes{};
+  std::array<std::byte, 1> notification{std::byte{0x7f}};
+  auto source = Buffer(pair->first, input, RdmaAccess::kNone);
+  auto receive = Buffer(pair->second, message);
+  auto notify = Buffer(pair->second, notification);
+  auto remote_memory =
+      Buffer(pair->second, remote_bytes,
+             RdmaAccess::kLocalWrite | RdmaAccess::kRemoteWrite);
+  auto exported = remote_memory.RemoteRegion(RdmaAccess::kRemoteWrite);
+  ASSERT_TRUE(exported.ok());
+  const auto region = *exported->Slice(3, input.size());
+  for (std::uint32_t imm : {0U, 0x01020304U, 0xffffffffU}) {
+    auto receiving = pair->second.SubmitRecv(receive);
+    ASSERT_TRUE(receiving.ok());
+    auto sent = Run(pair->first.SendWithImm(source, imm));
+    ASSERT_TRUE(sent.ok()) << sent.status();
+    EXPECT_EQ(sent->kind, RcCompletionKind::kSend);
+    EXPECT_EQ(sent->bytes, input.size());
+    EXPECT_FALSE(sent->immediate);
+    auto received = Run(receiving->Wait());
+    ASSERT_TRUE(received.ok());
+    EXPECT_EQ(received->kind, RcCompletionKind::kRecv);
+    EXPECT_EQ(received->bytes, input.size());
+    ASSERT_TRUE(received->immediate.has_value());
+    EXPECT_EQ(*received->immediate, imm);
+    EXPECT_TRUE(std::equal(input.begin(), input.end(), message.begin()));
 #ifdef BYCORF_RDMA_FAKE
+    EXPECT_EQ(rdma_fake::WireImmediate(), htonl(imm));
+#endif
+    auto notifying = pair->second.SubmitRecv(notify);
+    ASSERT_TRUE(notifying.ok());
+    auto written = Run(pair->first.WriteWithImm(source, region, imm));
+    ASSERT_TRUE(written.ok()) << written.status();
+    EXPECT_EQ(written->kind, RcCompletionKind::kWrite);
+    EXPECT_EQ(written->bytes, input.size());
+    EXPECT_FALSE(written->immediate);
+    auto notified = Run(notifying->Wait());
+    ASSERT_TRUE(notified.ok()) << notified.status();
+    EXPECT_EQ(notified->kind, RcCompletionKind::kRecvWriteWithImm);
+    EXPECT_EQ(notified->bytes, input.size());
+    ASSERT_TRUE(notified->immediate.has_value());
+    EXPECT_EQ(*notified->immediate, imm);
+    EXPECT_EQ(notification.front(), std::byte{0x7f});
+    EXPECT_TRUE(
+        std::equal(input.begin(), input.end(), remote_bytes.begin() + 3));
+    EXPECT_EQ(remote_bytes[2], std::byte{0});
+    EXPECT_EQ(remote_bytes[11], std::byte{0});
+#ifdef BYCORF_RDMA_FAKE
+    EXPECT_EQ(rdma_fake::WireImmediate(), htonl(imm));
+#endif
+  }
+  // A plain receive never reports stale immediate data from a previous CQE.
+  auto receiving = pair->second.SubmitRecv(receive);
+  ASSERT_TRUE(receiving.ok());
+  ASSERT_TRUE(Run(pair->first.Send(source)).ok());
+  auto plain = Run(receiving->Wait());
+  ASSERT_TRUE(plain.ok());
+  EXPECT_EQ(plain->kind, RcCompletionKind::kRecv);
+  EXPECT_FALSE(plain->immediate);
+}
+
+#ifdef BYCORF_RDMA_FAKE
+TEST_F(RcLoop, MixedSqFifoSnapshotsAndQueuedCancellation) {
+  RcOptions options;
+  options.send_wr = options.recv_wr = 1;
+  auto pair = Pair(options);
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 4> input{std::byte{10}, std::byte{20}, std::byte{30},
+                                 std::byte{40}};
+  std::array<std::byte, 2> remote_bytes{};
+  std::array<std::byte, 1> output{};
+  std::array<std::byte, 3> messages{std::byte{0}, std::byte{0},
+                                    std::byte{0x7f}};
+  auto source = Buffer(pair->first, input, RdmaAccess::kNone);
+  auto target = Buffer(pair->first, output);
+  auto receives = Buffer(pair->second, messages);
+  auto remote_memory =
+      Buffer(pair->second, remote_bytes,
+             RdmaAccess::kLocalWrite | RdmaAccess::kRemoteRead |
+                 RdmaAccess::kRemoteWrite);
+  auto region = *remote_memory.RemoteRegion(RdmaAccess::kRemoteRead |
+                                            RdmaAccess::kRemoteWrite);
+  auto send = pair->first.SubmitSend(*source.Slice(0, 1));
+  auto write = pair->first.SubmitWrite(*source.Slice(1, 1), region);
+  auto cancelled = pair->first.SubmitWrite(*source.Slice(3, 1), region);
+  auto read = pair->first.SubmitRead(target, region);
+  std::uint32_t imm = 0x01020304;
+  auto send_imm = pair->first.SubmitSendWithImm(*source.Slice(2, 1), imm);
+  region = *region.Slice(1, 1);
+  auto write_imm =
+      pair->first.SubmitWriteWithImm(*source.Slice(3, 1), region, imm + 1);
+  ASSERT_TRUE(send.ok() && write.ok() && cancelled.ok() && read.ok() &&
+              send_imm.ok() && write_imm.ok());
+  EXPECT_EQ(Peer::State(pair->first)->send.posted, 1);
+  EXPECT_EQ(Peer::State(pair->first)->send.pending.size(), 5);
+  EXPECT_TRUE(absl::IsResourceExhausted(
+      pair->first.TrySubmitRead(target, region).status()));
+  EXPECT_TRUE(absl::IsResourceExhausted(
+      pair->first.TrySubmitWrite(*source.Slice(0, 1), region).status()));
+  EXPECT_TRUE(absl::IsResourceExhausted(
+      pair->first.TrySubmitSendWithImm(source, imm).status()));
+  EXPECT_TRUE(absl::IsResourceExhausted(
+      pair->first.TrySubmitWriteWithImm(*source.Slice(0, 1), region, imm)
+          .status()));
+  EXPECT_TRUE(cancelled->Cancel().ok());
+  region = {};
+  imm = 0;
+  source = target = {};
+  std::vector<RcOperation> receiving;
+  for (unsigned i = 0; i < messages.size(); ++i) {
+    auto op = pair->second.SubmitRecv(*receives.Slice(i, 1));
+    ASSERT_TRUE(op.ok());
+    receiving.push_back(std::move(*op));
+  }
+  Until([&] { return write_imm->ready() && receiving.back().ready(); });
+  for (auto* op : {&*send, &*write, &*read, &*send_imm, &*write_imm}) {
+    ASSERT_TRUE(op->result().ok()) << op->result().status();
+    EXPECT_EQ(op->result()->bytes, 1);
+    EXPECT_FALSE(op->result()->immediate);
+  }
+  EXPECT_EQ(read->result()->kind, RcCompletionKind::kRead);
+  EXPECT_EQ(write->result()->kind, RcCompletionKind::kWrite);
+  EXPECT_EQ(output[0], std::byte{20});
+  EXPECT_EQ(remote_bytes[0], std::byte{20});
+  EXPECT_EQ(remote_bytes[1], std::byte{40});
+  EXPECT_EQ(messages[0], std::byte{10});
+  EXPECT_EQ(messages[1], std::byte{30});
+  EXPECT_EQ(messages[2], std::byte{0x7f});
+  EXPECT_FALSE(receiving[0].result()->immediate);
+  EXPECT_EQ(receiving[1].result()->kind, RcCompletionKind::kRecv);
+  EXPECT_EQ(receiving[1].result()->immediate, 0x01020304U);
+  EXPECT_EQ(receiving[2].result()->kind, RcCompletionKind::kRecvWriteWithImm);
+  EXPECT_EQ(receiving[2].result()->immediate, 0x01020305U);
+  EXPECT_TRUE(absl::IsCancelled(cancelled->result().status()));
+  EXPECT_TRUE(Peer::State(pair->first)->operations.empty());
+  EXPECT_TRUE(Peer::State(pair->second)->operations.empty());
+}
+
+TEST_F(RcLoop, WriteWithImmWaitsForExplicitReceiveCredit) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 4> input{std::byte{42}}, output{};
+  std::array<std::byte, 1> notification{std::byte{0x7f}};
+  auto source = Buffer(pair->first, input, RdmaAccess::kNone);
+  auto remote_memory = Buffer(
+      pair->second, output, RdmaAccess::kLocalWrite | RdmaAccess::kRemoteWrite);
+  auto region = *remote_memory.RemoteRegion(RdmaAccess::kRemoteWrite);
+  auto write = pair->first.TrySubmitWriteWithImm(source, region, 123);
+  ASSERT_TRUE(write.ok());
+  for (int i = 0; i < 8; ++i) worker.RunOnce(false);
+  EXPECT_FALSE(write->ready());
+  EXPECT_EQ(rdma_fake::Posts(true), 0);
+  auto receive = pair->second.TrySubmitRecv(Buffer(pair->second, notification));
+  ASSERT_TRUE(receive.ok());
+  EXPECT_TRUE(Run(write->Wait()).ok());
+  auto result = Run(receive->Wait());
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result->kind, RcCompletionKind::kRecvWriteWithImm);
+  EXPECT_EQ(result->immediate, 123U);
+  EXPECT_EQ(output, input);
+  EXPECT_EQ(notification[0], std::byte{0x7f});
+}
+
+TEST_F(RcLoop, RemoteRangesReadPermissionsAndNegotiatedCapacityFailBeforePost) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 8> local{}, remote_bytes{};
+  auto writable = Buffer(pair->first, local);
+  auto readonly = Buffer(pair->first, local, RdmaAccess::kNone);
+  auto memory = Buffer(pair->second, remote_bytes,
+                       RdmaAccess::kLocalWrite | RdmaAccess::kRemoteRead |
+                           RdmaAccess::kRemoteWrite);
+  const auto region =
+      *memory.RemoteRegion(RdmaAccess::kRemoteRead | RdmaAccess::kRemoteWrite);
+  const int posts = rdma_fake::Posts(false);
+  for (const RemoteMemoryRegion bad :
+       {RemoteMemoryRegion{},
+        RemoteMemoryRegion{region.address, 7, region.rkey},
+        RemoteMemoryRegion{std::numeric_limits<std::uint64_t>::max() - 1, 8,
+                           region.rkey}}) {
+    EXPECT_TRUE(absl::IsInvalidArgument(
+        pair->first.SubmitRead(writable, bad).status()));
+    EXPECT_TRUE(absl::IsInvalidArgument(
+        pair->first.SubmitWrite(readonly, bad).status()));
+    EXPECT_TRUE(absl::IsInvalidArgument(
+        pair->first.SubmitWriteWithImm(readonly, bad, 1).status()));
+  }
+  EXPECT_TRUE(absl::IsPermissionDenied(
+      pair->first.SubmitRead(readonly, region).status()));
+  auto state = Peer::State(pair->first);
+  const auto depth = state->initiator_depth;
+  state->initiator_depth = 0;
+  EXPECT_TRUE(absl::IsFailedPrecondition(
+      pair->first.SubmitRead(writable, region).status()));
+  state->initiator_depth = depth;
+  EXPECT_EQ(rdma_fake::Posts(false), posts);
+  EXPECT_TRUE(state->operations.empty());
+}
+
+TEST_F(RcLoop, RemoteAccessErrorsCompleteWithoutRetryAndCloseQp) {
+  for (int failure = 0; failure < 3; ++failure) {
+    auto pair = Pair();
+    ASSERT_TRUE(pair.ok());
+    std::array<std::byte, 4> local{}, remote_bytes{};
+    auto buffer = Buffer(pair->first, local);
+    // Export a descriptor for read-only remote memory, then deliberately issue
+    // WRITE or corrupt its key/range to exercise provider completion failures.
+    auto memory = Buffer(pair->second, remote_bytes, RdmaAccess::kRemoteRead);
+    auto region = *memory.RemoteRegion(RdmaAccess::kRemoteRead);
+    if (failure == 1) region.rkey ^= 0x80000000U;
+    if (failure == 2) ++region.address;
+    auto op = failure == 0 ? pair->first.TrySubmitWrite(buffer, region)
+                           : pair->first.TrySubmitRead(buffer, region);
+    ASSERT_TRUE(op.ok()) << op.status();
+    auto result = Run(op->Wait());
+    EXPECT_TRUE(absl::IsUnavailable(result.status()));
+    EXPECT_NE(std::string(result.status().message()).find("remote access"),
+              std::string::npos);
+    EXPECT_FALSE(pair->first.IsOpen());
+    Until([&] { return Peer::State(pair->second)->closed; });
+    EXPECT_EQ(remote_bytes, (std::array<std::byte, 4>{}));
+  }
+}
+
+TEST_F(RcLoop, NewOpcodesRetainLeasesThroughFlushAndShutdown) {
+  for (bool shutdown : {false, true}) {
+    rdma_fake::HoldTransfers(true);
+    RcOptions options;
+    options.send_wr = 4;
+    options.recv_wr = 1;
+    auto pair = Pair(options);
+    ASSERT_TRUE(pair.ok());
+    std::array<std::byte, 8> local{}, remote_bytes{};
+    std::array<std::byte, 2> notifications{};
+    auto local_memory = Buffer(pair->first, local);
+    auto remote_memory =
+        Buffer(pair->second, remote_bytes,
+               RdmaAccess::kLocalWrite | RdmaAccess::kRemoteRead |
+                   RdmaAccess::kRemoteWrite);
+    auto receives = Buffer(pair->second, notifications);
+    auto region = *remote_memory.RemoteRegion(RdmaAccess::kRemoteRead |
+                                              RdmaAccess::kRemoteWrite);
+    std::vector<RcOperation> ops;
+    for (unsigned i = 0; i < 8; ++i) {
+      auto slice = *local_memory.Slice(i, 1);
+      auto remote = *region.Slice(i, 1);
+      absl::StatusOr<RcOperation> op = absl::UnknownError("test operation");
+      switch (i % 4) {
+        case 0:
+          op = pair->first.SubmitRead(slice, remote);
+          break;
+        case 1:
+          op = pair->first.SubmitWrite(slice, remote);
+          break;
+        case 2:
+          op = pair->first.SubmitSendWithImm(slice, i);
+          break;
+        case 3:
+          op = pair->first.SubmitWriteWithImm(slice, remote, i);
+          break;
+      }
+      ASSERT_TRUE(op.ok());
+      ops.push_back(std::move(*op));
+    }
+    for (unsigned i = 0; i < notifications.size(); ++i) {
+      auto op = pair->second.SubmitRecv(*receives.Slice(i, 1));
+      ASSERT_TRUE(op.ok());
+      ops.push_back(std::move(*op));
+    }
+    local_memory = receives = {};
+    auto state = Peer::State(pair->first);
+    EXPECT_EQ(state->send.posted, 4);
+    EXPECT_EQ(state->send.pending.size(), 4);
+    if (shutdown) {
+      worker.Shutdown();
+    } else {
+      // A posted cancellation closes this QP and flushes every opcode.
+      EXPECT_TRUE(ops.front().Cancel().ok());
+      Until([&] { return Peer::State(pair->second)->closed; });
+    }
+    for (auto& op : ops) {
+      ASSERT_TRUE(op.ready());
+      EXPECT_FALSE(op.result().ok());
+      EXPECT_TRUE(op.Cancel().ok());
+    }
+    EXPECT_TRUE(state->operations.empty());
+    EXPECT_EQ(rdma_fake::LiveMrs(), 1);  // caller still owns the remote MR
+    remote_memory = {};
+    EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+  }
+}
+
 TEST_F(RcLoop, AsyncAdaptersRetryBothSmallQueuesWithoutCallerRetries) {
   RcOptions options;
   options.send_wr = options.recv_wr = 1;
@@ -324,7 +664,7 @@ TEST_F(RcLoop, AsyncAdaptersRetryBothSmallQueuesWithoutCallerRetries) {
     input[i] = static_cast<std::byte>(i);
   auto source = Buffer(pair->first, input, RdmaAccess::kNone);
   auto target = Buffer(pair->second, output);
-  std::array<std::optional<absl::StatusOr<std::size_t>>, 64> sent, received;
+  std::array<std::optional<absl::StatusOr<RcCompletion>>, 64> sent, received;
   for (unsigned i = 0; i < input.size(); ++i) {
     worker.Spawn(Collect(pair->first.Send(*source.Slice(i, 1)), &sent[i]));
     worker.Spawn(Collect(pair->second.Recv(*target.Slice(i, 1)), &received[i]));
@@ -335,8 +675,8 @@ TEST_F(RcLoop, AsyncAdaptersRetryBothSmallQueuesWithoutCallerRetries) {
     ASSERT_TRUE(sent[i] && received[i]);
     ASSERT_TRUE(sent[i]->ok()) << sent[i]->status();
     ASSERT_TRUE(received[i]->ok()) << received[i]->status();
-    EXPECT_EQ(**sent[i], 1);
-    EXPECT_EQ(**received[i], 1);
+    EXPECT_EQ((*sent[i])->bytes, 1);
+    EXPECT_EQ((*received[i])->bytes, 1);
   }
   EXPECT_EQ(output, input);
   EXPECT_EQ(rdma_fake::Posts(false), input.size());
@@ -379,7 +719,7 @@ TEST_F(RcLoop, QueueFifoSnapshotsCancellationAndOtherConnectionProgress) {
       other->second.SubmitRecv(Buffer(other->second, destination));
   ASSERT_TRUE(other_recv.ok());
   EXPECT_TRUE(Run(other->first.Send(Buffer(other->first, source))).ok());
-  EXPECT_EQ(*Run(other_recv->Wait()), 4);
+  EXPECT_EQ(Run(other_recv->Wait())->bytes, 4);
   std::fill(destination.begin(), destination.end(), std::byte{0});
   for (unsigned i = 0; i < 4; ++i) {
     auto descriptor = *recv_buffer.Slice(i, 1);
@@ -398,8 +738,8 @@ TEST_F(RcLoop, QueueFifoSnapshotsCancellationAndOtherConnectionProgress) {
   EXPECT_EQ(destination[2], source[2]);
   EXPECT_EQ(destination[3], source[3]);
   for (unsigned i : {0U, 2U, 3U}) {
-    EXPECT_EQ(*sends[i].result(), 1);
-    EXPECT_EQ(*recvs[i].result(), 1);
+    EXPECT_EQ(sends[i].result()->bytes, 1);
+    EXPECT_EQ(recvs[i].result()->bytes, 1);
   }
   EXPECT_EQ(Peer::State(pair->first)->send.posted, 0);
   EXPECT_TRUE(Peer::State(pair->first)->send.pending.empty());
@@ -439,8 +779,8 @@ TEST_F(RcLoop, ProviderPostErrorsAreTerminalWithoutCapacityRetry) {
   EXPECT_FALSE(failed->result().ok());
   EXPECT_TRUE(first->result().ok());
   EXPECT_FALSE(last->ready());
-  EXPECT_EQ(*Run(pair->second.Recv(recv)), bytes.size());
-  EXPECT_EQ(*Run(last->Wait()), bytes.size());
+  EXPECT_EQ(Run(pair->second.Recv(recv))->bytes, bytes.size());
+  EXPECT_EQ(Run(last->Wait())->bytes, bytes.size());
 }
 
 TEST_F(RcLoop, CloseRetiresPostedAndQueuedOperationsExactlyOnce) {
@@ -465,7 +805,7 @@ TEST_F(RcLoop, CloseRetiresPostedAndQueuedOperationsExactlyOnce) {
       }
     }
     std::array<int, 8> counts{};
-    auto count = [](Task<absl::StatusOr<std::size_t>> wait,
+    auto count = [](Task<absl::StatusOr<RcCompletion>> wait,
                     int* count) -> Task<absl::Status> {
       auto result = co_await std::move(wait);
       EXPECT_FALSE(result.ok());
@@ -507,7 +847,7 @@ TEST_F(RcLoop, ShutdownStopsDmaBeforeReclaimingSuspendedTransferFrames) {
   auto queued = pair->first.SubmitSend(*memory.Slice(1, 1));
   auto receive = pair->first.SubmitRecv(*memory.Slice(2, 1));
   ASSERT_TRUE(posted.ok() && queued.ok() && receive.ok());
-  std::optional<absl::StatusOr<std::size_t>> result;
+  std::optional<absl::StatusOr<RcCompletion>> result;
   worker.Spawn(Collect(pair->first.Recv(*memory.Slice(3, 1)), &result));
   worker.RunOnce(false);
   auto engine = Peer::State(pair->first)->engine.lock();
@@ -634,7 +974,7 @@ TEST_F(RcLoop, ReceiveCompletionWakesSleepingWorkerWithoutInlineResume) {
   std::array<std::byte, 4> input{std::byte{7}}, output{};
   auto recv = pair->second.SubmitRecv(Buffer(pair->second, output));
   ASSERT_TRUE(recv.ok());
-  std::optional<absl::StatusOr<std::size_t>> received;
+  std::optional<absl::StatusOr<RcCompletion>> received;
   worker.Spawn(Collect(recv->Wait(), &received));
   worker.RunOnce(false);
   const int fd =
@@ -667,7 +1007,7 @@ TEST_F(RcLoop, ReceiveCompletionWakesSleepingWorkerWithoutInlineResume) {
   EXPECT_GE(std::chrono::steady_clock::now() - start,
             std::chrono::milliseconds(15));
   ASSERT_TRUE(received->ok()) << received->status();
-  EXPECT_EQ(**received, input.size());
+  EXPECT_EQ((*received)->bytes, input.size());
   EXPECT_EQ(output, input);
 }
 

@@ -31,10 +31,14 @@ struct Id {
 struct Wr {
   std::uint64_t id;
   ibv_sge sge;
+  ibv_wr_opcode opcode = IBV_WR_SEND;
+  std::uint64_t remote_address = 0;
+  std::uint32_t rkey = 0, immediate = 0;
 };
 struct Qp {
   unsigned send_capacity, recv_capacity;
   std::deque<Wr> sends, recvs;
+  int access = 0;
 };
 struct Cq {
   bool armed = false;
@@ -54,6 +58,8 @@ struct Fake {
   std::unordered_set<ibv_pd*> pds;
   std::unordered_map<ibv_qp*, Qp> qps;
   std::unordered_map<std::uint32_t, ibv_mr*> mrs;
+  std::unordered_map<std::uint32_t, int> permissions;
+  std::uint32_t wire_immediate = 0;
   int post_error[2]{}, posts[2]{};
   bool hold_transfers = false, drop_flush = false, defer_notification = false;
   bool suppress_establish = false, suppress_connect = false, fail_qp = false,
@@ -144,35 +150,77 @@ bool Valid(ibv_qp* qp, const ibv_sge& sge) {
          sge.addr - start <= mr->length &&
          sge.length <= mr->length - (sge.addr - start);
 }
+bool RemoteValid(ibv_qp* peer, const Wr& wr) {
+  auto it = f.mrs.find(wr.rkey);
+  if (it == f.mrs.end()) return false;
+  auto* mr = it->second;
+  const auto start = reinterpret_cast<std::uintptr_t>(mr->addr);
+  const int access = wr.opcode == IBV_WR_RDMA_READ ? IBV_ACCESS_REMOTE_READ
+                                                   : IBV_ACCESS_REMOTE_WRITE;
+  return mr->pd == peer->pd && (f.permissions.at(mr->lkey) & access) &&
+         (f.qps.at(peer).access & access) && wr.remote_address >= start &&
+         wr.remote_address - start <= mr->length &&
+         wr.sge.length <= mr->length - (wr.remote_address - start);
+}
+void Flush(ibv_qp* qp);
 void Transfer(ibv_qp* qp) {
   if (f.hold_transfers || qp->state == IBV_QPS_ERR) return;
   auto* peer = Peer(qp);
   if (!peer || peer->state == IBV_QPS_ERR) return;
   auto& sends = f.qps.at(qp).sends;
   auto& recvs = f.qps.at(peer).recvs;
-  while (!sends.empty() && !recvs.empty()) {
-    auto send = sends.front(), recv = recvs.front();
+  while (!sends.empty()) {
+    const auto send = sends.front();
+    const bool message =
+        send.opcode == IBV_WR_SEND || send.opcode == IBV_WR_SEND_WITH_IMM;
+    const bool immediate = send.opcode == IBV_WR_SEND_WITH_IMM ||
+                           send.opcode == IBV_WR_RDMA_WRITE_WITH_IMM;
+    const bool receive = message || immediate;
+    if (receive && recvs.empty()) return;
     sends.pop_front();
-    recvs.pop_front();
     EXPECT_TRUE(Valid(qp, send.sge));
-    EXPECT_TRUE(Valid(peer, recv.sge));
-    const bool fits = send.sge.length <= recv.sge.length;
-    if (fits)
-      std::memcpy(reinterpret_cast<void*>(recv.sge.addr),
-                  reinterpret_cast<const void*>(send.sge.addr),
-                  send.sge.length);
     ibv_wc wc{};
     wc.wr_id = send.id;
     wc.qp_num = qp->qp_num;
-    wc.opcode = IBV_WC_SEND;
+    wc.opcode = message                           ? IBV_WC_SEND
+                : send.opcode == IBV_WR_RDMA_READ ? IBV_WC_RDMA_READ
+                                                  : IBV_WC_RDMA_WRITE;
     wc.status = IBV_WC_SUCCESS;
+    wc.byte_len = 0;  // not a reliable length for local SEND/WRITE completions
+    if (!message && !RemoteValid(peer, send)) {
+      wc.status = IBV_WC_REM_ACCESS_ERR;
+      Complete(qp->send_cq, wc);
+      qp->state = IBV_QPS_ERR;
+      Flush(qp);
+      return;
+    }
+    if (!message) {
+      auto* local = reinterpret_cast<void*>(send.sge.addr);
+      auto* remote = reinterpret_cast<void*>(send.remote_address);
+      if (send.opcode == IBV_WR_RDMA_READ)
+        std::memcpy(local, remote, send.sge.length);
+      else
+        std::memcpy(remote, local, send.sge.length);
+    }
     Complete(qp->send_cq, wc);
-    wc.wr_id = recv.id;
-    wc.qp_num = peer->qp_num;
-    wc.opcode = IBV_WC_RECV;
-    wc.byte_len = send.sge.length;
-    wc.status = fits ? IBV_WC_SUCCESS : IBV_WC_LOC_LEN_ERR;
-    Complete(peer->recv_cq, wc);
+    if (receive) {
+      const auto recv = recvs.front();
+      recvs.pop_front();
+      EXPECT_TRUE(Valid(peer, recv.sge));
+      const bool fits = !message || send.sge.length <= recv.sge.length;
+      if (message && fits)
+        std::memcpy(reinterpret_cast<void*>(recv.sge.addr),
+                    reinterpret_cast<const void*>(send.sge.addr),
+                    send.sge.length);
+      wc.wr_id = recv.id;
+      wc.qp_num = peer->qp_num;
+      wc.opcode = message ? IBV_WC_RECV : IBV_WC_RECV_RDMA_WITH_IMM;
+      wc.byte_len = send.sge.length;
+      wc.wc_flags = immediate ? IBV_WC_WITH_IMM : 0;
+      wc.imm_data = immediate ? send.immediate : 0xdeadbeef;
+      wc.status = fits ? IBV_WC_SUCCESS : IBV_WC_LOC_LEN_ERR;
+      Complete(peer->recv_cq, wc);
+    }
   }
 }
 int PostSend(ibv_qp* qp, ibv_send_wr* wr, ibv_send_wr** bad) {
@@ -187,10 +235,20 @@ int PostSend(ibv_qp* qp, ibv_send_wr* wr, ibv_send_wr** bad) {
   }
   EXPECT_EQ(wr->next, nullptr);
   EXPECT_EQ(wr->num_sge, 1);
-  EXPECT_EQ(wr->opcode, IBV_WR_SEND);
+  EXPECT_TRUE(wr->opcode == IBV_WR_SEND || wr->opcode == IBV_WR_SEND_WITH_IMM ||
+              wr->opcode == IBV_WR_RDMA_READ ||
+              wr->opcode == IBV_WR_RDMA_WRITE ||
+              wr->opcode == IBV_WR_RDMA_WRITE_WITH_IMM);
   EXPECT_EQ(wr->send_flags, IBV_SEND_SIGNALED);
   EXPECT_TRUE(Valid(qp, wr->sg_list[0]));
-  state.sends.push_back({wr->wr_id, wr->sg_list[0]});
+  if (wr->opcode == IBV_WR_RDMA_READ)
+    EXPECT_TRUE(f.permissions.at(wr->sg_list[0].lkey) & IBV_ACCESS_LOCAL_WRITE);
+  if (wr->opcode == IBV_WR_SEND_WITH_IMM ||
+      wr->opcode == IBV_WR_RDMA_WRITE_WITH_IMM)
+    f.wire_immediate = wr->imm_data;
+  state.sends.push_back({wr->wr_id, wr->sg_list[0], wr->opcode,
+                         wr->wr.rdma.remote_addr, wr->wr.rdma.rkey,
+                         wr->imm_data});
   Transfer(qp);
   return 0;
 }
@@ -207,6 +265,7 @@ int PostRecv(ibv_qp* qp, ibv_recv_wr* wr, ibv_recv_wr** bad) {
   EXPECT_EQ(wr->next, nullptr);
   EXPECT_EQ(wr->num_sge, 1);
   EXPECT_TRUE(Valid(qp, wr->sg_list[0]));
+  EXPECT_TRUE(f.permissions.at(wr->sg_list[0].lkey) & IBV_ACCESS_LOCAL_WRITE);
   state.recvs.push_back({wr->wr_id, wr->sg_list[0]});
   if (auto* peer = Peer(qp)) Transfer(peer);
   return 0;
@@ -244,6 +303,7 @@ void CheckEmpty() {
   EXPECT_TRUE(f.pds.empty());
   EXPECT_TRUE(f.qps.empty());
   EXPECT_TRUE(f.mrs.empty());
+  EXPECT_TRUE(f.permissions.empty());
 }
 void Cm(rdma_cm_id* id, rdma_cm_event_type event, int status) {
   Event(id, event, nullptr, nullptr, 0, status);
@@ -262,6 +322,7 @@ void HoldTransfers(bool hold) {
 void DropFlush(bool drop) { f.drop_flush = drop; }
 int LiveMrs() { return f.mrs.size(); }
 int Posts(bool receive) { return f.posts[receive]; }
+std::uint32_t WireImmediate() { return f.wire_immediate; }
 int DeferNotification(ibv_cq* cq) {
   f.defer_notification = true;
   return cq->channel->fd;
@@ -460,7 +521,7 @@ int __wrap_ibv_dealloc_pd(ibv_pd* pd) {
   delete pd;
   return 0;
 }
-ibv_mr* __wrap_ibv_reg_mr(ibv_pd* pd, void* addr, size_t length, int) {
+ibv_mr* __wrap_ibv_reg_mr(ibv_pd* pd, void* addr, size_t length, int access) {
   auto* mr = new ibv_mr{};
   mr->pd = pd;
   mr->context = pd->context;
@@ -468,6 +529,7 @@ ibv_mr* __wrap_ibv_reg_mr(ibv_pd* pd, void* addr, size_t length, int) {
   mr->length = length;
   mr->lkey = mr->rkey = f.next_key++;
   f.mrs.emplace(mr->lkey, mr);
+  f.permissions.emplace(mr->lkey, access);
   return mr;
 }
 ibv_mr* __wrap_ibv_reg_mr_iova2(ibv_pd* pd, void* addr, size_t length,
@@ -479,6 +541,7 @@ int __wrap_ibv_dereg_mr(ibv_mr* mr) {
     for (auto* queue : {&state.sends, &state.recvs})
       for (const auto& wr : *queue) EXPECT_NE(wr.sge.lkey, mr->lkey);
   EXPECT_EQ(f.mrs.erase(mr->lkey), 1U);
+  EXPECT_EQ(f.permissions.erase(mr->lkey), 1U);
   delete mr;
   return 0;
 }
@@ -530,7 +593,8 @@ ibv_qp* __wrap_ibv_create_qp(ibv_pd* pd, ibv_qp_init_attr* attr) {
   f.qps.emplace(qp, Qp{attr->cap.max_send_wr, attr->cap.max_recv_wr, {}, {}});
   return qp;
 }
-int __wrap_ibv_modify_qp(ibv_qp* qp, ibv_qp_attr* attr, int) {
+int __wrap_ibv_modify_qp(ibv_qp* qp, ibv_qp_attr* attr, int mask) {
+  if (mask & IBV_QP_ACCESS_FLAGS) f.qps.at(qp).access = attr->qp_access_flags;
   qp->state = attr->qp_state;
   if (qp->state == IBV_QPS_ERR) Flush(qp);
   return 0;
