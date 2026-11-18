@@ -41,7 +41,8 @@ multiple QPs in the same PD; it belongs to neither a particular QP nor an IMM
 (immediate-data) operation. Operation leases check both the QP's context and PD.
 RC connections expose their actual protection domain for registration. A caller
 must use that domain rather than assume a separately opened device handle has
-the same PD. Connections provide SEND/RECV; application consumption
+the same PD. Connections provide SEND, RECV, READ, WRITE, SEND_WITH_IMM and
+WRITE_WITH_IMM; application consumption
 acknowledgements, receive credits and buffer pools belong to the upper protocol.
 
 ## RC ownership and connection flow
@@ -64,6 +65,9 @@ handshake with `rdma_establish`. It does not replace CM's context or attach its
 QP to the CM ID. QP, PD, MR, CQ and the verbs asynchronous event stream belong to
 the same private context, with exactly one worker reading that event stream.
 Other workers neither consume its events nor migrate its connections.
+External QPs enable remote read/write access at INIT; each MR independently
+enforces its registered permissions and rkey. READ admission also requires
+nonzero negotiated initiator depth.
 
 Each private context shares one completion channel and fixed-capacity CQ.
 Admission reserves the provider's actual send plus receive WR capacities for
@@ -75,26 +79,42 @@ and are returned only after QP destruction and CQ draining.
 
 ## Data operations and local backpressure
 
-Each accepted SEND/RECV has independent engine-owned state identified by a
+Each accepted data operation has independent engine-owned state identified by a
 non-reused `wr_id` in the shared CQ. Admission acquires an MR lease and snapshots
-address, length and lkey; neither queued nor posted work borrows a descriptor or
+the local address, length and lkey, plus opcode, remote range/rkey and immediate
+value where applicable; neither queued nor posted work borrows a descriptor or
 SGE array. The caller owns backing memory through terminal completion.
-Every send is signalled. Completion records the result, releases the lease and
+Every SQ operation is signalled. Completion records the result, releases the lease and
 local queue slot, and schedules the waiting coroutine on its worker. Submission
-does not dispatch completions inline. SEND success permits local buffer reuse;
-it does not acknowledge remote application consumption. RECV success reports
-the actual received length and requires local-write registration.
+does not dispatch completions inline. Local completion permits local buffer reuse;
+it does not acknowledge remote application consumption. RECV and READ require
+local-write registration. Remote descriptors are non-owning, range-checked
+capabilities whose validity and remote-memory lifetime belong to the peer
+protocol; local completion does not revoke a remotely exported rkey.
+
+`RcCompletion` exposes completion kind, actual transfer length and optional
+immediate data. Public immediate values use host byte order; only WR posting
+and WC decoding convert network byte order. SEND_WITH_IMM fills a posted receive
+buffer and returns `kRecv` with immediate data. WRITE_WITH_IMM writes the named
+remote region and consumes a receive WR only for its `kRecvWriteWithImm`
+notification. The notification's length describes the remote write, which can
+exceed that receive buffer's length; its receive buffer is untouched. Ordinary
+READ/WRITE consume no receive WR. A missing receive credit can stall an immediate
+write even when local SQ capacity remains available.
 
 Each QP accounts for its provider-reported SQ and RQ capacities separately.
+All SEND/READ/WRITE variants share the SQ FIFO; receives use the RQ FIFO.
 Ordinary submissions queue FIFO within their direction when local capacity is
 exhausted; CQ completions return slots and advance that FIFO without involving
-other QPs. `TrySubmitSend/Recv` reject local exhaustion immediately. Provider
+other QPs. The `TrySubmit` variants reject local exhaustion immediately. Provider
 posting errors fail the operation rather than retrying based on errno: only
 local slot accounting establishes that a completion can restore capacity.
 The engine retains accepted operations even when an application drops its
 operation handle. Coroutine adapters copy descriptors before returning their
 lazy tasks and submit when awaited. No receive WRs, remote credits, windows or
-control messages are generated automatically.
+control messages are generated automatically. Submission order does not replace
+waiting for a READ result before submitting dependent work; no implicit fences
+are inserted.
 
 ## Notification and failure flow
 

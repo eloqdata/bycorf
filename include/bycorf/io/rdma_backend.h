@@ -74,10 +74,14 @@ class RdmaBackend {
     resources_.Shutdown();
   }
   absl::StatusOr<LocalSharedPtr<rdma::detail::Engine>> GetRdmaEngine() {
-    if (stopped_) return absl::CancelledError("RDMA worker is shut down");
-    if (!engine_) {
+    if (stopped_) [[unlikely]] {
+      return absl::CancelledError("RDMA worker is shut down");
+    }
+    if (!engine_) [[unlikely]] {
       auto created = rdma::detail::CreateEngine(static_cast<Owner&>(*this));
-      if (!created.ok()) return created.status();
+      if (!created.ok()) [[unlikely]] {
+        return created.status();
+      }
       engine_ = *created;
     }
     return engine_;

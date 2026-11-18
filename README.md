@@ -215,13 +215,15 @@ BYCORF_RDMA_TEST_IP=192.0.2.1 ctest --test-dir build-rdma \
 ```
 
 These exercise idle-worker connection events, private data, distinct worker
-contexts, shared CQ/PD ownership, bidirectional SEND/RECV data and lengths,
-refused connections and close/accept races.
+contexts, shared CQ/PD ownership, bidirectional SEND/RECV, READ/WRITE data,
+immediate-data messages and write notifications, refused connections and
+close/accept races.
 The device-free `RcLoopFake` cases additionally inject notification races,
 provider capacity rounding, budget exhaustion, deadlines, CQ/device failures,
 and late events during cancellation and shutdown. They also check per-direction
 FIFO backpressure, descriptor snapshots, MR leases, post/flush failures,
-frame-owned payload retirement, and receive notification wakeups. They use real
+frame-owned payload retirement, receive notification wakeups, mixed-opcode FIFO
+ordering, remote range/permission failures and host-order immediate values. They use real
 io_uring with link-time CM/verbs stubs. No device is opened by unused workers or
 test discovery.
 
@@ -247,18 +249,38 @@ report a padded peer-data length. The first connection fixes that worker/device
 CQ capacity, and subsequent connections must request the same capacity.
 
 Await `connection.Send(slice)` or `connection.Recv(slice)` for ordinary data
-transfers. Both return `StatusOr<size_t>`; receive reports the actual message
-length. The lazy tasks copy their descriptors before returning and submit when
-awaited. Register receive memory with `RdmaAccess::kLocalWrite`.
+transfers. All data methods return `StatusOr<RcCompletion>` with `kind`, `bytes`
+and optional `immediate`; receive reports the actual message length.
+The lazy tasks copy their descriptors before returning and submit when
+awaited. Register receive and RDMA READ destination memory with
+`RdmaAccess::kLocalWrite`.
 `SubmitSend/Recv(slice)` admit immediately and return an `RcOperation` with
 `ready()`, `result()`, `Wait()` and `Cancel()`. Ordinary submission queues FIFO
 on local SQ/RQ exhaustion and advances automatically on completion;
 `TrySubmitSend/Recv` instead return `ResourceExhausted` without accepting work.
 Provider posting errors are terminal, not automatically retried.
 
+`Read(slice, remote)` and `Write(slice, remote)` transfer `slice.size()` bytes
+starting at `RemoteMemoryRegion::address`, checked against its length.
+`SendWithImm(slice, immediate)` sends a message with a host-order 32-bit value;
+`WriteWithImm(slice, remote, immediate)` writes the remote region and delivers
+a notification. Each has matching `Submit` and `TrySubmit` methods and shares
+the connection's SQ FIFO with SEND. READ/WRITE do not consume peer receive WRs;
+SEND and both immediate variants require an explicitly posted peer receive.
+
+Receive results use `RcCompletionKind::kRecv` for SEND (with or without IMM),
+and `kRecvWriteWithImm` for a remote write notification. In the latter case,
+data lands in the remote region, the receive WR's buffer is untouched, and
+`bytes` reports the remote write length. `immediate.has_value()` distinguishes
+an absent value from a valid zero; values use host byte order in both directions.
+Local SQ results use `kSend`, `kRead` or `kWrite` and carry no immediate value.
+The peer must retain exported registrations and backing memory until the
+protocol establishes remote quiescence. Await READ before submitting dependent
+work; these primitives do not add implicit fences.
+
 Each accepted operation retains its registration, including while queued, but
 the caller must keep payload alive through its terminal result. Descriptors may
-be changed or destroyed immediately after invocation. All sends request a
+be changed or destroyed immediately after invocation. All SQ operations request a
 completion; this permits local buffer reuse and does not imply peer application
 consumption. Dropping an operation handle does not cancel it. Cancelling queued
 work removes it independently; cancelling posted work closes the entire QP.

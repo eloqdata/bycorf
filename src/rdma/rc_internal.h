@@ -58,14 +58,30 @@ struct Deadline final : IoCompletion {
   void Complete(Worker&, int result, unsigned flags) override;
 };
 
+enum class Opcode { kSend, kRecv, kRead, kWrite, kSendWithImm, kWriteWithImm };
+
+// Submission snapshot: no pointers into caller descriptors or SGE arrays.
+// Immediate remains host-order until constructing the provider WR.
+struct Request {
+  Opcode opcode;
+  RemoteMemoryRegion remote{};
+  std::uint32_t immediate = 0;
+  bool receive() const noexcept { return opcode == Opcode::kRecv; }
+  bool remote_access() const noexcept {
+    return opcode == Opcode::kRead || opcode == Opcode::kWrite ||
+           opcode == Opcode::kWriteWithImm;
+  }
+};
+
 struct Operation {
   LocalWeakPtr<Connection> connection;
   std::uint64_t id = 0;
-  bool receive = false;
+  Request request{Opcode::kSend};
+  bool receive() const noexcept { return request.receive(); }
   bool posted = false;
   RdmaMemoryLease lease;
   Signal completed;
-  absl::StatusOr<std::size_t> result =
+  absl::StatusOr<RcCompletion> result =
       absl::FailedPreconditionError("RDMA operation is pending");
 };
 
@@ -159,7 +175,8 @@ class Engine {
   void AfterRingShutdown();
   absl::StatusOr<LocalSharedPtr<Operation>> Submit(
       const LocalSharedPtr<Connection>& connection,
-      const RegisteredMemorySlice& slice, bool receive, bool try_only);
+      const RegisteredMemorySlice& slice, const Request& request,
+      bool try_only);
   absl::Status Cancel(const LocalSharedPtr<Operation>& operation);
   bool OnOwner() const;
   Worker* wake_worker() const { return stopping ? nullptr : worker; }
@@ -189,7 +206,7 @@ class Engine {
   std::uint64_t next_operation = 1;
   absl::Status Post(Connection& connection, Operation& operation);
   void Finish(LocalSharedPtr<Operation> operation,
-              absl::StatusOr<std::size_t> result);
+              absl::StatusOr<RcCompletion> result);
   void Advance(Connection& connection, bool receive);
 };
 

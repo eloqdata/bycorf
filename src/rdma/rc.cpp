@@ -78,7 +78,7 @@ struct ConnectGuard {
   }
 };
 
-Task<absl::StatusOr<std::size_t>> WaitOperation(
+Task<absl::StatusOr<RcCompletion>> WaitOperation(
     LocalSharedPtr<detail::Operation> operation) {
   if (!operation)
     co_return absl::FailedPreconditionError("empty RDMA operation");
@@ -90,19 +90,19 @@ Task<absl::StatusOr<std::size_t>> WaitOperation(
 // Engine::Submit is the out-of-line boundary for the actual admission work.
 [[gnu::always_inline]] inline absl::StatusOr<LocalSharedPtr<detail::Operation>>
 SubmitOperation(const LocalSharedPtr<detail::Connection>& connection,
-                const RegisteredMemorySlice& slice, bool receive,
-                bool try_only) {
+                const RegisteredMemorySlice& slice,
+                const detail::Request& request, bool try_only) {
   assert(connection);
   auto engine = connection->engine.lock();
   if (!engine) [[unlikely]] {
     return absl::CancelledError("RDMA owner is gone");
   }
-  return engine->Submit(connection, slice, receive, try_only);
+  return engine->Submit(connection, slice, request, try_only);
 }
-Task<absl::StatusOr<std::size_t>> Transfer(
+Task<absl::StatusOr<RcCompletion>> Transfer(
     LocalSharedPtr<detail::Connection> connection, RegisteredMemorySlice slice,
-    bool receive) {
-  auto operation = SubmitOperation(connection, slice, receive, false);
+    detail::Request request) {
+  auto operation = SubmitOperation(connection, slice, request, false);
   // The operation's lease is sufficient after admission. Do not keep an extra
   // descriptor reference in a suspended frame past terminal completion.
   slice = {};
@@ -118,12 +118,12 @@ Task<absl::StatusOr<std::size_t>> Transfer(
 bool RcOperation::ready() const noexcept {
   return state_ && state_->completed.ready;
 }
-absl::StatusOr<std::size_t> RcOperation::result() const {
+absl::StatusOr<RcCompletion> RcOperation::result() const {
   return state_ ? state_->result
-                : absl::StatusOr<std::size_t>(
+                : absl::StatusOr<RcCompletion>(
                       absl::FailedPreconditionError("empty RDMA operation"));
 }
-Task<absl::StatusOr<std::size_t>> RcOperation::Wait() {
+Task<absl::StatusOr<RcCompletion>> RcOperation::Wait() {
   return WaitOperation(state_);
 }
 absl::Status RcOperation::Cancel() {
@@ -195,34 +195,101 @@ RdmaProtectionDomain RcConnection::protection_domain() const {
 }
 
 [[gnu::always_inline]] inline absl::StatusOr<RcOperation> RcConnection::Submit(
-    const RegisteredMemorySlice& slice, bool receive, bool try_only) {
-  auto operation = SubmitOperation(state_, slice, receive, try_only);
+    const RegisteredMemorySlice& slice, const detail::Request& request,
+    bool try_only) {
+  auto operation = SubmitOperation(state_, slice, request, try_only);
   if (!operation.ok()) return operation.status();
   return RcOperation(*operation);
 }
 absl::StatusOr<RcOperation> RcConnection::SubmitSend(
     const RegisteredMemorySlice& slice) {
-  return Submit(slice, false, false);
+  return Submit(slice, {detail::Opcode::kSend}, false);
 }
 absl::StatusOr<RcOperation> RcConnection::SubmitRecv(
     const RegisteredMemorySlice& slice) {
-  return Submit(slice, true, false);
+  return Submit(slice, {detail::Opcode::kRecv}, false);
 }
 absl::StatusOr<RcOperation> RcConnection::TrySubmitSend(
     const RegisteredMemorySlice& slice) {
-  return Submit(slice, false, true);
+  return Submit(slice, {detail::Opcode::kSend}, true);
 }
 absl::StatusOr<RcOperation> RcConnection::TrySubmitRecv(
     const RegisteredMemorySlice& slice) {
-  return Submit(slice, true, true);
+  return Submit(slice, {detail::Opcode::kRecv}, true);
 }
-Task<absl::StatusOr<std::size_t>> RcConnection::Send(
+Task<absl::StatusOr<RcCompletion>> RcConnection::Send(
     const RegisteredMemorySlice& slice) {
-  return Transfer(state_, slice, false);
+  return Transfer(state_, slice, {detail::Opcode::kSend});
 }
-Task<absl::StatusOr<std::size_t>> RcConnection::Recv(
+Task<absl::StatusOr<RcCompletion>> RcConnection::Recv(
     const RegisteredMemorySlice& slice) {
-  return Transfer(state_, slice, true);
+  return Transfer(state_, slice, {detail::Opcode::kRecv});
+}
+
+absl::StatusOr<RcOperation> RcConnection::SubmitRead(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote) {
+  return Submit(slice, {detail::Opcode::kRead, remote}, false);
+}
+
+absl::StatusOr<RcOperation> RcConnection::TrySubmitRead(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote) {
+  return Submit(slice, {detail::Opcode::kRead, remote}, true);
+}
+
+Task<absl::StatusOr<RcCompletion>> RcConnection::Read(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote) {
+  return Transfer(state_, slice, {detail::Opcode::kRead, remote});
+}
+
+absl::StatusOr<RcOperation> RcConnection::SubmitWrite(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote) {
+  return Submit(slice, {detail::Opcode::kWrite, remote}, false);
+}
+
+absl::StatusOr<RcOperation> RcConnection::TrySubmitWrite(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote) {
+  return Submit(slice, {detail::Opcode::kWrite, remote}, true);
+}
+
+Task<absl::StatusOr<RcCompletion>> RcConnection::Write(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote) {
+  return Transfer(state_, slice, {detail::Opcode::kWrite, remote});
+}
+
+absl::StatusOr<RcOperation> RcConnection::SubmitSendWithImm(
+    const RegisteredMemorySlice& slice, std::uint32_t immediate) {
+  return Submit(slice, {detail::Opcode::kSendWithImm, {}, immediate}, false);
+}
+
+absl::StatusOr<RcOperation> RcConnection::TrySubmitSendWithImm(
+    const RegisteredMemorySlice& slice, std::uint32_t immediate) {
+  return Submit(slice, {detail::Opcode::kSendWithImm, {}, immediate}, true);
+}
+
+Task<absl::StatusOr<RcCompletion>> RcConnection::SendWithImm(
+    const RegisteredMemorySlice& slice, std::uint32_t immediate) {
+  return Transfer(state_, slice, {detail::Opcode::kSendWithImm, {}, immediate});
+}
+
+absl::StatusOr<RcOperation> RcConnection::SubmitWriteWithImm(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote,
+    std::uint32_t immediate) {
+  return Submit(slice, {detail::Opcode::kWriteWithImm, remote, immediate},
+                false);
+}
+
+absl::StatusOr<RcOperation> RcConnection::TrySubmitWriteWithImm(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote,
+    std::uint32_t immediate) {
+  return Submit(slice, {detail::Opcode::kWriteWithImm, remote, immediate},
+                true);
+}
+
+Task<absl::StatusOr<RcCompletion>> RcConnection::WriteWithImm(
+    const RegisteredMemorySlice& slice, const RemoteMemoryRegion& remote,
+    std::uint32_t immediate) {
+  return Transfer(state_, slice,
+                  {detail::Opcode::kWriteWithImm, remote, immediate});
 }
 
 RcListener::RcListener(RcListener&&) noexcept = default;
