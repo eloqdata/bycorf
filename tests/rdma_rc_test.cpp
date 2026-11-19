@@ -19,7 +19,10 @@
 #include "bycorf/runtime/worker.h"
 #ifdef BYCORF_RDMA_FAKE
 #include "bycorf/net/server.h"
+#include "bycorf/net/tcp_listener.h"
+#include "bycorf/net/tcp_stream.h"
 #include "rdma_fake.h"
+#include "worker_wait_test_peer.h"
 #define RcLoop RcLoopFake
 #endif
 
@@ -104,7 +107,7 @@ class RcLoop : public testing::Test {
   }
   const char* ip = nullptr;
   bool initialized = false;
-  CrossCore cc{1};
+  CrossCore cc{2};
   Worker worker;
 };
 
@@ -967,6 +970,138 @@ TEST_F(RcLoop, CompletionErrorClosesQpAndRetiresQueuedWork) {
   EXPECT_FALSE(pair->second.IsOpen());
 }
 
+TEST_F(RcLoop, WorkerPollPathsRespectCqeBudgetAndPreventSleep) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  auto state = Peer::State(pair->first);
+  auto* cq = state->device->cq;
+  constexpr auto budget = bycorf::rdma::detail::Engine::kCqPollBudget;
+  for (unsigned i = 0; i < 4 * budget; ++i)
+    rdma_fake::Completion(cq, state->qp->qp_num);
+  auto before = rdma_fake::PendingCompletions(cq);
+  ASSERT_TRUE(worker.RunOnce(true));
+  auto after = rdma_fake::PendingCompletions(cq);
+  EXPECT_LT(after, before);
+  EXPECT_LE(before - after, budget);
+  before = after;
+  ASSERT_TRUE(WorkerWaitTestPeer::BusyPoll(worker));
+  after = rdma_fake::PendingCompletions(cq);
+  EXPECT_LT(after, before);
+  EXPECT_LE(before - after, budget);
+  before = after;
+  bool waited = false;
+  ASSERT_TRUE(WorkerWaitTestPeer::Wait(worker, [&](auto phase) {
+    waited |= phase == WorkerWaitTestPeer::Phase::kWaiting;
+  }));
+  EXPECT_FALSE(waited);
+  after = rdma_fake::PendingCompletions(cq);
+  EXPECT_LT(after, before);
+  EXPECT_LE(before - after, budget);
+  Until([&] { return rdma_fake::PendingCompletions(cq) == 0; });
+}
+
+TEST_F(RcLoop, PollBudgetRotatesAcrossDevicesAndSurvivesDeviceRemoval) {
+  std::vector<std::pair<RcConnection, RcConnection>> pairs;
+  std::array<ibv_cq*, 3> cqs{};
+  for (unsigned i = 0; i < cqs.size(); ++i) {
+    rdma_fake::SelectDevice(i);
+    auto pair = Pair();
+    ASSERT_TRUE(pair.ok());
+    cqs[i] = Peer::State(pair->first)->device->cq;
+    pairs.push_back(std::move(*pair));
+  }
+  constexpr auto budget = bycorf::rdma::detail::Engine::kCqPollBudget;
+  for (unsigned i = 0; i < cqs.size(); ++i)
+    for (unsigned j = 0; j < 2 * budget; ++j)
+      rdma_fake::Completion(cqs[i], Peer::State(pairs[i].first)->qp->qp_num);
+  auto engine = Peer::State(pairs[0].first)->engine.lock();
+  for (unsigned round = 0; round < 3; ++round) {
+    std::size_t before = 0, after = 0;
+    for (auto* cq : cqs) before += rdma_fake::PendingCompletions(cq);
+    ASSERT_TRUE(engine->PollCqs());
+    for (auto* cq : cqs) after += rdma_fake::PendingCompletions(cq);
+    EXPECT_EQ(before - after, budget);
+  }
+  for (auto* cq : cqs) EXPECT_EQ(rdma_fake::PendingCompletions(cq), budget);
+  auto failed = Peer::State(pairs[1].first);
+  rdma_fake::Async(failed->qp->context, IBV_EVENT_DEVICE_FATAL);
+  Until([&] { return engine->devices.size() == 2; });
+  EXPECT_FALSE(pairs[1].first.IsOpen());
+  EXPECT_TRUE(pairs[0].first.IsOpen());
+  EXPECT_TRUE(pairs[2].first.IsOpen());
+  Until([&] {
+    return rdma_fake::PendingCompletions(cqs[0]) == 0 &&
+           rdma_fake::PendingCompletions(cqs[2]) == 0;
+  });
+}
+
+TEST_F(RcLoop, BusyRdmaAllowsTcpAndPeerMessagesToProgress) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  auto state = Peer::State(pair->first);
+  auto* cq = state->device->cq;
+  TcpListener listener;
+  ASSERT_TRUE(listener.Bind(&worker, "127.0.0.1", 0).ok());
+  sockaddr_in address{};
+  socklen_t length = sizeof(address);
+  ASSERT_EQ(getsockname(listener.NativeFd(),
+                        reinterpret_cast<sockaddr*>(&address), &length),
+            0);
+  auto tcp = Run(ConnectTcp(worker, "127.0.0.1", ntohs(address.sin_port),
+                            std::chrono::seconds(1)));
+  ASSERT_TRUE(tcp.ok());
+  auto accepted = Run(listener.Accept());
+  ASSERT_TRUE(accepted.ok());
+  TcpStream server(*accepted);
+  ASSERT_TRUE(listener.Close().ok());
+  // A peer worker publishes through an actual SPSC lane. Its ring is not
+  // needed: this worker stays busy and therefore does not require a wake CQE.
+  Worker peer;
+  peer.BindCrossCore(1, &cc);
+  unsigned messages = 0;
+  std::array<std::byte, 8> input{std::byte{0x6a}}, output{};
+  std::array<std::byte, 8> rdma_input{std::byte{0x39}}, rdma_output{};
+  auto source = Buffer(pair->first, rdma_input);
+  auto destination = Buffer(pair->second, rdma_output);
+  std::optional<absl::Status> written;
+  std::optional<absl::StatusOr<std::size_t>> read;
+  worker.Spawn(Collect(server.ReadSome(output), &read));
+  worker.Spawn(Collect(tcp->WriteAll(input), &written));
+  for (unsigned round = 0; round < 256 && (!read || !written || !messages);
+       ++round) {
+    // Keep more than one round of CQEs queued even while the ring processes
+    // readable completion-channel events.
+    while (rdma_fake::PendingCompletions(cq) <
+           2 * bycorf::rdma::detail::Engine::kCqPollBudget)
+      rdma_fake::Completion(cq, state->qp->qp_num);
+    auto recv = pair->second.SubmitRecv(destination);
+    auto send = pair->first.SubmitSend(source);
+    ASSERT_TRUE(recv.ok());
+    ASSERT_TRUE(send.ok());
+    SetThisWorker(1, &cc, &peer);
+    PostNotification(&cc, 0,
+                     {.context_ = &messages,
+                      .run_fn_ = +[](void* value, std::uint64_t) noexcept {
+                        ++*static_cast<unsigned*>(value);
+                      }});
+    SetThisWorker(0, &cc, &worker);
+    ASSERT_TRUE(worker.RunOnce(false));
+    EXPECT_GT(rdma_fake::PendingCompletions(cq), 0U);
+  }
+  ASSERT_TRUE(read.has_value());
+  ASSERT_TRUE(written.has_value());
+  EXPECT_TRUE(written->ok());
+  ASSERT_TRUE(read->ok());
+  EXPECT_EQ(**read, input.size());
+  EXPECT_EQ(output, input);
+  EXPECT_EQ(rdma_output, rdma_input);
+  EXPECT_GT(messages, 0U);
+  EXPECT_TRUE(tcp->Close().ok());
+  EXPECT_TRUE(server.Close().ok());
+  // Retire kernel callbacks before stack-owned listener state disappears.
+  worker.Shutdown();
+}
+
 TEST_F(RcLoop, ReceiveCompletionWakesSleepingWorkerWithoutInlineResume) {
   auto pair = Pair();
   ASSERT_TRUE(pair.ok());
@@ -977,33 +1112,33 @@ TEST_F(RcLoop, ReceiveCompletionWakesSleepingWorkerWithoutInlineResume) {
   std::optional<absl::StatusOr<RcCompletion>> received;
   worker.Spawn(Collect(recv->Wait(), &received));
   worker.RunOnce(false);
-  const int fd =
-      rdma_fake::DeferNotification(Peer::State(pair->first)->device->cq);
-  auto send = pair->first.SubmitSend(Buffer(pair->first, input));
-  ASSERT_TRUE(send.ok());
-  EXPECT_FALSE(received.has_value());
-  EXPECT_FALSE(send->ready());
-  // Only the eventfd is touched on this thread; fake state remains
-  // worker-local.
-  std::atomic<bool> parked{false};
-  auto& mailbox = cc.mailbox(0);
-  std::jthread wake([fd, &mailbox, &parked] {
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (mailbox.wake_seq_.load(std::memory_order_acquire) !=
-               kWakeSeqParked &&
-           std::chrono::steady_clock::now() < deadline)
-      std::this_thread::yield();
-    parked.store(
-        mailbox.wake_seq_.load(std::memory_order_acquire) == kWakeSeqParked,
-        std::memory_order_release);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    std::uint64_t one = 1;
-    EXPECT_EQ(write(fd, &one, sizeof(one)), sizeof(one));
-  });
+  auto source = Buffer(pair->first, input);
+  std::optional<RcOperation> send;
+  std::jthread wake;
+  bool waiting = false;
+  // Produce the completion on the owner after the final CQ recheck, then
+  // delay only the eventfd wake on another thread. Active polling must not
+  // mask a broken sleep handshake by consuming the completion beforehand.
+  for (int i = 0; i < 8; ++i) worker.RunOnce(false);
   const auto start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(WorkerWaitTestPeer::Wait(worker, [&](auto phase) {
+    if (phase != WorkerWaitTestPeer::Phase::kWaiting) return;
+    waiting = true;
+    const int fd =
+        rdma_fake::DeferNotification(Peer::State(pair->first)->device->cq);
+    auto submitted = pair->first.SubmitSend(source);
+    ASSERT_TRUE(submitted.ok());
+    send.emplace(std::move(*submitted));
+    EXPECT_FALSE(received.has_value());
+    EXPECT_FALSE(send->ready());
+    wake = std::jthread([fd] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      std::uint64_t one = 1;
+      EXPECT_EQ(write(fd, &one, sizeof(one)), sizeof(one));
+    });
+  }));
+  EXPECT_TRUE(waiting);
   Until([&] { return received.has_value(); });
-  EXPECT_TRUE(parked.load(std::memory_order_acquire));
   EXPECT_GE(std::chrono::steady_clock::now() - start,
             std::chrono::milliseconds(15));
   ASSERT_TRUE(received->ok()) << received->status();

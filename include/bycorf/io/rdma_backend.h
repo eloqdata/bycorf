@@ -62,6 +62,9 @@ class RdmaBackend {
                                   IoCompletion* tag) {
     return Kernel().SubmitDeadline(deadline, tag);
   }
+  // No engine is created by worker polling. Completion dispatch only queues
+  // continuations; the worker retains control of scheduling and fairness.
+  bool PollRdma() { return engine_ && rdma::detail::PollCompletions(*engine_); }
   // Stop admission before the ring shuts down. Tags/resources remain retained
   // until terminal completions or AfterRingShutdown confirms kernel quiescence.
   void Shutdown() {

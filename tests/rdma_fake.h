@@ -4,11 +4,15 @@
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace rdma_fake {
 void Reset();
 void CheckEmpty();
+// Select one of three independent fake devices for subsequently created CM IDs.
+void SelectDevice(unsigned index);
+std::size_t PendingCompletions(ibv_cq* cq);
 void SuppressConnect(bool suppress);
 void SuppressEstablish(bool suppress);
 void Cm(rdma_cm_id* id, rdma_cm_event_type event, int status = 0);

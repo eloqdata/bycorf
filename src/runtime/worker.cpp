@@ -1076,6 +1076,9 @@ bool Worker::BusyPoll() {
     did_work |= KernelBackend().Poll();
     did_work |= Network::Poll();
     did_work |= PollStorage();
+#if BYCORF_ENABLE_RDMA
+    did_work |= Rdma::PollRdma();
+#endif
     if (did_work) {
       const std::int64_t round_start = CycleNow();
       MergeDeferred();
@@ -1187,6 +1190,9 @@ bool Worker::RunOnce(bool wait_for_completion) {
     }
   }
   did_work |= PollStorage();
+#if BYCORF_ENABLE_RDMA
+  did_work |= Rdma::PollRdma();
+#endif
   MergeDeferred();
 
   const std::int64_t foreground_start = CycleNow();

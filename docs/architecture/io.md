@@ -37,7 +37,7 @@ fail explicitly rather than falling back.
 `NetBackend` selects kernel networking or the DPDK adapter; `StorageBackend`
 selects kernel storage or SPDK. Only selected adapters acquire resources.
 The worker explicitly polls the shared ring, native network work, and polled
-storage. It flushes native network output before submitting the shared ring.
+storage, then bounded RDMA CQ work. It flushes native network output before submitting the shared ring.
 Network polling and flushing advance only DPDK work; storage polling advances
 only SPDK. Kernel TCP and storage progress through the worker's ring calls.
 Network adapters supply notification preparation, idle checks,
