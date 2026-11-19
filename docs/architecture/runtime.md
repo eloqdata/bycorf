@@ -57,9 +57,12 @@ unsubmitted operations, or storage requiring polling prevent sleep. Network
 deadlines and enabled connection-idle checks bound the wait. Optional RDMA CM,
 CQ-notification and device-async polls are persistent wake sources on this same
 ring; RDMA connection deadlines are absolute ring timeouts. CQ notifications
-remain armed while the worker also polls CQs directly. The pre-sleep recheck
-uses the same bounded RDMA poll; any consumed CQE prevents sleep, including
-when a full batch may have left more work without another notification.
+are requested only during sleep preparation, before the worker rechecks all
+sources. The pre-sleep recheck uses the same bounded RDMA poll; any consumed
+CQE prevents sleep, including when a full batch may have left more work without
+another notification. Aborted attempts end RDMA preparation while leaving any
+outstanding hardware notification intact; queued events are acknowledged even
+when their data completions have already been polled.
 
 Cross-worker submissions enter destination mailboxes and resume coroutines on
 their original workers. The mailbox handshake makes racing publication either
