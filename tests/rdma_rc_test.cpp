@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <poll.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -1317,20 +1318,133 @@ TEST_F(RcLoop, ListenerCloseReleasesUnacceptedReadyStates) {
   EXPECT_TRUE(absl::IsCancelled(Run(listener->Accept()).status()));
 }
 
-TEST_F(RcLoop, NotifyRecheckRaceAndRepeatedIdleNotifications) {
+TEST_F(RcLoop, BusyPollingDoesNotRearmAndStaleEventsCannotClearNewArm) {
   auto pair = Pair();
-  ASSERT_TRUE(pair.ok()) << pair.status();
+  ASSERT_TRUE(pair.ok());
+  auto state = Peer::State(pair->first);
+  auto device = state->device;
+  auto engine = state->engine.lock();
+  auto* cq = device->cq;
+  ASSERT_TRUE(engine->PrepareWait());
+  engine->FinishWait();
+  const int arms = rdma_fake::NotificationArms(cq);
+  const int acks = rdma_fake::AckedCqEvents();
+  rdma_fake::Completion(cq, state->qp->qp_num);
+  ASSERT_TRUE(engine->PollCqs());
+  EXPECT_EQ(rdma_fake::PendingCompletions(cq), 0U);
+  // Rearm while the old event is still queued, then dispatch that old event.
+  ASSERT_TRUE(engine->PrepareWait());
+  engine->OnPoll(device->completion_poll, POLLIN);
+  engine->FinishWait();
+  EXPECT_EQ(rdma_fake::AckedCqEvents(), acks + 1);
+  EXPECT_EQ(rdma_fake::NotificationArms(cq), arms + 1);
+  rdma_fake::Completion(cq, state->qp->qp_num);
+  for (unsigned i = 0; i < 10; ++i) worker.RunOnce(false);
+  EXPECT_EQ(rdma_fake::AckedCqEvents(), acks + 2);
+  EXPECT_EQ(rdma_fake::PendingCompletions(cq), 0U);
+  EXPECT_EQ(rdma_fake::NotificationArms(cq), arms + 1);
+}
+
+TEST_F(RcLoop, CmDeviceCreatedDuringIdleRecheckIsArmed) {
+  auto listener = RcListener::Listen(worker, ip, 0);
+  ASSERT_TRUE(listener.ok());
+  auto engine = Peer::State(*listener)->engine.lock();
+  EXPECT_TRUE(engine->devices.empty());
+  ASSERT_TRUE(engine->PrepareWait());
+  std::optional<absl::StatusOr<RcConnection>> connected;
+  worker.Spawn(
+      Collect(RcConnection::Connect(worker, ip, listener->port()), &connected));
+  // Drive the same CM/ring path used by the recheck without beginning another
+  // wait attempt. Device creation must honor the preparation already in force.
+  while (!connected) ASSERT_TRUE(worker.RunOnce(false));
+  ASSERT_TRUE(connected->ok());
+  auto* cq = Peer::State(**connected)->device->cq;
+  EXPECT_EQ(rdma_fake::NotificationArms(cq), 1);
+  engine->FinishWait();
+  EXPECT_TRUE(Run(listener->Close()).ok());
+}
+
+TEST_F(RcLoop, CompletionBeforeAndDuringArmAbandonsSleep) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
   auto state = Peer::State(pair->first);
   auto* cq = state->device->cq;
-  const int polls = rdma_fake::CqPolls(cq);
-  rdma_fake::CompleteOnArm(cq, state->qp->qp_num);
-  rdma_fake::Completion(cq, state->qp->qp_num);
-  Until([&] { return rdma_fake::AckedCqEvents() >= 2; });
-  EXPECT_GE(rdma_fake::CqPolls(cq), polls + 2);
-  EXPECT_EQ(rdma_fake::Notifications(cq), 2);
-  rdma_fake::Completion(cq, state->qp->qp_num);
-  Until([&] { return rdma_fake::AckedCqEvents() == 3; });
-  EXPECT_TRUE(pair->first.IsOpen());
+  for (bool during_arm : {false, true}) {
+    for (int i = 0; i < 8; ++i) worker.RunOnce(false);
+    if (during_arm)
+      rdma_fake::CompleteOnArm(cq, state->qp->qp_num);
+    else
+      rdma_fake::Completion(cq, state->qp->qp_num);
+    bool waited = false;
+    ASSERT_TRUE(WorkerWaitTestPeer::Wait(worker, [&](auto phase) {
+      waited |= phase == WorkerWaitTestPeer::Phase::kWaiting;
+    }));
+    EXPECT_FALSE(waited);
+    EXPECT_EQ(rdma_fake::PendingCompletions(cq), 0U);
+  }
+}
+
+TEST_F(RcLoop, ReceiveRacingEachSleepPhaseIsConsumedOrWakesRing) {
+  using Phase = WorkerWaitTestPeer::Phase;
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  std::array<std::byte, 8> input{std::byte{0x53}}, output{};
+  auto source = Buffer(pair->first, input);
+  auto destination = Buffer(pair->second, output);
+  for (auto target : {Phase::kPrepared, Phase::kRechecked, Phase::kParked,
+                      Phase::kSubmitted, Phase::kWaiting}) {
+    SCOPED_TRACE(static_cast<int>(target));
+    for (int i = 0; i < 8; ++i) worker.RunOnce(false);
+    output.fill(std::byte{});
+    auto recv = pair->second.SubmitRecv(destination);
+    ASSERT_TRUE(recv.ok());
+    std::optional<RcOperation> send;
+    bool waiting = false;
+    ASSERT_TRUE(WorkerWaitTestPeer::Wait(worker, [&](auto phase) {
+      waiting |= phase == Phase::kWaiting;
+      if (phase != target) return;
+      auto submitted = pair->first.SubmitSend(source);
+      ASSERT_TRUE(submitted.ok());
+      send.emplace(std::move(*submitted));
+      EXPECT_FALSE(send->ready());
+      EXPECT_FALSE(recv->ready());
+    }));
+    ASSERT_TRUE(send.has_value());
+    if (target == Phase::kPrepared) EXPECT_FALSE(waiting);
+    Until([&] { return send->ready() && recv->ready(); });
+    EXPECT_TRUE(send->result().ok());
+    EXPECT_TRUE(recv->result().ok());
+    EXPECT_EQ(output, input);
+  }
+}
+
+TEST_F(RcLoop, AbandonedWaitThenCloseAndShutdownRetiresQueuedNotifications) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  auto state = Peer::State(pair->first);
+  auto device = state->device;
+  auto engine = state->engine.lock();
+  std::array<std::byte, 8> buffer{};
+  auto recv = pair->first.SubmitRecv(Buffer(pair->first, buffer));
+  ASSERT_TRUE(recv.ok());
+  std::optional<absl::StatusOr<RcCompletion>> result;
+  worker.Spawn(Collect(recv->Wait(), &result));
+  for (int i = 0; i < 8; ++i) worker.RunOnce(false);
+  bool waited = false;
+  ASSERT_TRUE(WorkerWaitTestPeer::Wait(worker, [&](auto phase) {
+    waited |= phase == WorkerWaitTestPeer::Phase::kWaiting;
+    if (phase != WorkerWaitTestPeer::Phase::kPrepared) return;
+    rdma_fake::Completion(device->cq, state->qp->qp_num);
+    engine->Close(state, absl::CancelledError("close during idle recheck"));
+  }));
+  EXPECT_FALSE(waited);
+  const int arms = rdma_fake::NotificationArms(device->cq);
+  worker.Shutdown();
+  EXPECT_EQ(rdma_fake::NotificationArms(device->cq), arms);
+  EXPECT_EQ(rdma_fake::AckedCqEvents(), rdma_fake::Notifications(device->cq));
+  EXPECT_FALSE(device->completion_poll.armed);
+  EXPECT_TRUE(engine->devices.empty());
+  EXPECT_TRUE(state->closed);
 }
 
 TEST_F(RcLoop, TimeoutRetiresIdQpAndTimerBeforeReturn) {
@@ -1385,12 +1499,21 @@ TEST_F(RcLoop, FailedQpCreationUnwindsAndCanRetry) {
   EXPECT_TRUE(Pair().ok());
 }
 
-TEST_F(RcLoop, FailedNotificationSetupRetainsNoConnection) {
+TEST_F(RcLoop, FailedIdleArmClosesDeviceAndDoesNotSleep) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  auto state = Peer::State(pair->first);
   rdma_fake::FailNextNotify();
-  auto result = Run(RcConnection::Connect(worker, ip, 12345));
-  EXPECT_FALSE(result.ok());
-  EXPECT_EQ(rdma_fake::LiveIds(), 0);
-  EXPECT_EQ(rdma_fake::LiveQps(), 0);
+  bool waited = false;
+  ASSERT_TRUE(WorkerWaitTestPeer::Wait(worker, [&](auto phase) {
+    waited |= phase == WorkerWaitTestPeer::Phase::kWaiting;
+  }));
+  EXPECT_FALSE(waited);
+  EXPECT_FALSE(pair->first.IsOpen());
+  Until([&] { return state->closed; });
+  EXPECT_NE(
+      std::string(pair->first.status().message()).find("ibv_req_notify_cq"),
+      std::string::npos);
 }
 
 TEST_F(RcLoop, CqFailureTerminatesAllSharingConnectionsAfterAck) {
@@ -1439,6 +1562,8 @@ TEST_F(RcLoop, WorkerShutdownRetainsSharedPollsUntilRingQuiescence) {
   auto state = Peer::State(pair->first);
   auto engine = state->engine.lock();
   auto device = state->device;
+  ASSERT_TRUE(engine->PrepareWait());
+  engine->FinishWait();
   rdma_fake::Completion(device->cq, state->qp->qp_num);
   engine->BeginShutdown();
   EXPECT_TRUE(engine->cm_poll.armed);

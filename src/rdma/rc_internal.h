@@ -170,6 +170,8 @@ class Engine {
   static constexpr unsigned kCqPollBudget = 64;
   static constexpr unsigned kCqPollBatch = 32;
   bool PollCqs();
+  bool PrepareWait();
+  void FinishWait() { preparing_wait = false; }
   void DrainCq(Device& device);
   void DrainAsync(Device& device);
   void FailDevice(Device& device, const absl::Status& error);
@@ -205,12 +207,14 @@ class Engine {
                 int status, std::vector<std::byte> data, rdma_conn_param peer);
   void Established(const LocalSharedPtr<Connection>& connection);
   void FailAll(const absl::Status& error);
-  void DrainNotifications(Device& device, bool rearm);
+  void DrainNotifications(Device& device);
   // Separate dense traversal from name lookup: no hash-table scan, allocation,
   // or snapshot on each worker poll. A retained entry survives failure fanout.
   std::vector<LocalSharedPtr<Device>> poll_devices;
   std::size_t next_device = 0;
   unsigned PollCq(Device& device, unsigned budget);
+  bool preparing_wait = false;
+  absl::Status ArmNotification(Device& device);
   std::uint64_t next_operation = 1;
   absl::Status Post(Connection& connection, Operation& operation);
   void Finish(LocalSharedPtr<Operation> operation,

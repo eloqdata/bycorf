@@ -204,6 +204,8 @@ absl::StatusOr<LocalSharedPtr<Engine>> CreateEngine(Worker& worker) {
   return engine;
 }
 bool PollCompletions(Engine& engine) { return engine.PollCqs(); }
+bool PrepareWait(Engine& engine) { return engine.PrepareWait(); }
+void FinishWait(Engine& engine) { engine.FinishWait(); }
 void BeginShutdown(const LocalSharedPtr<Engine>& engine) {
   if (engine) engine->BeginShutdown();
 }
@@ -323,10 +325,9 @@ absl::StatusOr<LocalSharedPtr<Device>> Engine::GetDevice(Connection& c) {
   // destroy a tag or fd that the ring may still reference.
   devices.emplace(name, device);
   poll_devices.push_back(device);
-  result = ibv_req_notify_cq(device->cq, 0);
-  if (result) status = absl::ErrnoToStatus(result, "ibv_req_notify_cq");
-  if (status.ok()) DrainCq(*device);  // arm then recheck, including startup
-  if (status.ok()) status = device->error;
+  // A CM completion in the idle recheck can create a device after the initial
+  // PrepareWait scan. Include it in this same arm-before-recheck handshake.
+  if (preparing_wait) status = ArmNotification(*device);
   if (status.ok()) status = device->completion_poll.Arm();
   if (status.ok()) status = device->async_poll.Arm();
   if (!status.ok()) {
@@ -562,6 +563,28 @@ void Engine::DrainCm() {
   }
 }
 
+absl::Status Engine::ArmNotification(Device& device) {
+  const int result = ibv_req_notify_cq(device.cq, 0);
+  return result ? absl::ErrnoToStatus(result, "ibv_req_notify_cq")
+                : absl::OkStatus();
+}
+bool Engine::PrepareWait() {
+  if (stopping) return false;
+  preparing_wait = true;
+  for (std::size_t i = 0; i < poll_devices.size(); ++i) {
+    auto device = poll_devices[i];
+    if (!device->error.ok()) continue;
+    // Request on EVERY wait attempt. A queued event may belong to a previous
+    // arm whose CQE was polled while busy; acknowledging it cannot tell us
+    // whether a newer arm is still active. No cached "armed" bit is reliable.
+    auto status = ArmNotification(*device);
+    if (!status.ok()) [[unlikely]] {
+      FailDevice(*device, status);
+      return false;
+    }
+  }
+  return true;
+}
 bool Engine::PollCqs() {
   if (stopping) return false;
   unsigned remaining = kCqPollBudget;
@@ -638,13 +661,13 @@ unsigned Engine::PollCq(Device& device, unsigned budget) {
   }
   return consumed;
 }
-void Engine::DrainNotifications(Device& device, bool rearm) {
+void Engine::DrainNotifications(Device& device) {
   for (;;) {
     ibv_cq* cq = nullptr;
     void* context = nullptr;
     if (ibv_get_cq_event(device.channel, &cq, &context)) {
       if (errno == EINTR) continue;
-      if (!Again() && rearm) [[unlikely]] {
+      if (!Again() && !stopping && device.error.ok()) [[unlikely]] {
         FailDevice(device, ErrnoStatus("ibv_get_cq_event"));
       }
       return;
@@ -653,19 +676,10 @@ void Engine::DrainNotifications(Device& device, bool rearm) {
     if (cq != device.cq) [[unlikely]] {
       FailDevice(device, absl::InternalError(
                              "unexpected CQ on worker completion channel"));
-      continue;
     }
-    if (rearm && device.error.ok()) {
-      const int result = ibv_req_notify_cq(cq, 0);
-      if (result) [[unlikely]] {
-        FailDevice(device, absl::ErrnoToStatus(result, "ibv_req_notify_cq"));
-        continue;
-      }
-      // The worker rechecks CQs with its shared budget after polling the ring.
-      // Do not drain here: fd callbacks must not bypass that CQE budget.
-      // Leave additional channel events readable for a later ring turn.
-      return;
-    }
+    // CQEs may already have been consumed by active polling. Acknowledge all
+    // queued events without rearming or changing newer notification state.
+    // With no rearm here, traffic cannot generate an unbounded event stream.
   }
 }
 void Engine::DrainAsync(Device& device) {
@@ -712,7 +726,7 @@ void Engine::OnPoll(Poll& poll, int result) {
       DrainCm();
       break;
     case Poll::Kind::kCq:
-      DrainNotifications(*poll.device, true);
+      DrainNotifications(*poll.device);
       break;
     case Poll::Kind::kAsync:
       DrainAsync(*poll.device);
@@ -738,7 +752,7 @@ void Engine::RetireFailedDevice(Device& device) {
   if (stopping || device.error.ok() || device.reserved != 0 ||
       device.completion_poll.armed || device.async_poll.armed)
     return;
-  DrainNotifications(device, false);
+  DrainNotifications(device);
   DrainAsync(device);
   for (auto it = devices.begin(); it != devices.end(); ++it) {
     if (it->second.get() == &device) {
@@ -854,6 +868,7 @@ void Engine::Progress(LocalSharedPtr<Listener> listener) {
 void Engine::BeginShutdown() {
   if (stopping) return;
   stopping = true;
+  preparing_wait = false;
   cm_poll.Stop();
   for (auto& [name, device] : devices) {
     device->completion_poll.Stop();
@@ -878,7 +893,7 @@ void Engine::AfterRingShutdown() {
   }
   for (auto& listener : Snapshot(listeners)) Progress(listener);
   for (auto& [name, device] : devices) {
-    DrainNotifications(*device, false);
+    DrainNotifications(*device);
     DrainAsync(*device);
     // Public connection states can survive shutdown; release device references
     // there too, but exported PD/MR handles independently retain their context.
