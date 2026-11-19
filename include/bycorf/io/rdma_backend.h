@@ -65,6 +65,12 @@ class RdmaBackend {
   // No engine is created by worker polling. Completion dispatch only queues
   // continuations; the worker retains control of scheduling and fairness.
   bool PollRdma() { return engine_ && rdma::detail::PollCompletions(*engine_); }
+  bool PrepareRdmaWait() {
+    return !engine_ || rdma::detail::PrepareWait(*engine_);
+  }
+  void FinishRdmaWait() {
+    if (engine_) rdma::detail::FinishWait(*engine_);
+  }
   // Stop admission before the ring shuts down. Tags/resources remain retained
   // until terminal completions or AfterRingShutdown confirms kernel quiescence.
   void Shutdown() {

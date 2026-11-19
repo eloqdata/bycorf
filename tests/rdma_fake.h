@@ -34,6 +34,7 @@ void Async(ibv_context* context, ibv_event_type type, ibv_qp* qp = nullptr);
 // Inject a CQE exactly when notification is requested, before the CQ recheck.
 void CompleteOnArm(ibv_cq* cq, std::uint32_t qp);
 int CqPolls(ibv_cq* cq);
+int NotificationArms(ibv_cq* cq);
 int Notifications(ibv_cq* cq);
 int AckedCqEvents();
 int AckedAsyncEvents();

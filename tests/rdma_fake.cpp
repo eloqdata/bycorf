@@ -44,7 +44,7 @@ struct Qp {
 struct Cq {
   bool armed = false;
   unsigned inject_qp = 0;
-  int polls = 0, notifications = 0;
+  int polls = 0, notifications = 0, arms = 0;
   std::deque<ibv_wc> completions;
 };
 struct Fake {
@@ -117,8 +117,9 @@ int PollCq(ibv_cq* cq, int capacity, ibv_wc* output) {
 }
 int ArmCq(ibv_cq* cq, int solicited) {
   EXPECT_EQ(solicited, 0);
-  if (std::exchange(f.fail_notify, false)) return EIO;
   auto& state = f.cqs.at(cq);
+  ++state.arms;
+  if (std::exchange(f.fail_notify, false)) return EIO;
   state.armed = true;
   if (auto qp = std::exchange(state.inject_qp, 0U))
     rdma_fake::Completion(cq, qp);
@@ -355,6 +356,7 @@ void Async(ibv_context* context, ibv_event_type type, ibv_qp* qp) {
 void CompleteOnArm(ibv_cq* cq, std::uint32_t qp) {
   f.cqs.at(cq).inject_qp = qp;
 }
+int NotificationArms(ibv_cq* cq) { return f.cqs.at(cq).arms; }
 int CqPolls(ibv_cq* cq) { return f.cqs.at(cq).polls; }
 int Notifications(ibv_cq* cq) { return f.cqs.at(cq).notifications; }
 int AckedCqEvents() { return f.cq_acks; }

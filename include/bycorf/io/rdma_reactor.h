@@ -20,6 +20,10 @@ class Engine;
 absl::StatusOr<LocalSharedPtr<Engine>> CreateEngine(Worker& worker);
 // Bounded CQ progress; true also prevents sleep when the budget is exhausted.
 bool PollCompletions(Engine& engine);
+// Prepare notifications before the worker rechecks all sources. False means
+// device failure made progress and this wait attempt must be abandoned.
+bool PrepareWait(Engine& engine);
+void FinishWait(Engine& engine);
 void BeginShutdown(const LocalSharedPtr<Engine>& engine);
 void AfterRingShutdown(const LocalSharedPtr<Engine>& engine);
 }  // namespace detail
