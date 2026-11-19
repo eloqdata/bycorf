@@ -27,7 +27,8 @@ worker main functions from entering partial service initialization.
 A `Worker` owns its coroutine queues, connections, completion handling, and
 [shared I/O backend and adapters](io.md). Each round polls completions and
 runs bounded foreground and background coroutine work. The worker polls the
-shared ring before native network work and polled storage. Before maintenance
+shared ring before native network work, polled storage and bounded RDMA CQ
+work. RDMA rotates across devices and yields at its CQE budget. Before maintenance
 and at the end of the round, it queues peer wakes, flushes native network
 output, and submits the shared ring. Idle rechecks use the same ordering;
 facades do not poll or submit the ring on the worker's behalf. Coroutines
@@ -56,8 +57,9 @@ unsubmitted operations, or storage requiring polling prevent sleep. Network
 deadlines and enabled connection-idle checks bound the wait. Optional RDMA CM,
 CQ-notification and device-async polls are persistent wake sources on this same
 ring; RDMA connection deadlines are absolute ring timeouts. CQ notifications
-are always armed and rechecked, so RDMA needs no busy polling or additional
-sleep-preparation phase.
+remain armed while the worker also polls CQs directly. The pre-sleep recheck
+uses the same bounded RDMA poll; any consumed CQE prevents sleep, including
+when a full batch may have left more work without another notification.
 
 Cross-worker submissions enter destination mailboxes and resume coroutines on
 their original workers. The mailbox handshake makes racing publication either
