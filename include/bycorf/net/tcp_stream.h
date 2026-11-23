@@ -31,6 +31,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/functional/function_ref.h"
 #include "absl/status/statusor.h"
 #include "bycorf/io/completion.h"
 #include "bycorf/net/connection.h"
@@ -63,6 +64,22 @@ class ReadOperation final : public IoCompletion {
   std::optional<absl::Status> immediate_status_;
   std::optional<std::size_t> immediate_result_;
   bool drain_buffered_ = false;
+};
+
+// Delivers one receive buffer to a synchronous consumer on the owning worker.
+class VisitReadOperation {
+ public:
+  using Consumer = absl::FunctionRef<void(std::span<const std::byte>)>;
+  VisitReadOperation(Connection* connection, Consumer consume) noexcept
+      : connection_(connection), consume_(consume) {}
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+  absl::StatusOr<std::size_t> await_resume();
+
+ private:
+  Connection* connection_;
+  Consumer consume_;
+  std::optional<absl::Status> immediate_status_;
 };
 
 class WriteOperation final : public IoCompletion {
@@ -208,6 +225,13 @@ class TcpStream {
     // Read from the front receive buffer, returning zero at EOF.
     ReadOperation ReadSome(std::span<std::byte> buffer) const noexcept {
       return ReadOperation(connection_, buffer);
+    }
+    // Wait for one received chunk, visit it synchronously, then recycle it.
+    // The consumer must live through the await, must not reenter the stream,
+    // and may use the bytes only during its call. EOF returns zero without
+    // invoking the consumer.
+    VisitReadOperation VisitSome(VisitReadOperation::Consumer consume) const {
+      return VisitReadOperation(connection_, consume);
     }
     // Send a prefix. Keep the source alive through completion.
     WriteOperation WriteSome(std::span<const std::byte> buffer) const noexcept {

@@ -20,7 +20,10 @@ limitations under the License.
 connections, and starts session coroutines. `TcpStream` exposes asynchronous
 byte-stream reads and writes; protocols such as an application's RESP parser
 operate above this boundary. The HTTP service and OpenSSL TLS adaptation also
-consume the stream abstraction.
+consume the stream abstraction. Plaintext protocols can visit a received byte
+range synchronously on the owner worker. The transport retains the buffer
+through that call and recycles it on return. Protocols own any input they
+retain across suspension.
 
 A connection allows one pending reader and one pending writer. Closure stops
 new operations and retires the connection only after buffers, completions, and
