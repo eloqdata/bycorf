@@ -24,6 +24,9 @@ bool Worker::WaitForWork(Observer&& observe) {
       return false;
     }
     if (!*prepared) return true;
+#if BYCORF_ENABLE_RDMA
+    if (!Rdma::PrepareRdmaWait()) return true;
+#endif
     observe(WaitPhase::kPrepared);
 
     // Snapshot BEFORE draining. Publication after the empty check changes the
@@ -77,6 +80,9 @@ bool Worker::WaitForWork(Observer&& observe) {
     return KernelBackend().Wait(timeout_ms);
   }();
   if (parked) mb.wake_seq_.store(0, std::memory_order_release);
+#if BYCORF_ENABLE_RDMA
+  Rdma::FinishRdmaWait();
+#endif
   const auto finished = Network::FinishWait(waited);
   if (!finished.ok()) {
     spdlog::error("worker finish wait failed: {}", finished.message());

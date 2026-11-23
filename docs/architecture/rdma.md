@@ -120,20 +120,31 @@ are inserted.
 
 The CM channel, completion channel and private context's async-event fd are
 nonblocking, with persistent one-shot readiness polls in the shared io_uring.
-A CQ notification is requested before checking the CQ, including initial
-activation. Each delivered CQ event is acknowledged, notification is requested
-again, and the fd poll is rearmed. Notification callbacks do not drain data
-completions. The worker directly polls CQs in normal rounds, busy polling and
-its pre-sleep recheck, with a shared CQE budget and a per-device quantum.
-Traversal rotates across devices, so a busy CQ cannot monopolize the worker
-or starve another CQ. Any CQ progress, including an exhausted budget, prevents
-sleep and returns control to other I/O sources, mailboxes and scheduled work.
-An event may remain after its CQE was already consumed; it still needs
-acknowledgement and rearming. Notifications stay enabled during busy and idle
-periods. Pending work is either visible in the CQ recheck or capable of waking
-an idle worker; there is no separate polling thread or second ring.
-QP retirement separately drains the shared CQ before releasing its reservation;
-that exceptional drain is bounded by CQ capacity even if other QPs refill it.
+The worker directly polls CQs in normal rounds, busy polling and its pre-sleep
+recheck, with a shared CQE budget and a per-device quantum. Traversal rotates
+across devices, so a busy CQ cannot monopolize the worker or starve another CQ.
+Any CQ progress, including an exhausted budget, prevents sleep and returns
+control to other I/O sources, mailboxes and scheduled work. QP retirement
+separately drains the shared CQ before releasing its reservation; that
+exceptional drain is bounded by CQ capacity even if other QPs refill it.
+
+Each sleep attempt requests CQ notifications before rechecking the shared
+ring, CQs, other I/O sources and runnable work, then completes the mailbox
+handshake and submits the ring before waiting. A device created by a CM event
+during this recheck is armed as part of the same attempt. A racing completion
+is either consumed in the recheck or leaves a persistent channel event that
+wakes the shared ring. CM and device-async notifications remain persistent.
+
+Completion-channel events are acknowledged and their fd readiness poll is
+rearmed even when active polling already consumed the corresponding CQE.
+They do not request new CQ notifications. Every sleep attempt issues a fresh
+notification request; no cached armed flag is inferred from an event, because
+an old queued event can outlive a newer request. Abandoning sleep ends the
+preparation phase but leaves any hardware notification request intact (verbs
+has no disarm operation). Busy polling may therefore receive a leftover event
+without enabling an ongoing notification stream. Shutdown stops preparation
+and retains fd tags until ring quiescence, then acknowledges remaining events
+before resource destruction. There is no separate polling thread or second ring.
 
 CM events are copied and acknowledged before dispatch can destroy an ID.
 Failures retain the CM event name/raw status or the failing verbs operation.
