@@ -200,6 +200,34 @@ class TcpStream {
   // with their own bounded ingress queues.
   absl::Status SetReadAhead(bool enabled) noexcept;
 
+  // Borrowed operations for protocols that keep the connection in plaintext.
+  // Await each operation on the owner worker, before closing the stream or
+  // starting TLS. The view does not extend connection storage lifetime.
+  class PlaintextView {
+   public:
+    // Read from the front receive buffer, returning zero at EOF.
+    ReadOperation ReadSome(std::span<std::byte> buffer) const noexcept {
+      return ReadOperation(connection_, buffer);
+    }
+    // Send a prefix. Keep the source alive through completion.
+    WriteOperation WriteSome(std::span<const std::byte> buffer) const noexcept {
+      return WriteOperation(connection_, buffer);
+    }
+
+   private:
+    friend class TcpStream;
+    explicit PlaintextView(Connection* connection) : connection_(connection) {}
+    Connection* connection_;
+  };
+
+  // Acquire once for a plaintext session to await I/O in the session frame.
+  std::optional<PlaintextView> GetPlaintextView() const noexcept {
+    // Another handle to this connection can have negotiated TLS.
+    if (!IsOpen() || IsTls() || connection_->tls_state_) return std::nullopt;
+    return PlaintextView(connection_);
+  }
+
+  // Read application bytes, decrypting them when TLS is active.
   Task<absl::StatusOr<std::size_t>> ReadSome(std::span<std::byte> buffer);
   // Wait for initial data, then copy currently queued receive buffers up to
   // buffer.size(). Never wait to fill the destination; its size bounds work
