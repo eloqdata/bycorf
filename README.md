@@ -227,6 +227,15 @@ ordering, remote range/permission failures and host-order immediate values. They
 io_uring with link-time CM/verbs stubs. No device is opened by unused workers or
 test discovery.
 
+For a complete real-device run, including independent client/server examples,
+use the [RDMA testing guide](docs/rdma-testing.md). Its integration runner fails
+if any selected device test is skipped, and checks every supported RC data
+opcode with 1-byte, 64-KiB and 1-MiB payloads:
+
+```bash
+python3 tests/rdma_integration.py --build-dir build-rdma --device rxe0 --ip 192.0.2.1
+```
+
 Use `Worker::OpenRdmaDevice(name)` or `AcquireRdmaDomain(owning_context)` on the
 owner worker, then `RegisterRdmaMemory(domain, backing_span, explicit_access)`.
 Keep the returned domain through QP destruction. `RegisteredMemory::Slice`
@@ -307,6 +316,14 @@ The first three arguments are the bind address, port, and worker count. The
 server echoes bytes received from any TCP client. Stop it with Ctrl-C.
 Workers pin to CPUs in the process's allowed affinity mask by default, so
 choose a worker count no larger than the number of allowed CPUs.
+
+### RDMA client/server
+
+With `BYCORF_ENABLE_RDMA=ON`, run `bycorf_rdma_demo server <rdma-ip>` and
+`bycorf_rdma_demo client <rdma-ip>` in separate terminals. Each side exits after
+one checked exchange of all supported RC data operations. See the
+[RDMA testing guide](docs/rdma-testing.md) for Soft-RoCE setup, payload sizes,
+deadlines and the real-device integration runner.
 
 ### RPC echo and benchmark
 

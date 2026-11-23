@@ -418,6 +418,18 @@ if (BYCORF_BUILD_EXAMPLES)
     example/rpc_bench.cpp
   )
   target_link_libraries(rpc_bench PRIVATE bycorf::rpc)
+
+  if (BYCORF_ENABLE_RDMA)
+    add_executable(bycorf_rdma_demo
+      example/rdma_demo.cpp example/rdma_demo_session.cpp)
+    target_link_libraries(bycorf_rdma_demo PRIVATE bycorf::core)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+      target_compile_options(bycorf_rdma_demo PRIVATE -Wall -Wextra -Wpedantic)
+      if (BYCORF_ENABLE_WERROR)
+        target_compile_options(bycorf_rdma_demo PRIVATE -Werror)
+      endif()
+    endif()
+  endif()
 endif()
 
 # Command-line probes keep their explicit environment/argument contracts. They
@@ -489,7 +501,8 @@ if (BYCORF_BUILD_TESTS)
     endforeach()
     bycorf_discover_tests(bycorf_rdma_memory_tests 30 "runtime;rdma;unit")
 
-    add_executable(bycorf_rdma_rc_fake_tests tests/rdma_rc_test.cpp tests/rdma_fake.cpp)
+    add_executable(bycorf_rdma_rc_fake_tests tests/rdma_rc_test.cpp tests/rdma_fake.cpp
+      example/rdma_demo_session.cpp)
     target_compile_definitions(bycorf_rdma_rc_fake_tests PRIVATE BYCORF_RDMA_FAKE=1)
     target_link_libraries(bycorf_rdma_rc_fake_tests PRIVATE bycorf::core GTest::gtest_main)
     foreach(symbol IN ITEMS rdma_create_event_channel rdma_destroy_event_channel
@@ -505,13 +518,22 @@ if (BYCORF_BUILD_TESTS)
     endforeach()
     bycorf_discover_tests(bycorf_rdma_rc_fake_tests 30 "runtime;rdma;stub")
 
-    add_executable(bycorf_rdma_rc_tests tests/rdma_rc_test.cpp)
+    add_executable(bycorf_rdma_rc_tests tests/rdma_rc_test.cpp
+      example/rdma_demo_session.cpp)
     target_link_libraries(bycorf_rdma_rc_tests PRIVATE bycorf::core GTest::gtest_main)
     bycorf_discover_tests(bycorf_rdma_rc_tests 30 "runtime;rdma;integration")
 
     add_executable(bycorf_rdma_registration_tests tests/rdma_registration_test.cpp)
     target_link_libraries(bycorf_rdma_registration_tests PRIVATE bycorf::core GTest::gtest_main)
     bycorf_discover_tests(bycorf_rdma_registration_tests 30 "runtime;rdma;integration")
+
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (Python3_Interpreter_FOUND)
+      add_test(NAME bycorf_RdmaIntegrationRunner
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/rdma_integration_test.py)
+      set_tests_properties(bycorf_RdmaIntegrationRunner PROPERTIES
+        TIMEOUT 30 LABELS "rdma;unit")
+    endif()
   endif()
 
   add_executable(bycorf_dpdk_memory_budget_tests
