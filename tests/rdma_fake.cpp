@@ -60,6 +60,7 @@ struct Fake {
   absl::flat_hash_map<ibv_qp*, Qp> qps;
   absl::flat_hash_map<std::uint32_t, ibv_mr*> mrs;
   absl::flat_hash_map<std::uint32_t, int> permissions;
+  unsigned selected_device = 0;
   std::uint32_t wire_immediate = 0;
   int post_error[2]{}, posts[2]{};
   bool hold_transfers = false, drop_flush = false, defer_notification = false;
@@ -69,8 +70,8 @@ struct Fake {
   std::uint16_t next_port = 10000;
   int cq_acks = 0, async_acks = 0;
 } f;
-ibv_device device{};
-ibv_context cm_context{};
+ibv_device devices[3]{};
+ibv_context cm_contexts[3]{};
 
 int EventFd() { return eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC | EFD_SEMAPHORE); }
 void Notify(int fd) {
@@ -292,7 +293,14 @@ void Flush(ibv_qp* qp) {
 namespace rdma_fake {
 void Reset() {
   f = {};
-  cm_context.device = &device;
+  for (unsigned i = 0; i < 3; ++i) cm_contexts[i].device = &devices[i];
+}
+void SelectDevice(unsigned index) {
+  ASSERT_LT(index, 3U);
+  f.selected_device = index;
+}
+std::size_t PendingCompletions(ibv_cq* cq) {
+  return f.cqs.at(cq).completions.size();
 }
 void CheckEmpty() {
   EXPECT_TRUE(f.channels.empty());
@@ -374,7 +382,7 @@ int __wrap_rdma_create_id(rdma_event_channel* channel, rdma_cm_id** output,
   auto* id = new rdma_cm_id{};
   id->channel = channel;
   id->context = context;
-  id->verbs = &cm_context;
+  id->verbs = &cm_contexts[f.selected_device];
   id->port_num = 1;
   id->qp_type = IBV_QPT_RC;
   f.ids.emplace(id, Id{});
@@ -485,7 +493,10 @@ int __wrap_rdma_init_qp_attr(rdma_cm_id*, ibv_qp_attr*, int* mask) {
   *mask = IBV_QP_STATE;
   return 0;
 }
-const char* __wrap_ibv_get_device_name(ibv_device*) { return "fake0"; }
+const char* __wrap_ibv_get_device_name(ibv_device* device) {
+  static constexpr const char* names[]{"fake0", "fake1", "fake2"};
+  return names[device - devices];
+}
 ibv_context* __wrap_ibv_open_device(ibv_device* dev) {
   auto* context = new ibv_context{};
   context->device = dev;

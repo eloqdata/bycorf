@@ -287,7 +287,8 @@ work removes it independently; cancelling posted work closes the entire QP.
 Join completion or `Close()` before destroying suspended callers or payload;
 worker shutdown stops DMA and callbacks before reclaiming coroutine frames.
 The application decides when to post receives and manages receive credits,
-remote windows and business buffer pools. The runtime remains notification-driven.
+remote windows and business buffer pools. The worker directly polls CQs with a bounded budget while retaining CQ
+notifications for idle wakeups.
 
 ## Run the examples
 

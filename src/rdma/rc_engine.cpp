@@ -203,6 +203,7 @@ absl::StatusOr<LocalSharedPtr<Engine>> CreateEngine(Worker& worker) {
   if (!status.ok()) return status;
   return engine;
 }
+bool PollCompletions(Engine& engine) { return engine.PollCqs(); }
 void BeginShutdown(const LocalSharedPtr<Engine>& engine) {
   if (engine) engine->BeginShutdown();
 }
@@ -321,6 +322,7 @@ absl::StatusOr<LocalSharedPtr<Device>> Engine::GetDevice(Connection& c) {
   // Retain the device BEFORE admitting any fd poll. A later failure must not
   // destroy a tag or fd that the ring may still reference.
   devices.emplace(name, device);
+  poll_devices.push_back(device);
   result = ibv_req_notify_cq(device->cq, 0);
   if (result) status = absl::ErrnoToStatus(result, "ibv_req_notify_cq");
   if (status.ok()) DrainCq(*device);  // arm then recheck, including startup
@@ -560,16 +562,41 @@ void Engine::DrainCm() {
   }
 }
 
+bool Engine::PollCqs() {
+  if (stopping) return false;
+  unsigned remaining = kCqPollBudget;
+  const auto visits = poll_devices.size();
+  for (std::size_t i = 0; i < visits && remaining && !poll_devices.empty();
+       ++i) {
+    if (next_device == poll_devices.size()) next_device = 0;
+    // Advance before dispatch: a failed device may erase itself and adjust
+    // the cursor. Never keep a vector reference or iterator across dispatch.
+    auto device = poll_devices[next_device++];
+    if (!device->error.ok()) continue;
+    remaining -= PollCq(*device, std::min(remaining, kCqPollBatch));
+  }
+  // A full batch may leave more CQEs without another notification. Reporting
+  // work prevents sleep and gives every other source a turn before retrying.
+  return remaining != kCqPollBudget;
+}
 void Engine::DrainCq(Device& device) {
-  ibv_wc completions[32];
-  for (;;) {
-    const int count = ibv_poll_cq(device.cq, 32, completions);
+  // Teardown must reclaim CQ capacity before returning the QP reservation.
+  // Bound even this exceptional drain: other live QPs can refill the shared CQ.
+  (void)PollCq(device, static_cast<unsigned>(device.cq->cqe));
+}
+unsigned Engine::PollCq(Device& device, unsigned budget) {
+  ibv_wc completions[kCqPollBatch];
+  unsigned consumed = 0;
+  while (consumed < budget) {
+    const int count = ibv_poll_cq(
+        device.cq, static_cast<int>(std::min(kCqPollBatch, budget - consumed)),
+        completions);
     if (count < 0) [[unlikely]] {
       FailDevice(device, absl::UnavailableError("ibv_poll_cq failed"));
-      return;
+      return consumed;
     }
-    // Empty is the normal end of a drain, including notification rechecks.
-    if (!count) return;
+    if (!count) return consumed;
+    consumed += static_cast<unsigned>(count);
     for (int i = 0; i < count; ++i) {
       const auto& wc = completions[i];
       auto found = operations.find(wc.wr_id);
@@ -609,6 +636,7 @@ void Engine::DrainCq(Device& device) {
       }
     }
   }
+  return consumed;
 }
 void Engine::DrainNotifications(Device& device, bool rearm) {
   for (;;) {
@@ -633,10 +661,10 @@ void Engine::DrainNotifications(Device& device, bool rearm) {
         FailDevice(device, absl::ErrnoToStatus(result, "ibv_req_notify_cq"));
         continue;
       }
-      // Notification is one-shot. Rearm BEFORE draining: a completion racing
-      // this drain is either consumed here or leaves a channel event to wake
-      // us.
-      DrainCq(device);
+      // The worker rechecks CQs with its shared budget after polling the ring.
+      // Do not drain here: fd callbacks must not bypass that CQE budget.
+      // Leave additional channel events readable for a later ring turn.
+      return;
     }
   }
 }
@@ -714,6 +742,12 @@ void Engine::RetireFailedDevice(Device& device) {
   DrainAsync(device);
   for (auto it = devices.begin(); it != devices.end(); ++it) {
     if (it->second.get() == &device) {
+      auto entry =
+          std::find_if(poll_devices.begin(), poll_devices.end(),
+                       [&](const auto& d) { return d.get() == &device; });
+      const auto index = static_cast<std::size_t>(entry - poll_devices.begin());
+      if (index < next_device) --next_device;
+      poll_devices.erase(entry);
       devices.erase(it);
       return;
     }
@@ -849,6 +883,8 @@ void Engine::AfterRingShutdown() {
     // Public connection states can survive shutdown; release device references
     // there too, but exported PD/MR handles independently retain their context.
   }
+  poll_devices.clear();
+  next_device = 0;
   devices.clear();
   if (cm) {
     rdma_destroy_event_channel(cm);

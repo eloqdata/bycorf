@@ -122,11 +122,18 @@ The CM channel, completion channel and private context's async-event fd are
 nonblocking, with persistent one-shot readiness polls in the shared io_uring.
 A CQ notification is requested before checking the CQ, including initial
 activation. Each delivered CQ event is acknowledged, notification is requested
-again, and the CQ is drained before rearming the fd poll. An event may remain
-after its CQE was already consumed; it still needs acknowledgement and rearming.
-Notifications stay enabled during busy and idle periods. This makes pending
-work either visible in the CQ recheck or capable of waking an idle worker;
-there is no separate polling thread or second ring.
+again, and the fd poll is rearmed. Notification callbacks do not drain data
+completions. The worker directly polls CQs in normal rounds, busy polling and
+its pre-sleep recheck, with a shared CQE budget and a per-device quantum.
+Traversal rotates across devices, so a busy CQ cannot monopolize the worker
+or starve another CQ. Any CQ progress, including an exhausted budget, prevents
+sleep and returns control to other I/O sources, mailboxes and scheduled work.
+An event may remain after its CQE was already consumed; it still needs
+acknowledgement and rearming. Notifications stay enabled during busy and idle
+periods. Pending work is either visible in the CQ recheck or capable of waking
+an idle worker; there is no separate polling thread or second ring.
+QP retirement separately drains the shared CQ before releasing its reservation;
+that exceptional drain is bounded by CQ capacity even if other QPs refill it.
 
 CM events are copied and acknowledged before dispatch can destroy an ID.
 Failures retain the CM event name/raw status or the failing verbs operation.

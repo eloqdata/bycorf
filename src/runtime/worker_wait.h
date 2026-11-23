@@ -32,6 +32,9 @@ bool Worker::WaitForWork(Observer&& observe) {
     bool work = KernelBackend().Poll();
     work |= Network::Poll();
     work |= PollStorage();
+#if BYCORF_ENABLE_RDMA
+    work |= Rdma::PollRdma();
+#endif
     work |= DrainCrossCore();
     observe(WaitPhase::kRechecked);
     if (work || HasRunnableWork() || NotifyWake() || Storage::NeedsPolling() ||

@@ -18,6 +18,8 @@ class Engine;
 // Used only by the private worker facade. Shutdown has two phases because
 // io_uring drops outstanding tags without callbacks when the ring is destroyed.
 absl::StatusOr<LocalSharedPtr<Engine>> CreateEngine(Worker& worker);
+// Bounded CQ progress; true also prevents sleep when the budget is exhausted.
+bool PollCompletions(Engine& engine);
 void BeginShutdown(const LocalSharedPtr<Engine>& engine);
 void AfterRingShutdown(const LocalSharedPtr<Engine>& engine);
 }  // namespace detail
