@@ -88,19 +88,27 @@ class EchoService final : public TcpService {
 
  protected:
   Task<absl::Status> Serve(TcpStream stream) override {
-    std::array<std::byte, 4096> buffer{};
+    const auto plain = stream.GetPlaintextView();
+    if (!plain) co_return absl::FailedPreconditionError("expected plain TCP");
+
+    std::array<std::byte, 4096> buffer;
     while (true) {
-      auto read_result = co_await stream.ReadSome(buffer);
+      auto read_result = co_await plain->ReadSome(buffer);
       if (!read_result.ok()) [[unlikely]] {
         co_return read_result.status();
       }
       if (*read_result == 0) [[unlikely]] {
         co_return absl::OkStatus();
       }
-      auto write_status = co_await stream.WriteAll(
-          std::span<const std::byte>(buffer.data(), *read_result));
-      if (!write_status.ok()) [[unlikely]] {
-        co_return write_status;
+      auto remaining = std::span(buffer).first(*read_result);
+      while (!remaining.empty()) {
+        auto sent = co_await plain->WriteSome(remaining);
+        if (!sent.ok()) [[unlikely]]
+          co_return sent.status();
+        if (*sent == 0) [[unlikely]] {
+          co_return absl::InternalError("echo write made no progress");
+        }
+        remaining = remaining.subspan(*sent);
       }
     }
   }
