@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "../example/rdma_demo_session.h"
 #include "../src/rdma/rc_internal.h"
 #include "bycorf/rdma/rc.h"
 #include "bycorf/runtime/worker.h"
@@ -111,6 +112,39 @@ class RcLoop : public testing::Test {
   CrossCore cc{2};
   Worker worker;
 };
+
+TEST_F(RcLoop, ExampleExercisesAllOpcodesAndJoinsPeerClose) {
+  for (std::size_t bytes : {1U, 65536U, 1048576U}) {
+    SCOPED_TRACE(bytes);
+    auto pair = Pair();
+    ASSERT_TRUE(pair.ok()) << pair.status();
+    std::optional<absl::Status> server, client;
+    worker.Spawn(Collect(
+        example::RunRdmaDemo(worker, pair->second, true, bytes), &server));
+    worker.Spawn(Collect(
+        example::RunRdmaDemo(worker, pair->first, false, bytes), &client));
+    Until([&] { return server && client; });
+    EXPECT_TRUE(server->ok()) << *server;
+    EXPECT_TRUE(client->ok()) << *client;
+    EXPECT_TRUE(Peer::State(pair->first)->closed);
+    EXPECT_TRUE(Peer::State(pair->second)->closed);
+  }
+}
+
+TEST_F(RcLoop, ExampleMismatchRetiresPendingReceives) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok()) << pair.status();
+  std::optional<absl::Status> server, client;
+  worker.Spawn(
+      Collect(example::RunRdmaDemo(worker, pair->second, true, 64), &server));
+  worker.Spawn(
+      Collect(example::RunRdmaDemo(worker, pair->first, false, 32), &client));
+  Until([&] { return server && client; });
+  EXPECT_TRUE(absl::IsInvalidArgument(*client)) << *client;
+  EXPECT_FALSE(server->ok());
+  EXPECT_TRUE(Peer::State(pair->first)->closed);
+  EXPECT_TRUE(Peer::State(pair->second)->closed);
+}
 
 TEST_F(RcLoop, IdleConnectAcceptPrivateDataAndSharedCq) {
   const std::array data{std::byte{0x31}, std::byte{0x72}};
@@ -428,6 +462,25 @@ TEST_F(RcLoop, ImmediateMessagesAndWriteNotificationsUseDifferentDestinations) {
 }
 
 #ifdef BYCORF_RDMA_FAKE
+TEST_F(RcLoop, ExampleShutdownQuiescesFrameOwnedPayload) {
+  auto pair = Pair();
+  ASSERT_TRUE(pair.ok());
+  rdma_fake::HoldTransfers(true);
+  std::optional<absl::Status> server, client;
+  worker.Spawn(Collect(example::RunRdmaDemo(worker, pair->second, true, 65536),
+                       &server));
+  worker.Spawn(Collect(example::RunRdmaDemo(worker, pair->first, false, 65536),
+                       &client));
+  for (int i = 0; i < 8; ++i) worker.RunOnce(false);
+  EXPECT_FALSE(server);
+  EXPECT_FALSE(client);
+  EXPECT_GT(rdma_fake::LiveMrs(), 0);
+  worker.Shutdown();
+  EXPECT_EQ(rdma_fake::LiveQps(), 0);
+  worker.DestroyDetachedTasks();
+  EXPECT_EQ(rdma_fake::LiveMrs(), 0);
+}
+
 TEST_F(RcLoop, MixedSqFifoSnapshotsAndQueuedCancellation) {
   RcOptions options;
   options.send_wr = options.recv_wr = 1;

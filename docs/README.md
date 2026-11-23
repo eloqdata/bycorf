@@ -22,6 +22,8 @@ limitations under the License.
   lifecycle, and backend integration.
 - [DPDK prototype](dpdk-prototype.md): prerequisites, build, virtual-device tests,
   physical-device configuration, and compatibility limits.
+- [RDMA examples and testing](rdma-testing.md): standalone client/server,
+  Soft-RoCE setup, and the explicit real-device integration gate.
 - [Roadmap](../ROADMAP.md): remaining runtime and RPC work.
 
 Source and tests are authoritative. Keep current architecture synchronized with
