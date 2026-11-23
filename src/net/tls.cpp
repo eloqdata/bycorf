@@ -373,12 +373,20 @@ Task<absl::StatusOr<std::size_t>> TlsState::ReadSome(
   while (true) {
     std::size_t size = 0;
     ERR_clear_error();
+    // The outbound BIO may already contain application records owned by a
+    // suspended writer. Only wait for output this read actually produced
+    // (e.g. a handshake message), or space OpenSSL explicitly needs.
+    auto* output = SSL_get_wbio(impl_->ssl_);
+    const auto written_before = BIO_number_written(output);
     const int result =
         SSL_read_ex(impl_->ssl_, buffer.data(), buffer.size(), &size);
     const int error =
         result == 1 ? SSL_ERROR_NONE : SSL_get_error(impl_->ssl_, result);
-    absl::Status flushed = co_await FlushOutput(stream);
-    if (!flushed.ok()) co_return flushed;
+    if (error == SSL_ERROR_WANT_WRITE ||
+        BIO_number_written(output) != written_before) {
+      absl::Status flushed = co_await FlushOutput(stream);
+      if (!flushed.ok()) co_return flushed;
+    }
     if (result == 1) co_return size;
     if (error == SSL_ERROR_ZERO_RETURN) co_return std::size_t{0};
     if (error == SSL_ERROR_WANT_WRITE) continue;

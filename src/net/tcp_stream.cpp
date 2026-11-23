@@ -711,6 +711,16 @@ Task<absl::Status> TcpStream::PauseRead() {
   co_return absl::OkStatus();
 }
 
+void TcpStream::Abort() noexcept {
+  // A submitted io_uring send can retain the kernel socket after close(fd).
+  // Shutdown wakes it even if the peer never opens its receive window. This
+  // is explicit because ordinary Close also retires duplicate handoff fds.
+  if (!IsOpen()) return;
+  const int fd = NativeFd();
+  if (!detail::IsDpdkSocket(fd)) (void)::shutdown(fd, SHUT_RDWR);
+  (void)Close();
+}
+
 absl::Status TcpStream::Close() noexcept {
   if (connection_ == nullptr) {
     return absl::OkStatus();
