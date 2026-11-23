@@ -376,7 +376,6 @@ target_link_libraries(bycorf PUBLIC
   bycorf_liburing
   absl::base
   absl::flat_hash_map
-  absl::function_ref
   absl::status
   absl::statusor
 )

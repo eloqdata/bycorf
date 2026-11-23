@@ -250,14 +250,15 @@ void ReadOperation::Complete(Worker& worker, int result, unsigned flags) {
   (void)flags;
 }
 
-bool VisitReadOperation::await_suspend(std::coroutine_handle<> awaiting) {
+bool detail::ReceiveVisit::await_suspend(std::coroutine_handle<> awaiting) {
   return WaitForReceived(connection_, awaiting, immediate_status_);
 }
 
-absl::StatusOr<std::size_t> VisitReadOperation::await_resume() {
+absl::StatusOr<std::span<const std::byte>> detail::ReceiveVisit::Front() const {
   if (immediate_status_) return *immediate_status_;
   if (auto status = CheckReceived(connection_); !status.ok()) return status;
-  if (connection_->received_buffers_.empty()) return std::size_t{0};
+  if (connection_->received_buffers_.empty())
+    return std::span<const std::byte>{};
 
   const ReceivedBuffer received = connection_->received_buffers_.front();
   const auto length = received.size_ - received.offset_;
@@ -266,12 +267,13 @@ absl::StatusOr<std::size_t> VisitReadOperation::await_resume() {
   if (bytes.size() != length) {
     return absl::InternalError("invalid receive buffer view");
   }
-  // The queue owns the buffer through the callback (including unwinding).
-  // Both multishot recycling and one-shot reuse are safe after it returns.
-  consume_(bytes);
+  return bytes;
+}
+
+void detail::ReceiveVisit::ConsumeFront() {
+  const auto id = connection_->received_buffers_.front().buffer_id_;
   connection_->received_buffers_.pop_front();
-  connection_->worker_->ReleaseReceivedBuffer(connection_, received.buffer_id_);
-  return bytes.size();
+  connection_->worker_->ReleaseReceivedBuffer(connection_, id);
 }
 
 WriteOperation::WriteOperation(Connection* connection,
