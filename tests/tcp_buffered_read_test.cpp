@@ -330,6 +330,43 @@ bycorf::Task<absl::Status> CheckPeerCloses(bycorf::Worker& worker) {
   co_return absl::OkStatus();
 }
 
+bycorf::Task<absl::Status> AbortPendingSend(
+    bycorf::Worker& worker, bycorf::TcpStream stream,
+    bycorf::ConnectionStorageBorrow /*storage*/) {
+  // Let io_uring submit the send against a full socket buffer before aborting.
+  auto status = co_await bycorf::SleepFor(worker, 10ms);
+  stream.Abort();
+  co_return status;
+}
+
+bycorf::Task<absl::Status> CheckBlockedSendAbort(bycorf::Worker& worker) {
+  int pair[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, pair))
+    co_return absl::ErrnoToStatus(errno, "socketpair");
+  absl::Cleanup close_peer = [&] { close(pair[1]); };
+  bycorf::Connection initial;
+  initial.worker_ = &worker;
+  initial.file_.fd_ = pair[0];
+  initial.closed_ = false;
+  auto* connection = worker.AddConnection(std::move(initial));
+  bycorf::TcpStream stream(connection);
+  auto storage = stream.BorrowStorage();
+  absl::Cleanup close = [&] { (void)stream.Close(); };
+  std::array<std::byte, 16384> chunk{};
+  while (send(pair[0], chunk.data(), chunk.size(), MSG_NOSIGNAL) >= 0) {
+  }
+  if (errno != EAGAIN) co_return absl::ErrnoToStatus(errno, "fill socket");
+  worker.Spawn(AbortPendingSend(worker, bycorf::TcpStream(connection),
+                                stream.BorrowStorage()));
+  auto status = co_await stream.WriteAll(chunk);
+  co_return Check(!status.ok() && !stream.IsOpen(),
+                  "abort retires a blocked send while the peer stays open");
+}
+
+TEST(TcpBufferedRead, AbortRetiresBlockedSend) {
+  bycorf::test::RunOnWorker(CheckBlockedSendAbort);
+}
+
 TEST(TcpBufferedRead, PeerCloseStatus) {
   bycorf::test::RunOnWorker(CheckPeerCloses);
 }

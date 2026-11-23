@@ -234,6 +234,10 @@ class TcpStream {
   // bytes after the fd is duplicated.
   Task<absl::Status> PauseRead();
 
+  // Interrupt both directions and close a stream owned exclusively by the
+  // caller. A duplicated kernel socket shares shutdown. Join pending I/O
+  // before freeing its buffers or releasing the stream's storage borrow.
+  void Abort() noexcept;
   absl::Status Close() noexcept;
 
  private:

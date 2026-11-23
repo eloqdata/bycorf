@@ -57,7 +57,11 @@ Connection closure cancels an armed receive by its operation identity before
 closing the descriptor. A receive may otherwise retain the kernel socket after
 `close`, delaying peer EOF and session replacement. Cancellation preserves a
 duplicated live socket during worker handoff; it does not shut down that shared
-socket. Session storage borrows remain independent of transport retirement.
+socket. An exclusive stream owner can use `Abort` to shut down both directions
+and wake a backpressured send before joining outstanding I/O. TLS application
+reads can deliver peer data while another coroutine is sending on the same
+worker. TLS control records produced by a read still use the ordered output
+path. Session storage borrows remain independent of transport retirement.
 
 ## DPDK and native FreeBSD TCP
 
