@@ -205,6 +205,7 @@ absl::Status Worker::Init(const WorkerOptions& options) {
 
   IoBackendOptions backend_options;
   backend_options.ring_entries_ = options.ring_entries_;
+  backend_options.idle_timeout_ms_ = options.idle_timeout_ms_;
   backend_options.recv_buffer_count_ = options.recv_buffer_count_;
   // DPDK receives use adapter-owned buffers instead of a kernel receive ring.
   auto kernel_options = backend_options;
@@ -345,7 +346,7 @@ Connection* Worker::AddConnection(Connection connection) {
   auto owned = std::make_unique<Connection>(std::move(connection));
   Connection* raw = owned.get();
   raw->id_ = next_connection_id_++;
-  raw->last_active_ms_ = NowMs();
+  raw->last_active_ms_ = options_.idle_timeout_ms_ > 0 ? NowMs() : 0;
   connections_[raw->id_] = std::move(owned);
   ++active_connection_count_;
   g_active_connections.fetch_add(1, std::memory_order_relaxed);

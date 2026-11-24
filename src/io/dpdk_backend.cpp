@@ -225,6 +225,7 @@ class DpdkBackend::Impl {
   unsigned id = 0;
   bool initialized = false, polling = false;
   std::size_t buffer_size = 4096;
+  bool track_idle_time = false;
   unsigned next_client_port = 0;
   detail::DpdkSocketTable sockets;
   using SocketPin = detail::DpdkSocketTable::Pin;
@@ -553,7 +554,7 @@ class DpdkBackend::Impl {
       reads.erase(reads.begin() + i);
       if (got) {
         c->received_buffers_.push_back({0, static_cast<std::uint32_t>(got), 0});
-        c->last_active_ms_ = NowNs() / 1'000'000;
+        if (track_idle_time) c->last_active_ms_ = NowNs() / 1'000'000;
       } else if (!error)
         c->recv_eof_ = true;
       else if (error != ECANCELED)
@@ -878,6 +879,7 @@ absl::Status DpdkBackend::Init(const IoBackendOptions& options,
   impl_->worker = worker;
   impl_->id = worker->id();
   impl_->buffer_size = options.recv_buffer_size_;
+  impl_->track_idle_time = options.idle_timeout_ms_ > 0;
   // Embed the owner in the handle so an accidental transfer cannot alias an
   // unrelated socket that happens to occupy the same slot on another worker.
   impl_->sockets.Configure(kFirstHandle | (impl_->id << kHandleBits),

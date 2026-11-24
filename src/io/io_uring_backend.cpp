@@ -821,7 +821,7 @@ void IoUringBackend::HandleMultishotRecv(Connection* connection,
   bool notify_reader = false;
 
   if (cqe->res > 0 && (has_buffer || !use_multishot)) {
-    connection->last_active_ms_ = NowMs();
+    if (options_.idle_timeout_ms_ > 0) connection->last_active_ms_ = NowMs();
     connection->received_buffers_.push_back(
         ReceivedBuffer{.buffer_id_ = buffer_id,
                        .size_ = static_cast<std::uint32_t>(cqe->res)});
