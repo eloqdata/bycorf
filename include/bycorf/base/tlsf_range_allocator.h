@@ -24,7 +24,7 @@
 #include <limits>
 #include <span>
 
-namespace bycorf::detail {
+namespace bycorf {
 
 // Allocates intervals of integer units without owning or touching their
 // payload. A caller can interpret a unit as a DMA page, a byte, or another
@@ -290,4 +290,4 @@ class TlsfRangeAllocator {
       free_lists_{};
 };
 
-}  // namespace bycorf::detail
+}  // namespace bycorf
