@@ -93,6 +93,26 @@ bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
   connection->recv_mode_ = bycorf::RecvMode::kOneShot;
   connection->read_buffer_.resize(payload.size());
   std::memcpy(connection->read_buffer_.data(), payload.data(), payload.size());
+  // Start the borrowed read inside a descriptor. The callback must see
+  // backend storage itself; byte equality alone would miss a staging copy.
+  const auto plain = stream.GetPlaintextView();
+  if (!plain) co_return absl::InternalError("expected a plaintext view");
+  connection->received_buffers_.push_back(
+      {.buffer_id_ = 0, .size_ = 4096, .offset_ = 7});
+  const auto* expected = connection->read_buffer_.data() + 7;
+  bool visited = false;
+  auto consume = [&](std::span<const std::byte> bytes) {
+    visited = bytes.data() == expected && bytes.size() == 4096 - 7;
+  };
+  connection->last_error_ = absl::UnavailableError("injected receive error");
+  auto visit = co_await plain->VisitSome(consume);
+  if (!absl::IsUnavailable(visit.status()) || visited ||
+      QueuedBytes(*connection) != 4096 - 7)
+    co_return absl::InternalError("failed visit consumed receive bytes");
+  visit = co_await plain->VisitSome(consume);
+  if (!visit.ok() || *visit != 4096 - 7 || !visited ||
+      !connection->received_buffers_.empty())
+    co_return absl::InternalError("visitor did not consume the front buffer");
   for (std::uint32_t offset = 0; offset < payload.size(); offset += 4096) {
     connection->received_buffers_.push_back(
         {.buffer_id_ = 0, .size_ = offset + 4096, .offset_ = offset});

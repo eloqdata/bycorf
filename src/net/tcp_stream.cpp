@@ -130,6 +130,61 @@ class CancelRecvOperation final : public IoCompletion {
   int result_ = 0;
 };
 
+bool WaitForReceived(Connection* connection, std::coroutine_handle<> awaiting,
+                     std::optional<absl::Status>& immediate_status) {
+  if (connection == nullptr || connection->worker_ == nullptr) {
+    immediate_status =
+        absl::Status(absl::StatusCode::kInvalidArgument, "stream is not bound");
+    return false;
+  }
+  if (connection->state_ != ConnectionState::kActive || connection->closed_ ||
+      connection->closing_) {
+    immediate_status = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                    "read on closed stream");
+    return false;
+  }
+  if (!connection->received_buffers_.empty() || connection->recv_eof_ ||
+      !connection->last_error_.ok()) {
+    return false;
+  }
+  if (connection->read_inflight_ || connection->read_waiter_) {
+    immediate_status = absl::Status(absl::StatusCode::kFailedPrecondition,
+                                    "concurrent read is not allowed");
+    return false;
+  }
+
+  const auto arm_status = connection->worker_->EnsureRecvArmed(connection);
+  if (!arm_status.ok()) {
+    immediate_status = arm_status;
+    return false;
+  }
+
+  connection->read_inflight_ = true;
+  connection->read_waiter_ = awaiting;
+  return true;
+}
+
+absl::Status CheckReceived(Connection* connection) {
+  if (connection == nullptr) {
+    return absl::Status(absl::StatusCode::kInvalidArgument,
+                        "stream is not bound");
+  }
+  if (!connection->last_error_.ok()) {
+    absl::Status status = connection->last_error_;
+    connection->last_error_ = absl::OkStatus();
+    return status;
+  }
+  if (connection->recv_eof_ && connection->received_buffers_.empty()) {
+    return absl::OkStatus();
+  }
+  if (connection->received_buffers_.empty()) {
+    return absl::Status(absl::StatusCode::kUnavailable,
+                        "no received data available");
+  }
+
+  return absl::OkStatus();
+}
+
 }  // namespace
 
 ReadOperation::ReadOperation(Connection* connection,
@@ -146,57 +201,14 @@ bool ReadOperation::await_suspend(std::coroutine_handle<> awaiting) {
     immediate_result_ = std::size_t{0};
     return false;
   }
-  if (connection_ == nullptr || connection_->worker_ == nullptr) {
-    immediate_status_ =
-        absl::Status(absl::StatusCode::kInvalidArgument, "stream is not bound");
-    return false;
-  }
-  if (connection_->state_ != ConnectionState::kActive || connection_->closed_ ||
-      connection_->closing_) {
-    immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
-                                     "read on closed stream");
-    return false;
-  }
-  if (!connection_->received_buffers_.empty() || connection_->recv_eof_ ||
-      !connection_->last_error_.ok()) {
-    return false;
-  }
-  if (connection_->read_inflight_ || connection_->read_waiter_) {
-    immediate_status_ = absl::Status(absl::StatusCode::kFailedPrecondition,
-                                     "concurrent read is not allowed");
-    return false;
-  }
-
-  const auto arm_status = connection_->worker_->EnsureRecvArmed(connection_);
-  if (!arm_status.ok()) {
-    immediate_status_ = arm_status;
-    return false;
-  }
-
-  connection_->read_inflight_ = true;
-  connection_->read_waiter_ = awaiting_;
-  return true;
+  return WaitForReceived(connection_, awaiting, immediate_status_);
 }
 
 absl::StatusOr<std::size_t> ReadOperation::await_resume() noexcept {
   if (immediate_status_.has_value()) return *immediate_status_;
   if (immediate_result_.has_value()) return *immediate_result_;
-  if (connection_ == nullptr) {
-    return absl::Status(absl::StatusCode::kInvalidArgument,
-                        "stream is not bound");
-  }
-  if (!connection_->last_error_.ok()) {
-    absl::Status status = connection_->last_error_;
-    connection_->last_error_ = absl::OkStatus();
-    return status;
-  }
-  if (connection_->recv_eof_ && connection_->received_buffers_.empty()) {
-    return std::size_t{0};
-  }
-  if (connection_->received_buffers_.empty()) {
-    return absl::Status(absl::StatusCode::kUnavailable,
-                        "no received data available");
-  }
+  if (auto status = CheckReceived(connection_); !status.ok()) return status;
+  if (connection_->received_buffers_.empty()) return std::size_t{0};
 
   std::size_t copied = 0;
   do {
@@ -236,6 +248,32 @@ void ReadOperation::Complete(Worker& worker, int result, unsigned flags) {
   (void)worker;
   (void)result;
   (void)flags;
+}
+
+bool detail::ReceiveVisit::await_suspend(std::coroutine_handle<> awaiting) {
+  return WaitForReceived(connection_, awaiting, immediate_status_);
+}
+
+absl::StatusOr<std::span<const std::byte>> detail::ReceiveVisit::Front() const {
+  if (immediate_status_) return *immediate_status_;
+  if (auto status = CheckReceived(connection_); !status.ok()) return status;
+  if (connection_->received_buffers_.empty())
+    return std::span<const std::byte>{};
+
+  const ReceivedBuffer received = connection_->received_buffers_.front();
+  const auto length = received.size_ - received.offset_;
+  auto bytes = connection_->worker_->ViewMultishotBuffer(
+      connection_, received.buffer_id_, received.offset_, length);
+  if (bytes.size() != length) {
+    return absl::InternalError("invalid receive buffer view");
+  }
+  return bytes;
+}
+
+void detail::ReceiveVisit::ConsumeFront() {
+  const auto id = connection_->received_buffers_.front().buffer_id_;
+  connection_->received_buffers_.pop_front();
+  connection_->worker_->ReleaseReceivedBuffer(connection_, id);
 }
 
 WriteOperation::WriteOperation(Connection* connection,

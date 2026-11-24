@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -64,6 +65,48 @@ class ReadOperation final : public IoCompletion {
   std::optional<std::size_t> immediate_result_;
   bool drain_buffered_ = false;
 };
+
+namespace detail {
+
+// Keep transport readiness and recycling shared across consumer types.
+class ReceiveVisit {
+ public:
+  bool await_ready() const noexcept { return false; }
+  bool await_suspend(std::coroutine_handle<> awaiting);
+
+ protected:
+  explicit ReceiveVisit(Connection* connection) : connection_(connection) {}
+  absl::StatusOr<std::span<const std::byte>> Front() const;
+  void ConsumeFront();
+
+ private:
+  Connection* connection_;
+  std::optional<absl::Status> immediate_status_;
+};
+
+template <typename Consumer>
+class VisitReadOperation final : public ReceiveVisit {
+ public:
+  VisitReadOperation(Connection* connection, Consumer&& consume)
+      : ReceiveVisit(connection), consume_(std::forward<Consumer>(consume)) {}
+
+  absl::StatusOr<std::size_t> await_resume() {
+    auto bytes = Front();
+    if (!bytes.ok()) return bytes.status();
+    const auto size = bytes->size();
+    if (size != 0) {
+      // The queue owns this span until the synchronous consumer returns.
+      consume_(*bytes);
+      ConsumeFront();
+    }
+    return size;
+  }
+
+ private:
+  Consumer consume_;
+};
+
+}  // namespace detail
 
 class WriteOperation final : public IoCompletion {
  public:
@@ -208,6 +251,15 @@ class TcpStream {
     // Read from the front receive buffer, returning zero at EOF.
     ReadOperation ReadSome(std::span<std::byte> buffer) const noexcept {
       return ReadOperation(connection_, buffer);
+    }
+    // Wait for one received chunk, visit it synchronously, then recycle it.
+    // The consumer must live through the await, must not reenter the stream,
+    // and may use the bytes only during its call. EOF returns zero without
+    // invoking the consumer.
+    template <typename Consumer>
+    auto VisitSome(Consumer&& consume) const {
+      return detail::VisitReadOperation<Consumer>(
+          connection_, std::forward<Consumer>(consume));
     }
     // Send a prefix. Keep the source alive through completion.
     WriteOperation WriteSome(std::span<const std::byte> buffer) const noexcept {
