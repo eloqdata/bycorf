@@ -15,10 +15,12 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include <barrier>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -99,6 +101,60 @@ class TaskTransfer : public testing::Test {
     bycorf::MutableCurrentTaskClass() = bycorf::TaskClass::kForeground;
   }
 };
+
+TEST(FrameArena, CoalescesRemoteAndLocalReturnsAcrossSizes) {
+  bycorf::detail::CoroutineFramePool pool;
+  auto* first = pool.Allocate(512);
+  auto* second = pool.Allocate(1024);
+  // The first two blocks use 9 and 17 units including their headers. Occupy
+  // the rest so the joined request must reclaim both adjacent ranges.
+  constexpr auto tail_bytes = 4 * 1024 * 1024 - (9 + 17) * 64;
+  auto* guard = pool.Allocate(tail_bytes - 63);
+  std::thread remote([&] {
+    bycorf::detail::CoroutineFramePool other;
+    other.Release(first);
+  });
+  pool.Release(second);
+  remote.join();
+  auto* joined = pool.Allocate(1500);
+  EXPECT_EQ(joined, first);
+  std::memset(joined, 1, 1500);
+  pool.Release(joined);
+  pool.Release(guard);
+}
+
+TEST(FrameArena, BoundsExactSizeReuseTo32KiB) {
+  bycorf::detail::CoroutineFramePool pool;
+  // Each frame occupies 1024 bytes including its header and alignment.
+  void* frames[33];
+  for (auto& frame : frames) frame = pool.Allocate(961);
+  for (auto* frame : frames) pool.Release(frame);
+  // The 33rd return exceeds the shared budget and goes directly to TLSF.
+  auto* reused = pool.Allocate(961);
+  EXPECT_EQ(reused, frames[31]);
+  pool.Release(reused);
+}
+
+TEST(FrameArena, HandlesExhaustionAndOwnerExitDuringRemoteReturns) {
+  using Pool = bycorf::detail::CoroutineFramePool;
+  std::vector<void*> frames;
+  std::barrier start(2);
+  std::thread owner([&] {
+    Pool pool;
+    for (int i = 0; i < 256; ++i) frames.push_back(pool.Allocate(32768));
+    start.arrive_and_wait();
+  });
+  Pool receiver;
+  start.arrive_and_wait();
+  for (std::size_t i = 1; i < frames.size(); ++i) {
+    std::memset(frames[i], 1, 32768);
+    receiver.Release(frames[i]);
+  }
+  owner.join();
+  std::memset(frames[0], 2, 32768);
+  receiver.Release(frames[0]);
+  EXPECT_THROW(receiver.Allocate(SIZE_MAX), std::bad_alloc);
+}
 
 TEST_F(TaskTransfer, SequentialAwaitsBoundNativeStack) {
   EXPECT_TRUE(RunTask(Sequential(100000), 4999950000ULL));
