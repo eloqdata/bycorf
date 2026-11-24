@@ -106,7 +106,10 @@ TEST(FrameArena, CoalescesRemoteAndLocalReturnsAcrossSizes) {
   bycorf::detail::CoroutineFramePool pool;
   auto* first = pool.Allocate(512);
   auto* second = pool.Allocate(1024);
-  auto* guard = pool.Allocate(64);
+  // The first two blocks use 9 and 17 units including their headers. Occupy
+  // the rest so the joined request must reclaim both adjacent ranges.
+  constexpr auto tail_bytes = 4 * 1024 * 1024 - (9 + 17) * 64;
+  auto* guard = pool.Allocate(tail_bytes - 63);
   std::thread remote([&] {
     bycorf::detail::CoroutineFramePool other;
     other.Release(first);
@@ -118,6 +121,18 @@ TEST(FrameArena, CoalescesRemoteAndLocalReturnsAcrossSizes) {
   std::memset(joined, 1, 1500);
   pool.Release(joined);
   pool.Release(guard);
+}
+
+TEST(FrameArena, BoundsExactSizeReuseTo32KiB) {
+  bycorf::detail::CoroutineFramePool pool;
+  // Each frame occupies 1024 bytes including its header and alignment.
+  void* frames[33];
+  for (auto& frame : frames) frame = pool.Allocate(961);
+  for (auto* frame : frames) pool.Release(frame);
+  // The 33rd return exceeds the shared budget and goes directly to TLSF.
+  auto* reused = pool.Allocate(961);
+  EXPECT_EQ(reused, frames[31]);
+  pool.Release(reused);
 }
 
 TEST(FrameArena, HandlesExhaustionAndOwnerExitDuringRemoteReturns) {
