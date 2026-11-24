@@ -28,6 +28,9 @@ namespace bycorf::detail {
 struct CoroutineFramePool::Arena {
   static constexpr std::size_t kBytes = 4 * 1024 * 1024;
   static constexpr std::size_t kUnit = 64;
+  static constexpr std::uint32_t kMaxCachedUnits = 1024 / kUnit;
+  static constexpr std::uint32_t kCacheBudgetUnits = 32 * 1024 / kUnit;
+
   struct alignas(std::max_align_t) Block {
     union {
       Arena* owner;
@@ -40,6 +43,10 @@ struct CoroutineFramePool::Arena {
   alignas(Block) std::byte storage[kBytes];
   TlsfRangeAllocator::Metadata metadata[kBytes / kUnit];
   TlsfRangeAllocator ranges;
+  // The owner keeps these blocks reserved in ranges for exact-size reuse.
+  // They have no live frames and do not keep a detached arena alive.
+  Block* recent[kMaxCachedUnits]{};
+  std::uint32_t cached_units = 0;
   std::uint32_t live = 0;
   std::atomic<Block*> returned{nullptr};
   std::atomic<std::uint32_t> detached_refs{0};
@@ -49,12 +56,34 @@ struct CoroutineFramePool::Arena {
     if (!ranges.Init(metadata)) std::abort();
   }
 
-  void Free(Block* b) noexcept {
+  void ReturnRange(Block* b) noexcept {
     const auto offset = (reinterpret_cast<std::uintptr_t>(b) -
                          reinterpret_cast<std::uintptr_t>(storage)) /
                         kUnit;
     ranges.Free({static_cast<std::uint32_t>(offset), b->units});
+  }
+
+  void FlushCache() noexcept {
+    for (Block*& head : recent) {
+      while (head) {
+        Block* block = head;
+        head = block->next;
+        ReturnRange(block);
+      }
+    }
+    cached_units = 0;
+  }
+
+  void Free(Block* b) noexcept {
     --live;
+    if (b->units <= kMaxCachedUnits &&
+        cached_units + b->units <= kCacheBudgetUnits) {
+      cached_units += b->units;
+      b->next = recent[b->units - 1];
+      recent[b->units - 1] = b;
+      return;
+    }
+    ReturnRange(b);
   }
 
   void Drain() noexcept {
@@ -113,7 +142,24 @@ void* CoroutineFramePool::Allocate(std::size_t requested) {
       arena_->Drain();
       const auto units =
           static_cast<std::uint32_t>((bytes + Arena::kUnit - 1) / Arena::kUnit);
-      if (auto range = arena_->ranges.Allocate(units)) {
+      if (units <= Arena::kMaxCachedUnits) {
+        auto*& slot = arena_->recent[units - 1];
+        if (auto* b = slot) {
+          slot = b->next;
+          arena_->cached_units -= units;
+          b->owner = arena_;
+          ++arena_->live;
+          return b + 1;
+        }
+      }
+      auto range = arena_->ranges.Allocate(units);
+      if (!range && arena_->cached_units != 0) {
+        // Return every cached range so adjacent blocks can satisfy this
+        // request.
+        arena_->FlushCache();
+        range = arena_->ranges.Allocate(units);
+      }
+      if (range) {
         void* start = arena_->storage + range.offset * Arena::kUnit;
         auto* block = ::new (start) Block{{arena_}, units};
         ++arena_->live;
