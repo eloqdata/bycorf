@@ -80,6 +80,7 @@ struct Connection {
   Worker* worker_ = nullptr;
   std::coroutine_handle<> read_waiter_{};
   absl::Status last_error_ = absl::OkStatus();
+  // Zero when idle expiry is disabled. Only successful receives refresh it.
   std::int64_t last_active_ms_ = 0;
   RegisteredFile file_;
   std::uint32_t inflight_ops_ = 0;

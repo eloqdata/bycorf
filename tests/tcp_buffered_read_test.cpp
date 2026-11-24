@@ -68,6 +68,7 @@ bycorf::Task<absl::Status> SendLater(bycorf::Worker& worker, int fd) {
   co_return Send(fd, "later");
 }
 
+template <bool track_idle_time>
 bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
   int sockets[2];
   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
@@ -186,6 +187,7 @@ bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
   connection->read_buffer_.clear();
   // No bytes are queued now: the first read must suspend, but once the peer
   // sends five bytes it must return without waiting for the rest of output.
+  const auto initial_activity = connection->last_active_ms_;
   worker.Spawn(SendLater(worker, sockets[1]));
   read = co_await stream.ReadSomeBuffered(output);
   status =
@@ -194,6 +196,14 @@ bycorf::Task<absl::Status> CheckReads(bycorf::Worker& worker) {
                                  *read) == "later",
             "buffered read waits only for initial data");
   if (!status.ok()) co_return status;
+
+  if constexpr (track_idle_time) {
+    EXPECT_GT(initial_activity, 0);
+    EXPECT_GT(connection->last_active_ms_, initial_activity);
+  } else {
+    EXPECT_EQ(initial_activity, 0);
+    EXPECT_EQ(connection->last_active_ms_, 0);
+  }
 
   status = Send(sockets[1], "before eof");
   if (!status.ok()) co_return status;
@@ -376,7 +386,11 @@ TEST(TcpBufferedRead, OneShotPeerCloseStatus) {
 }
 
 TEST(TcpBufferedRead, QueuedAndLiveReads) {
-  bycorf::test::RunOnWorker(CheckReads);
+  bycorf::test::RunOnWorker(CheckReads<false>);
+}
+
+TEST(TcpBufferedRead, LiveReadRefreshesIdleTimeout) {
+  bycorf::test::RunOnWorker(CheckReads<true>, {.idle_timeout_ms_ = 60000});
 }
 
 TEST(TcpBufferedRead, CloseDoesNotShrink) {
