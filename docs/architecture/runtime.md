@@ -47,6 +47,12 @@ the selected toolchain and build configuration. Awaited child frames remain
 owned by the awaiting `Task` object, including when shutdown destroys a
 suspended root and its child chain.
 
+Coroutine frames share a variable-size arena on each allocating thread.
+Frames retain stable addresses. The owner coalesces adjacent free ranges and
+drains remote returns before allocating. Frames that outlive the owner keep
+the arena alive until their destruction. A standalone heap allocation serves
+requests that cannot fit in the arena, including during fragmentation.
+
 ## Sleep and wakeups
 
 The worker alone decides when its thread can block. It prepares source

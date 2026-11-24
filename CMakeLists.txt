@@ -166,6 +166,7 @@ add_library(bycorf
   src/net/http_service.cpp
   src/net/tcp_service.cpp
   src/runtime/foreign_executor.cpp
+  src/runtime/coroutine_frame_pool.cpp
   src/runtime/worker.cpp
   src/runtime/runtime.cpp
   src/net/tcp_listener.cpp
@@ -548,7 +549,8 @@ if (BYCORF_BUILD_TESTS)
   target_include_directories(bycorf_dpdk_socket_table_tests PRIVATE src/io)
   bycorf_discover_tests(bycorf_dpdk_socket_table_tests 30 "runtime;net;unit")
 
-  add_executable(bycorf_task_tests tests/task_transfer_test.cpp)
+  add_executable(bycorf_task_tests tests/task_transfer_test.cpp
+    src/runtime/coroutine_frame_pool.cpp)
   target_link_libraries(bycorf_task_tests PRIVATE GTest::gtest)
   target_include_directories(bycorf_task_tests PRIVATE include)
   # Use this build's real optimization level and public coroutine compile
